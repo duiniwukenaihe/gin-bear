@@ -1,0 +1,17 @@
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build
+bear
+*.exe
+
+# Claude Code
+.claude/
+.agents/
+
+# Local
+server.log

@@ -1,0 +1,5 @@
+success: "Operation successful"
+error_not_found: "The requested resource was not found"
+error_invalid_params: "Invalid parameters provided"
+error_unauthorized: "Unauthorized access"
+hello_bear: "Hello, Polar Bear from I18n!"

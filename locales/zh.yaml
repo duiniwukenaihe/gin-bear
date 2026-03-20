@@ -1,0 +1,5 @@
+success: "操作成功"
+error_not_found: "请求的资源未找到"
+error_invalid_params: "参数校验失败"
+error_unauthorized: "未授权访问"
+hello_bear: "你好，来自 I18n 的北极熊！"
