@@ -2,6 +2,7 @@ package bear
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,12 +12,21 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func resetTestInjector() {
 	injector = &BeanFactory{
 		beans: make(map[reflect.Type]any),
 	}
+}
+
+func resetGinModeForTest(t *testing.T) {
+	t.Helper()
+	gin.SetMode(gin.DebugMode)
+	t.Cleanup(func() {
+		gin.SetMode(gin.DebugMode)
+	})
 }
 
 func TestIgniteAllowsDatabaseDisabledWithoutDSN(t *testing.T) {
@@ -159,5 +169,224 @@ func TestBindingErrorUsesStableClientMessage(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "Invalid request") {
 		t.Fatalf("response missing stable validation message: %s", w.Body.String())
+	}
+}
+
+func TestIgniteConfiguresGinReleaseMode(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Server.Mode = "release"
+	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+
+	Ignite(cfg)
+
+	if got := gin.Mode(); got != gin.ReleaseMode {
+		t.Fatalf("gin mode = %q", got)
+	}
+}
+
+func TestIgniteRejectsWeakJWTSecretInProduction(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Server.Mode = "release"
+	cfg.Auth.JWTSecret = "bear-secret"
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected weak JWT secret panic")
+		}
+		if !strings.Contains(r.(string), "weak jwt secret") {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	Ignite(cfg)
+}
+
+func TestIgniteUsesBearEnvProductionMode(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	t.Setenv("BEAR_ENV", "production")
+	t.Setenv("GIN_MODE", "")
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+
+	Ignite(cfg)
+
+	if got := gin.Mode(); got != gin.ReleaseMode {
+		t.Fatalf("gin mode = %q", got)
+	}
+}
+
+func TestIgniteAppliesTrustedProxies(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Server.TrustedProxies = []string{"127.0.0.1"}
+
+	app := Ignite(cfg)
+	app.GET("/ip", func(c *gin.Context) {
+		c.String(http.StatusOK, c.ClientIP())
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ip", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	w := httptest.NewRecorder()
+
+	app.ServeHTTP(w, req)
+
+	if got := w.Body.String(); got != "203.0.113.9" {
+		t.Fatalf("client ip = %q", got)
+	}
+}
+
+type testReadyChecker struct {
+	name string
+	err  error
+}
+
+func (c *testReadyChecker) Name() string {
+	return c.name
+}
+
+func (c *testReadyChecker) CheckReady(ctx context.Context) error {
+	return c.err
+}
+
+type authTestController struct{}
+
+func (c *authTestController) Name() string {
+	return "AuthTestController"
+}
+
+func (c *authTestController) Build(b *Bear) {
+	b.Handle("GET", "/public/ping", func() string { return "pong" })
+	b.Handle("GET", "/private/ping", func() string { return "secret" })
+}
+
+func TestHealthEndpointsExposeLiveAndReady(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+
+	app := Ignite(cfg)
+	app.EnableHealth()
+	app.ApplyAll(context.Background())
+
+	for _, path := range []string{"/health", "/live", "/ready"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		app.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s status = %d body = %s", path, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestReadyEndpointFailsWhenDependencyIsNotReady(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+
+	app := Ignite(cfg)
+	app.Beans(&testReadyChecker{name: "broken", err: errors.New("not connected")})
+	app.EnableHealth()
+	app.ApplyAll(context.Background())
+
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	w := httptest.NewRecorder()
+	app.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "broken") {
+		t.Fatalf("response missing failing dependency: %s", w.Body.String())
+	}
+}
+
+func TestAuthFairingUsesConfiguredPublicPaths(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Auth.PublicPaths = []string{"/public/*"}
+
+	app := Ignite(cfg)
+	app.Attach(NewAuthFairing())
+	app.Mount("", &authTestController{})
+	app.ApplyAll(context.Background())
+
+	publicReq := httptest.NewRequest(http.MethodGet, "/public/ping", nil)
+	publicW := httptest.NewRecorder()
+	app.ServeHTTP(publicW, publicReq)
+	if publicW.Code != http.StatusOK {
+		t.Fatalf("public status = %d body = %s", publicW.Code, publicW.Body.String())
+	}
+
+	privateReq := httptest.NewRequest(http.MethodGet, "/private/ping", nil)
+	privateW := httptest.NewRecorder()
+	app.ServeHTTP(privateW, privateReq)
+	if privateW.Code != http.StatusBadRequest {
+		t.Fatalf("private status = %d body = %s", privateW.Code, privateW.Body.String())
+	}
+}
+
+func TestJWTUtilRejectsUnexpectedSigningMethod(t *testing.T) {
+	util := NewJWTUtil("replace-with-at-least-32-random-characters", 24)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS512, CustomClaims{
+		UserID: 1,
+		Email:  "a@example.com",
+	})
+	tokenStr, err := token.SignedString([]byte(util.Config.Secret))
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+
+	if _, err := util.ParseToken(tokenStr); err == nil {
+		t.Fatal("expected signing method rejection")
+	}
+}
+
+func TestBuildGormConfigAppliesSlowQueryLogger(t *testing.T) {
+	cfg := &DBConfig{SlowQueryThreshold: "250ms"}
+
+	gormCfg := buildGormConfig(cfg)
+
+	if gormCfg.Logger == nil {
+		t.Fatal("expected gorm logger to be configured")
+	}
+}
+
+func TestApplyEnvOverridesProductionSecretsAndDependencies(t *testing.T) {
+	cfg := NewSysConfig()
+	t.Setenv("JWT_SECRET", "env-secret-with-at-least-32-characters")
+	t.Setenv("REDIS_ADDR", "redis.example:6379")
+	t.Setenv("POSTGRES_HOST", "db.example")
+	t.Setenv("POSTGRES_PASSWORD", "db-secret")
+
+	applyEnvOverrides(cfg)
+
+	if cfg.Auth.JWTSecret != "env-secret-with-at-least-32-characters" {
+		t.Fatalf("jwt secret = %q", cfg.Auth.JWTSecret)
+	}
+	if cfg.Redis.Addr != "redis.example:6379" {
+		t.Fatalf("redis addr = %q", cfg.Redis.Addr)
+	}
+	if cfg.DB.Host != "db.example" {
+		t.Fatalf("db host = %q", cfg.DB.Host)
+	}
+	if cfg.DB.Password != "db-secret" {
+		t.Fatalf("db password = %q", cfg.DB.Password)
 	}
 }

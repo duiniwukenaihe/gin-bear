@@ -13,7 +13,7 @@ import (
 var repoURL string
 
 func init() {
-	newCmd.Flags().StringVarP(&repoURL, "repo", "r", "https://github.com/polarbear-workshop/gin-bear.git", "Repository URL to clone from")
+	newCmd.Flags().StringVarP(&repoURL, "repo", "r", "https://github.com/duiniwukenaihe/gin-bear.git", "Repository URL to clone from")
 	rootCmd.AddCommand(newCmd)
 }
 
@@ -46,7 +46,9 @@ var newCmd = &cobra.Command{
 		// 3. Update go.mod
 		fmt.Println("Updating go.mod...")
 		goModPath := filepath.Join(projectName, "go.mod")
-		updateFile(goModPath, "module bear", "module "+projectName)
+		rewriteFile(goModPath, func(content string) string {
+			return rewriteGoModModule(content, projectName)
+		})
 
 		// 4. Replace imports in all .go files
 		fmt.Println("Renaming imports...")
@@ -55,11 +57,9 @@ var newCmd = &cobra.Command{
 				return err
 			}
 			if !info.IsDir() && strings.HasSuffix(path, ".go") {
-				// Replace "bear/pkg" with "project/pkg"
-				// Be careful with "bear" string.
-				// Our module is named "bear". imports are like "bear/pkg/bear".
-				// So replacing "\"bear/" with "\"projectName/" is safe.
-				updateFile(path, "\"bear/", "\""+projectName+"/")
+				rewriteFile(path, func(content string) string {
+					return rewriteGoImports(content, projectName)
+				})
 			}
 			return nil
 		})
@@ -81,4 +81,29 @@ func updateFile(path, old, new string) error {
 	}
 	newContent := strings.ReplaceAll(string(content), old, new)
 	return os.WriteFile(path, []byte(newContent), 0644)
+}
+
+func rewriteFile(path string, rewrite func(string) string) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(rewrite(string(content))), 0644)
+}
+
+func rewriteGoModModule(content, moduleName string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "module ") {
+			lines[i] = "module " + moduleName
+			return strings.Join(lines, "\n")
+		}
+	}
+	return "module " + moduleName + "\n\n" + content
+}
+
+func rewriteGoImports(content, moduleName string) string {
+	content = strings.ReplaceAll(content, "\"bear/", "\""+moduleName+"/")
+	content = strings.ReplaceAll(content, "\"github.com/duiniwukenaihe/gin-bear/", "\""+moduleName+"/")
+	return content
 }

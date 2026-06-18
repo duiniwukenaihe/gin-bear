@@ -6,7 +6,8 @@
 *~
 
 # Build
-bear
+/bear
+/bear.exe
 *.exe
 
 # Claude Code

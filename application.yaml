@@ -13,5 +13,11 @@ database:
 redis:
   addr: "localhost:6379"
 
-jwt:
-  secret: "your-secret-key"
+auth:
+  jwt_secret: "bear-secret"
+  token_expire_hours: 24
+  public_paths:
+    - "/health"
+    - "/live"
+    - "/ready"
+    - "/swagger/*"

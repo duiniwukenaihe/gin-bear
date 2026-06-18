@@ -9,7 +9,7 @@ import (
 // AuthFairing JWT 鉴权拦截器
 type AuthFairing struct {
 	BaseFairing
-	JWTUtil     *JWTUtil          `inject:"-"`
+	JWTUtil      *JWTUtil          `inject:"-"`
 	TokenManager *AuthTokenManager `inject:"-"`
 }
 
@@ -18,10 +18,8 @@ func NewAuthFairing() *AuthFairing {
 }
 
 func (this *AuthFairing) OnRequest(ctx *gin.Context) error {
-	// 演示：如果是 /v1/hello 或 /login 或 /cache 则跳过
 	path := ctx.Request.URL.Path
-	if strings.Contains(path, "/hello") || strings.Contains(path, "/login") || strings.Contains(path, "/cache") || strings.Contains(path, "/async-task") || strings.Contains(path, "/status") ||
-		path == "/health" || path == "/ready" || path == "/live" || path == "/metrics" || strings.Contains(path, "/error-demo") || strings.HasPrefix(path, "/swagger") {
+	if isPublicAuthPath(path) {
 		return nil
 	}
 
@@ -59,4 +57,31 @@ func (this *AuthFairing) OnRequest(ctx *gin.Context) error {
 
 func (this *AuthFairing) Name() string {
 	return "AuthFairing"
+}
+
+func isPublicAuthPath(path string) bool {
+	config := GetByType[*SysConfig]()
+	if config == nil || config.Auth == nil {
+		return false
+	}
+	for _, pattern := range config.Auth.PublicPaths {
+		if publicPathMatch(path, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func publicPathMatch(path, pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	if pattern == path {
+		return true
+	}
+	if strings.HasSuffix(pattern, "/*") {
+		prefix := strings.TrimSuffix(pattern, "/*")
+		return path == prefix || strings.HasPrefix(path, prefix+"/")
+	}
+	return false
 }

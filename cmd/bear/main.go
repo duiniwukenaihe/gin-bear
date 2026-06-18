@@ -78,6 +78,7 @@ func createProject(name string) {
 		name + "/pkg/services",
 		name + "/pkg/models",
 		name + "/configs",
+		name + "/locales",
 	}
 
 	for _, d := range dirs {
@@ -90,9 +91,10 @@ func createProject(name string) {
 	mainContent := `package main
 
 import (
-	"bear/pkg/bear"
 	"context"
 	"log/slog"
+
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
 func main() {
@@ -104,6 +106,76 @@ func main() {
 }
 `
 	os.WriteFile(name+"/cmd/main.go", []byte(mainContent), 0644)
+	os.WriteFile(name+"/go.mod", []byte(fmt.Sprintf(`module %s
+
+go 1.25.0
+`, name)), 0644)
+	os.WriteFile(name+"/application.yaml", []byte(`server:
+  port: 8080
+  name: "gin-bear-app"
+
+database:
+  enabled: false
+
+auth:
+  jwt_secret: "replace-with-at-least-32-random-characters"
+  token_expire_hours: 24
+  public_paths:
+    - "/health"
+    - "/live"
+    - "/ready"
+    - "/swagger/*"
+`), 0644)
+	os.WriteFile(name+"/application-prod.yaml.example", []byte(`server:
+  port: 8080
+  name: "gin-bear-app"
+  mode: "release"
+  trusted_proxies:
+    - "127.0.0.1"
+
+database:
+  enabled: true
+  type: "postgres"
+  host: "postgres"
+  port: "5432"
+  user: "gin_bear"
+  password: "change-me"
+  dbname: "gin_bear"
+  sslmode: "disable"
+  slow_query_threshold: "500ms"
+
+auth:
+  jwt_secret: "replace-with-at-least-32-random-characters"
+  token_expire_hours: 24
+  public_paths:
+    - "/health"
+    - "/live"
+    - "/ready"
+    - "/metrics"
+    - "/swagger/*"
+`), 0644)
+	os.WriteFile(name+"/.env.example", []byte(`BEAR_ENV=prod
+GIN_MODE=release
+BEAR_SERVER_PORT=8080
+JWT_SECRET=replace-with-at-least-32-random-characters
+`), 0644)
+	os.WriteFile(name+"/Dockerfile", []byte(`FROM golang:1.25-alpine AS build
+WORKDIR /src
+RUN apk add --no-cache git ca-certificates
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/app ./cmd
+
+FROM alpine:3.22
+RUN addgroup -S app && adduser -S app -G app
+WORKDIR /app
+COPY --from=build /out/app /app/app
+COPY application.yaml /app/application.yaml
+USER app
+EXPOSE 8080
+ENTRYPOINT ["/app/app"]
+`), 0644)
 	fmt.Println("Project created successfully!")
 }
 

@@ -113,11 +113,15 @@ func Ignite(args ...any) *Bear {
 	if config.DB != nil && config.DB.Enabled && config.DB.DSN == "" && config.DB.DBName == "" {
 		panic("database configuration is required when database.enabled=true (dsn or dbname)")
 	}
+	if err := validateProductionSecurity(config); err != nil {
+		panic(err.Error())
+	}
 
 	// 注册核心底座 Bean
 	SetDefaultLogger()
 	GetInjector().Set(b)
 	GetInjector().Set(config)
+	configureGinRuntime(b, config)
 
 	// 禁用 Gin 默认日志，由核心性能中间件接管结构化日志
 	gin.DefaultWriter = io.Discard
@@ -311,6 +315,53 @@ func parseDurationOrDefault(raw string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+func configureGinRuntime(b *Bear, config *SysConfig) {
+	mode := configuredGinMode(config)
+	gin.SetMode(mode)
+	if config != nil && config.Server != nil && len(config.Server.TrustedProxies) > 0 {
+		if err := b.Engine.SetTrustedProxies(config.Server.TrustedProxies); err != nil {
+			panic(fmt.Sprintf("invalid trusted proxies: %v", err))
+		}
+	}
+}
+
+func configuredGinMode(config *SysConfig) string {
+	if config != nil && config.Server != nil && config.Server.Mode != "" {
+		return config.Server.Mode
+	}
+	if mode := os.Getenv("GIN_MODE"); mode != "" {
+		return mode
+	}
+	env := os.Getenv("BEAR_ENV")
+	if env == "prod" || env == "production" {
+		return gin.ReleaseMode
+	}
+	return gin.DebugMode
+}
+
+func isProductionMode(config *SysConfig) bool {
+	mode := configuredGinMode(config)
+	if mode == gin.ReleaseMode {
+		return true
+	}
+	env := os.Getenv("BEAR_ENV")
+	return env == "prod" || env == "production"
+}
+
+func validateProductionSecurity(config *SysConfig) error {
+	if !isProductionMode(config) {
+		return nil
+	}
+	if config == nil || config.Auth == nil {
+		return nil
+	}
+	secret := config.Auth.JWTSecret
+	if secret == "" || secret == "bear-secret" || secret == "your-secret-key" || len(secret) < 32 {
+		return fmt.Errorf("weak jwt secret is not allowed in production")
+	}
+	return nil
 }
 
 // Mount 挂载控制器

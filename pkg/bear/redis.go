@@ -12,14 +12,14 @@ import (
 
 // RedisConfig Redis 配置
 type RedisConfig struct {
-	Addr            string `yaml:"addr"`
-	Password        string `yaml:"password"`
-	DB              int    `yaml:"db"`
-	PoolSize        int    `yaml:"pool_size"`
-	MinIdleConns    int    `yaml:"min_idle_conns"`
-	DialTimeout     int    `yaml:"dial_timeout_seconds"`
-	ReadTimeout     int    `yaml:"read_timeout_seconds"`
-	WriteTimeout    int    `yaml:"write_timeout_seconds"`
+	Addr         string `yaml:"addr"`
+	Password     string `yaml:"password"`
+	DB           int    `yaml:"db"`
+	PoolSize     int    `yaml:"pool_size"`
+	MinIdleConns int    `yaml:"min_idle_conns"`
+	DialTimeout  int    `yaml:"dial_timeout_seconds"`
+	ReadTimeout  int    `yaml:"read_timeout_seconds"`
+	WriteTimeout int    `yaml:"write_timeout_seconds"`
 }
 
 // RedisAdapter Redis 适配器
@@ -34,6 +34,10 @@ func (this *RedisAdapter) Name() string {
 func (this *RedisAdapter) Shutdown() error {
 	slog.Info("Closing Redis connection pool...")
 	return this.Client.Close()
+}
+
+func (this *RedisAdapter) CheckReady(ctx context.Context) error {
+	return this.Client.Ping(ctx).Err()
 }
 
 // NewRedisAdapter 创建 Redis 适配器

@@ -3,7 +3,7 @@ package gen
 const ControllerTemplate = `package controllers
 
 import (
-	"bear/pkg/bear"
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
 type {{.Name}}Controller struct {
@@ -30,7 +30,7 @@ func (this *{{.Name}}Controller) Index() string {
 const ServiceTemplate = `package services
 
 import (
-	"bear/pkg/bear"
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
 type {{.Name}}Service struct {

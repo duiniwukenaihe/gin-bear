@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"reflect"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
 )
 
@@ -109,13 +112,7 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 		dialector = mysql.Open(dsn)
 	}
 
-	db, err := gorm.Open(dialector, &gorm.Config{
-		NamingStrategy: schema.NamingStrategy{
-			SingularTable: true, // 使用单数表名
-		},
-		// 默认开启日志，但在生产环境下可以通过配置调整
-		PrepareStmt: false, // 禁用预编译语句缓存以兼容旧版驱动或某些插件
-	})
+	db, err := gorm.Open(dialector, buildGormConfig(cfg))
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect database: %w", err)
@@ -123,7 +120,7 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 
 	// 链路追踪集成 (已禁用 - 精简模式)
 
-// 注册全局回调
+	// 注册全局回调
 	if err := db.Callback().Create().Before("gorm:create").Register("bear:audit_create", auditCreateCallback); err != nil {
 		ErrorLog("Failed to register audit create callback", "error", err)
 	}
@@ -162,6 +159,26 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 		"max_idle", maxIdle,
 		"max_open", maxOpen)
 	return &GormAdapter{DB: db}, nil
+}
+
+func buildGormConfig(cfg *DBConfig) *gorm.Config {
+	gormCfg := &gorm.Config{
+		NamingStrategy: schema.NamingStrategy{
+			SingularTable: true, // 使用单数表名
+		},
+		PrepareStmt: false, // 禁用预编译语句缓存以兼容旧版驱动或某些插件
+	}
+	if cfg != nil && cfg.SlowQueryThreshold != "" {
+		threshold := parseDurationOrDefault(cfg.SlowQueryThreshold, 0)
+		if threshold > 0 {
+			gormCfg.Logger = logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
+				SlowThreshold: threshold,
+				LogLevel:      logger.Warn,
+				Colorful:      false,
+			})
+		}
+	}
+	return gormCfg
 }
 
 // Repository 基础仓库模式 (利用 Generics)
@@ -246,6 +263,14 @@ func (this *GormAdapter) Shutdown() error {
 	}
 	Info("Closing database connection pool...")
 	return sqlDB.Close()
+}
+
+func (this *GormAdapter) CheckReady(ctx context.Context) error {
+	sqlDB, err := this.DB.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.PingContext(ctx)
 }
 
 // auditCreateCallback 审计创建回调

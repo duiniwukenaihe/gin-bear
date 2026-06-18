@@ -95,8 +95,9 @@ database:
 redis:
   addr: "localhost:6379"
 
-jwt:
-  secret: "your-secret-key"
+auth:
+  jwt_secret: "replace-with-at-least-32-random-characters"
+  token_expire_hours: 24
 ```
 
 ---
@@ -184,9 +185,9 @@ func (c *UserController) Build(b *bear.Bear) {
 }
 
 type CreateUserReq struct {
-    Username string `json:"username" validate:"required"`
-    Email    string `json:"email" validate:"required,email"`
-    Password string `json:"password" validate:"required,min=6"`
+    Username string `json:"username" binding:"required"`
+    Email    string `json:"email" binding:"required,email"`
+    Password string `json:"password" binding:"required,min=6"`
 }
 
 func (c *UserController) Create(req *CreateUserReq) (*model.User, error) {
@@ -437,8 +438,9 @@ database:
 redis:
   addr: "localhost:6379"
 
-jwt:
-  secret: "your-secret-key"
+auth:
+  jwt_secret: "replace-with-at-least-32-random-characters"
+  token_expire_hours: 24
 ```
 
 ---
@@ -526,9 +528,9 @@ func (c *UserController) Build(b *bear.Bear) {
 }
 
 type CreateUserReq struct {
-    Username string `json:"username" validate:"required"`
-    Email    string `json:"email" validate:"required,email"`
-    Password string `json:"password" validate:"required,min=6"`
+    Username string `json:"username" binding:"required"`
+    Email    string `json:"email" binding:"required,email"`
+    Password string `json:"password" binding:"required,min=6"`
 }
 
 func (c *UserController) Create(req *CreateUserReq) (*model.User, error) {

@@ -14,6 +14,7 @@ type UserConfig map[string]interface{}
 type ServerConfig struct {
 	Port              int32    `yaml:"port" json:"port" validate:"required,gt=0"`
 	Name              string   `yaml:"name" json:"name" validate:"required"`
+	Mode              string   `yaml:"mode" json:"mode"`
 	TrustedProxies    []string `yaml:"trusted_proxies" json:"trusted_proxies"`
 	HotReload         bool     `yaml:"hot_reload" json:"hot_reload"` // 是否开启热更新监听
 	MachineID         int64    `yaml:"machine_id" json:"machine_id"` // 分布式 ID 机器码 (-1 为自动)
@@ -140,24 +141,26 @@ type I18nConfig struct {
 }
 
 type AuthConfig struct {
-	StorageType      string `yaml:"storage_type" json:"storage_type"`
-	JWTSecret        string `yaml:"jwt_secret" json:"jwt_secret" validate:"required_with=JWT"`
-	TokenExpireHours int    `yaml:"token_expire_hours" json:"token_expire_hours"`
+	StorageType      string   `yaml:"storage_type" json:"storage_type"`
+	JWTSecret        string   `yaml:"jwt_secret" json:"jwt_secret" validate:"required_with=JWT"`
+	TokenExpireHours int      `yaml:"token_expire_hours" json:"token_expire_hours"`
+	PublicPaths      []string `yaml:"public_paths" json:"public_paths"`
 }
 
 type DBConfig struct {
-	Enabled         bool   `yaml:"enabled" json:"enabled"`
-	Type            string `yaml:"type" json:"type"`         // mysql, postgres (default: mysql)
-	DSN             string `yaml:"dsn" json:"dsn"`           // 直接指定 DSN
-	Host            string `yaml:"host" json:"host"`         // 主机
-	User            string `yaml:"user" json:"user"`         // 用户名
-	Password        string `yaml:"password" json:"password"` // 密码
-	DBName          string `yaml:"dbname" json:"dbname"`     // 数据库名
-	Port            string `yaml:"port" json:"port"`         // 端口
-	SSLMode         string `yaml:"sslmode" json:"sslmode"`   // SSL 模式
-	MaxIdleConns    int    `yaml:"max_idle_conns" json:"max_idle_conns"`
-	MaxOpenConns    int    `yaml:"max_open_conns" json:"max_open_conns"`
-	ConnMaxLifetime int    `yaml:"conn_max_lifetime_minutes" json:"conn_max_lifetime_minutes"`
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	Type               string `yaml:"type" json:"type"`         // mysql, postgres (default: mysql)
+	DSN                string `yaml:"dsn" json:"dsn"`           // 直接指定 DSN
+	Host               string `yaml:"host" json:"host"`         // 主机
+	User               string `yaml:"user" json:"user"`         // 用户名
+	Password           string `yaml:"password" json:"password"` // 密码
+	DBName             string `yaml:"dbname" json:"dbname"`     // 数据库名
+	Port               string `yaml:"port" json:"port"`         // 端口
+	SSLMode            string `yaml:"sslmode" json:"sslmode"`   // SSL 模式
+	MaxIdleConns       int    `yaml:"max_idle_conns" json:"max_idle_conns"`
+	MaxOpenConns       int    `yaml:"max_open_conns" json:"max_open_conns"`
+	ConnMaxLifetime    int    `yaml:"conn_max_lifetime_minutes" json:"conn_max_lifetime_minutes"`
+	SlowQueryThreshold string `yaml:"slow_query_threshold" json:"slow_query_threshold"`
 }
 
 type MetricsConfig struct {
@@ -288,7 +291,12 @@ func NewSysConfig() *SysConfig {
 			WriteTimeout:      "30s",
 			IdleTimeout:       "60s",
 		},
-		Auth:   &AuthConfig{StorageType: "file", JWTSecret: "bear-secret", TokenExpireHours: 24},
+		Auth: &AuthConfig{
+			StorageType:      "file",
+			JWTSecret:        "bear-secret",
+			TokenExpireHours: 24,
+			PublicPaths:      []string{"/health", "/live", "/ready", "/metrics", "/swagger/*", "/login"},
+		},
 		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root", SSLMode: "disable"},
 		Redis:  &RedisConfig{Addr: "localhost:6379", Password: "", DB: 0},
 		Casbin: &CasbinConfig{},
@@ -412,12 +420,7 @@ func InitConfig() *SysConfig {
 	}
 
 	// 5. 环境变量覆盖
-	if portStr := os.Getenv("BEAR_SERVER_PORT"); portStr != "" {
-		if p, err := strconv.Atoi(portStr); err == nil {
-			config.Server.Port = int32(p)
-			slog.Info("Config override by env", "BEAR_SERVER_PORT", p)
-		}
-	}
+	applyEnvOverrides(config)
 
 	// 6. 远程配置中心 (已禁用 - 精简模式)
 	// if config.ConfigCenter != nil && config.ConfigCenter.Enabled {
@@ -425,6 +428,47 @@ func InitConfig() *SysConfig {
 	// }
 
 	return validateAndReturn(config)
+}
+
+func applyEnvOverrides(config *SysConfig) {
+	if config == nil {
+		return
+	}
+	if config.Server != nil {
+		if portStr := os.Getenv("BEAR_SERVER_PORT"); portStr != "" {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				config.Server.Port = int32(p)
+				slog.Info("Config override by env", "BEAR_SERVER_PORT", p)
+			}
+		}
+	}
+	if config.Auth != nil {
+		if secret := os.Getenv("JWT_SECRET"); secret != "" {
+			config.Auth.JWTSecret = secret
+		}
+	}
+	if config.Redis != nil {
+		if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+			config.Redis.Addr = addr
+		}
+	}
+	if config.DB != nil {
+		if host := os.Getenv("POSTGRES_HOST"); host != "" {
+			config.DB.Host = host
+		}
+		if port := os.Getenv("POSTGRES_PORT"); port != "" {
+			config.DB.Port = port
+		}
+		if user := os.Getenv("POSTGRES_USER"); user != "" {
+			config.DB.User = user
+		}
+		if password := os.Getenv("POSTGRES_PASSWORD"); password != "" {
+			config.DB.Password = password
+		}
+		if dbname := os.Getenv("POSTGRES_DB"); dbname != "" {
+			config.DB.DBName = dbname
+		}
+	}
 }
 
 func validateAndReturn(config *SysConfig) *SysConfig {
