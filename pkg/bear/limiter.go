@@ -68,10 +68,11 @@ func (this *MemoryRateLimiter) Name() string {
 
 // RedisRateLimiter 基于 Redis 的分布式限流器 (阶段 44 特性)
 type RedisRateLimiter struct {
-	Adapter *RedisAdapter
-	Limit   int
-	Window  time.Duration
-	Prefix  string
+	Adapter    *RedisAdapter
+	Limit      int
+	Window     time.Duration
+	Prefix     string
+	FailClosed bool
 }
 
 func NewRedisRateLimiter(adapter *RedisAdapter, limit int, window time.Duration) *RedisRateLimiter {
@@ -100,7 +101,7 @@ return 1
 
 func (this *RedisRateLimiter) Allow(ctx context.Context, key string) bool {
 	if this.Adapter == nil || this.Adapter.Client == nil {
-		return true // Fail-open
+		return !this.FailClosed
 	}
 
 	fullKey := this.Prefix + key
@@ -108,7 +109,7 @@ func (this *RedisRateLimiter) Allow(ctx context.Context, key string) bool {
 	res, err := this.Adapter.Client.Eval(ctx, luaIncr, []string{fullKey}, this.Limit, this.Window.Milliseconds()).Int()
 	if err != nil {
 		slog.ErrorContext(ctx, "Redis RateLimiter error", "error", err)
-		return true // Redis 异常时放行
+		return !this.FailClosed
 	}
 
 	return res == 1

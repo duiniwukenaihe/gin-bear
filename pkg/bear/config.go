@@ -169,10 +169,11 @@ type MetricsConfig struct {
 }
 
 type WebSocketConfig struct {
-	HandshakeTimeout int  `yaml:"handshake_timeout_ms" json:"handshake_timeout_ms"`
-	ReadBufferSize   int  `yaml:"read_buffer_size" json:"read_buffer_size"`
-	WriteBufferSize  int  `yaml:"write_buffer_size" json:"write_buffer_size"`
-	CheckOrigin      bool `yaml:"check_origin" json:"check_origin"`
+	HandshakeTimeout int      `yaml:"handshake_timeout_ms" json:"handshake_timeout_ms"`
+	ReadBufferSize   int      `yaml:"read_buffer_size" json:"read_buffer_size"`
+	WriteBufferSize  int      `yaml:"write_buffer_size" json:"write_buffer_size"`
+	CheckOrigin      bool     `yaml:"check_origin" json:"check_origin"`
+	AllowedOrigins   []string `yaml:"allowed_origins" json:"allowed_origins"`
 }
 
 type GRPCConfig struct {
@@ -195,6 +196,11 @@ type ConfigCenterConfig struct {
 	Password string `yaml:"password" json:"password"` // Auth
 	Key      string `yaml:"key" json:"key"`           // Config key e.g., "gin-bear:config"
 	Format   string `yaml:"format" json:"format"`     // "yaml", "json"
+}
+
+type PluginConfig struct {
+	Enabled     bool     `yaml:"enabled" json:"enabled"`
+	AllowedDirs []string `yaml:"allowed_dirs" json:"allowed_dirs"`
 }
 
 type SysConfig struct {
@@ -223,6 +229,7 @@ type SysConfig struct {
 	OpenAPI        *OpenAPIConfig        `yaml:"openapi" json:"openapi"`
 	Swagger        *SwaggerConfig        `yaml:"swagger" json:"swagger"`
 	Middleware     *MiddlewareConfig     `yaml:"middleware" json:"middleware"`
+	Plugins        *PluginConfig         `yaml:"plugins" json:"plugins"`
 	Config         UserConfig            `yaml:"config" json:"config"`
 }
 
@@ -335,6 +342,9 @@ func NewSysConfig() *SysConfig {
 			ReadBufferSize:   1024,
 			WriteBufferSize:  1024,
 			CheckOrigin:      true,
+		},
+		Plugins: &PluginConfig{
+			Enabled: false,
 		},
 		GRPC: &GRPCConfig{
 			Enabled: false,

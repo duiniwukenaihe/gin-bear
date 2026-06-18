@@ -1,15 +1,20 @@
 package bear
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/nicksnyder/go-i18n/v2/i18n"
-	"reflect"
 )
 
 // RouteMetadata 路由元数据，用于 Handler 预热
@@ -85,30 +90,8 @@ func Convert(handler interface{}) gin.HandlerFunc {
 			// 情况 B: 结构体指针 (自动从 JSON 绑定与验证或 Query 绑定)
 			if argType.Kind() == reflect.Ptr && argType.Elem().Kind() == reflect.Struct {
 				req := reflect.New(argType.Elem()).Interface()
-				// 检查结构体是否有 form 标签，如果有则使用 ShouldBindQuery
-				hasFormTag := false
-				structType := argType.Elem()
-				for j := 0; j < structType.NumField(); j++ {
-					field := structType.Field(j)
-					if field.Tag.Get("form") != "" || field.Tag.Get("query") != "" {
-						hasFormTag = true
-						break
-					}
-				}
-				// Gin 默认会调用 validator/v10
-				var err error
-				if hasFormTag {
-					err = ctx.ShouldBindQuery(req)
-				} else {
-					err = ctx.ShouldBindJSON(req)
-				}
-				if err != nil {
-					// 记录请求参数绑定失败日志
-					slog.ErrorContext(ctx.Request.Context(), "Request binding failed",
-						"error", err,
-						"path", ctx.Request.URL.Path,
-						"method", ctx.Request.Method,
-					)
+				if err := bindRequest(ctx, req); err != nil {
+					logBindingError(ctx, err)
 					ctx.AbortWithStatusJSON(400, Response{
 						Code:    400,
 						Message: "Invalid request",
@@ -122,28 +105,8 @@ func Convert(handler interface{}) gin.HandlerFunc {
 			// 情况 C: 结构体 (非指针)
 			if argType.Kind() == reflect.Struct {
 				req := reflect.New(argType).Interface()
-				// 检查结构体是否有 form 标签
-				hasFormTag := false
-				for j := 0; j < argType.NumField(); j++ {
-					field := argType.Field(j)
-					if field.Tag.Get("form") != "" || field.Tag.Get("query") != "" {
-						hasFormTag = true
-						break
-					}
-				}
-				var err error
-				if hasFormTag {
-					err = ctx.ShouldBindQuery(req)
-				} else {
-					err = ctx.ShouldBindJSON(req)
-				}
-				if err != nil {
-					// 记录请求参数绑定失败日志
-					slog.ErrorContext(ctx.Request.Context(), "Request binding failed",
-						"error", err,
-						"path", ctx.Request.URL.Path,
-						"method", ctx.Request.Method,
-					)
+				if err := bindRequest(ctx, req); err != nil {
+					logBindingError(ctx, err)
 					ctx.AbortWithStatusJSON(400, Response{
 						Code:    400,
 						Message: "Invalid request",
@@ -204,6 +167,164 @@ func Convert(handler interface{}) gin.HandlerFunc {
 	}
 
 	return result
+}
+
+func bindRequest(ctx *gin.Context, req interface{}) error {
+	if err := bindURIFields(ctx, req); err != nil {
+		return err
+	}
+	if err := bindQueryFields(ctx, req); err != nil {
+		return err
+	}
+	if isFormRequest(ctx.Request) {
+		if err := ctx.Request.ParseForm(); err != nil {
+			return err
+		}
+		if err := bindFormFields(ctx, req); err != nil {
+			return err
+		}
+	}
+	if isJSONRequest(ctx.Request) && hasRequestBody(ctx.Request) {
+		decoder := json.NewDecoder(ctx.Request.Body)
+		if err := decoder.Decode(req); err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+	}
+	if binding.Validator != nil {
+		return binding.Validator.ValidateStruct(req)
+	}
+	return nil
+}
+
+func logBindingError(ctx *gin.Context, err error) {
+	slog.ErrorContext(ctx.Request.Context(), "Request binding failed",
+		"error", err,
+		"path", ctx.Request.URL.Path,
+		"method", ctx.Request.Method,
+	)
+}
+
+func isJSONRequest(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json")
+}
+
+func isFormRequest(r *http.Request) bool {
+	contentType := strings.ToLower(r.Header.Get("Content-Type"))
+	return strings.Contains(contentType, "application/x-www-form-urlencoded") ||
+		strings.Contains(contentType, "multipart/form-data")
+}
+
+func hasRequestBody(r *http.Request) bool {
+	return r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0
+}
+
+func bindURIFields(ctx *gin.Context, req interface{}) error {
+	values := make(map[string][]string, len(ctx.Params))
+	for _, p := range ctx.Params {
+		values[p.Key] = []string{p.Value}
+	}
+	return bindTaggedFields(reflect.ValueOf(req), values, "uri")
+}
+
+func bindQueryFields(ctx *gin.Context, req interface{}) error {
+	if err := bindTaggedFields(reflect.ValueOf(req), ctx.Request.URL.Query(), "query"); err != nil {
+		return err
+	}
+	return bindTaggedFields(reflect.ValueOf(req), ctx.Request.URL.Query(), "form")
+}
+
+func bindFormFields(ctx *gin.Context, req interface{}) error {
+	if err := bindTaggedFields(reflect.ValueOf(req), ctx.Request.PostForm, "query"); err != nil {
+		return err
+	}
+	return bindTaggedFields(reflect.ValueOf(req), ctx.Request.PostForm, "form")
+}
+
+func bindTaggedFields(value reflect.Value, values map[string][]string, tagName string) error {
+	if value.Kind() != reflect.Ptr || value.IsNil() {
+		return nil
+	}
+	value = value.Elem()
+	if value.Kind() != reflect.Struct {
+		return nil
+	}
+	valueType := value.Type()
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Field(i)
+		structField := valueType.Field(i)
+		if structField.PkgPath != "" {
+			continue
+		}
+		if structField.Anonymous && field.Kind() == reflect.Struct {
+			if err := bindTaggedFields(field.Addr(), values, tagName); err != nil {
+				return err
+			}
+			continue
+		}
+		name := tagFieldName(structField.Tag.Get(tagName))
+		if name == "" {
+			continue
+		}
+		rawValues, ok := values[name]
+		if !ok || len(rawValues) == 0 {
+			continue
+		}
+		if err := setFieldValue(field, rawValues[0]); err != nil {
+			return fmt.Errorf("bind %s field %s: %w", tagName, structField.Name, err)
+		}
+	}
+	return nil
+}
+
+func tagFieldName(tag string) string {
+	if tag == "" || tag == "-" {
+		return ""
+	}
+	name, _, _ := strings.Cut(tag, ",")
+	return name
+}
+
+func setFieldValue(field reflect.Value, raw string) error {
+	if !field.CanSet() || raw == "" {
+		return nil
+	}
+	if field.Kind() == reflect.Ptr {
+		elem := reflect.New(field.Type().Elem())
+		if err := setFieldValue(elem.Elem(), raw); err != nil {
+			return err
+		}
+		field.Set(elem)
+		return nil
+	}
+	switch field.Kind() {
+	case reflect.String:
+		field.SetString(raw)
+	case reflect.Bool:
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return err
+		}
+		field.SetBool(v)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v, err := strconv.ParseInt(raw, 10, field.Type().Bits())
+		if err != nil {
+			return err
+		}
+		field.SetInt(v)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v, err := strconv.ParseUint(raw, 10, field.Type().Bits())
+		if err != nil {
+			return err
+		}
+		field.SetUint(v)
+	case reflect.Float32, reflect.Float64:
+		v, err := strconv.ParseFloat(raw, field.Type().Bits())
+		if err != nil {
+			return err
+		}
+		field.SetFloat(v)
+	}
+	return nil
 }
 
 func handleResults(ctx *gin.Context, results []reflect.Value) {

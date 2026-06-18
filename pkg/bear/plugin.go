@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"plugin"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -86,6 +89,10 @@ func (this *PluginManager) Load(path string) error {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
+	if err := validatePluginPath(path); err != nil {
+		return err
+	}
+
 	p, err := plugin.Open(path)
 	if err != nil {
 		return fmt.Errorf("failed to open plugin %s: %w", path, err)
@@ -119,6 +126,54 @@ func (this *PluginManager) Load(path string) error {
 
 	this.plugins[path] = &loadedPlugin{Module: mod, Symbol: sym}
 	return nil
+}
+
+func validatePluginPath(path string) error {
+	config := GetByType[*SysConfig]()
+	if config == nil || config.Plugins == nil || !config.Plugins.Enabled {
+		return errors.New("dynamic plugin loading is disabled")
+	}
+	if len(config.Plugins.AllowedDirs) == 0 {
+		return errors.New("dynamic plugin loading requires allowed plugin directories")
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("invalid plugin path %s: %w", path, err)
+	}
+	cleanPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("invalid plugin path %s: %w", path, err)
+		}
+		cleanPath = absPath
+	}
+
+	for _, dir := range config.Plugins.AllowedDirs {
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			return fmt.Errorf("invalid plugin directory %s: %w", dir, err)
+		}
+		cleanDir, err := filepath.EvalSymlinks(absDir)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("invalid plugin directory %s: %w", dir, err)
+			}
+			cleanDir = absDir
+		}
+		if cleanPath == cleanDir {
+			return fmt.Errorf("plugin path %s is not a file", path)
+		}
+		if rel, err := filepath.Rel(cleanDir, cleanPath); err == nil && rel != "." && !stringsHasPathTraversal(rel) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("plugin path %s is not allowed", path)
+}
+
+func stringsHasPathTraversal(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func (this *PluginManager) Reload(path string) error {

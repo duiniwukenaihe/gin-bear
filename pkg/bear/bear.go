@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -354,12 +355,17 @@ func validateProductionSecurity(config *SysConfig) error {
 	if !isProductionMode(config) {
 		return nil
 	}
-	if config == nil || config.Auth == nil {
+	if config == nil {
 		return nil
 	}
-	secret := config.Auth.JWTSecret
-	if secret == "" || secret == "bear-secret" || secret == "your-secret-key" || len(secret) < 32 {
-		return fmt.Errorf("weak jwt secret is not allowed in production")
+	if config.Auth != nil {
+		secret := config.Auth.JWTSecret
+		if secret == "" || secret == "bear-secret" || secret == "your-secret-key" || len(secret) < 32 {
+			return fmt.Errorf("weak jwt secret is not allowed in production")
+		}
+	}
+	if config.WS != nil && !config.WS.CheckOrigin && len(config.WS.AllowedOrigins) == 0 {
+		return fmt.Errorf("websocket origin check cannot be disabled in production without allowed origins")
 	}
 	return nil
 }
@@ -434,7 +440,7 @@ func (this *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear 
 	// 1. 执行依赖注入
 	GetInjector().Apply(handler)
 
-	this.g.GET(relativePath, func(ctx *gin.Context) {
+	this.activeGroup().GET(relativePath, func(ctx *gin.Context) {
 		// 2. 触发 Fairing OnRequest (支持鉴权、限流等)
 		if err := this.fairingHandler.OnRequest(ctx); err != nil {
 			return
@@ -446,9 +452,9 @@ func (this *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear 
 			HandshakeTimeout: time.Duration(config.WS.HandshakeTimeout) * time.Millisecond,
 			ReadBufferSize:   config.WS.ReadBufferSize,
 			WriteBufferSize:  config.WS.WriteBufferSize,
-		}
-		if !config.WS.CheckOrigin {
-			upgrader.CheckOrigin = func(r *http.Request) bool { return true }
+			CheckOrigin: func(r *http.Request) bool {
+				return websocketOriginAllowed(config, r)
+			},
 		}
 
 		// 4. 升级协议
@@ -496,7 +502,7 @@ func (this *Bear) Handle(httpMethod, relativePath string, handler interface{}) *
 	if h := Convert(handler); h != nil {
 		// 包装 handler 以支持全局 Fairing
 		wrappedHandler := this.wrapWithFairing(h)
-		this.g.Handle(httpMethod, relativePath, wrappedHandler)
+		this.activeGroup().Handle(httpMethod, relativePath, wrappedHandler)
 
 		// 记录路由元数据
 		this.routeRegistry = append(this.routeRegistry, RouteMetadata{
@@ -531,7 +537,7 @@ func (this *Bear) HandleWithFairing(httpMethod, relativePath string, handler int
 		return this
 	}
 
-	this.g.Handle(httpMethod, relativePath, wrappedHandler)
+	this.activeGroup().Handle(httpMethod, relativePath, wrappedHandler)
 
 	// 4. 记录路由元数据
 	this.routeRegistry = append(this.routeRegistry, RouteMetadata{
@@ -543,6 +549,27 @@ func (this *Bear) HandleWithFairing(httpMethod, relativePath string, handler int
 	})
 
 	return this
+}
+
+func (this *Bear) activeGroup() *gin.RouterGroup {
+	if this.g != nil {
+		return this.g
+	}
+	return &this.Engine.RouterGroup
+}
+
+func websocketOriginAllowed(config *SysConfig, r *http.Request) bool {
+	if config == nil || config.WS == nil {
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	if len(config.WS.AllowedOrigins) > 0 {
+		return origin == "" || slices.Contains(config.WS.AllowedOrigins, origin) || slices.Contains(config.WS.AllowedOrigins, "*")
+	}
+	if !config.WS.CheckOrigin {
+		return true
+	}
+	return origin == "" || origin == "http://"+r.Host || origin == "https://"+r.Host
 }
 
 // wrapWithRouteFairing 包装 handler 以集成路由级别的 Fairing

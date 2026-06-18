@@ -186,6 +186,10 @@ type Repository[T any] struct {
 	Adapter *GormAdapter `inject:"-"`
 }
 
+func NewRepository[T any](adapter *GormAdapter) *Repository[T] {
+	return &Repository[T]{Adapter: adapter}
+}
+
 func (this *Repository[T]) getModelName() string {
 	var t T
 	return reflect.TypeOf(t).String()
@@ -348,7 +352,14 @@ func (this *Repository[T]) Update(ctx context.Context, entity *T) error {
 		return nil
 	}
 
-	return db.Save(entity).Error
+	result := db.Model(entity).Updates(entity)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // Delete 删除实体

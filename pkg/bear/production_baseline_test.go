@@ -3,6 +3,7 @@ package bear
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 func resetTestInjector() {
@@ -402,6 +406,229 @@ func TestAuthTokenBlacklistKeyUsesTokenHash(t *testing.T) {
 	}
 	if !strings.HasPrefix(key, "bear:auth:blacklist:") {
 		t.Fatalf("unexpected key prefix: %s", key)
+	}
+}
+
+func TestConvertBindsURIQueryAndJSONTogether(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	app := Ignite(cfg)
+
+	type mixedReq struct {
+		ID   int64  `uri:"id" binding:"required"`
+		Page int    `form:"page"`
+		Name string `json:"name" binding:"required"`
+	}
+	app.PUT("/users/:id", Convert(func(req *mixedReq) map[string]interface{} {
+		return map[string]interface{}{
+			"id":   req.ID,
+			"page": req.Page,
+			"name": req.Name,
+		}
+	}))
+
+	req := httptest.NewRequest(http.MethodPut, "/users/42?page=3", bytes.NewBufferString(`{"name":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	app.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got["id"] != float64(42) || got["page"] != float64(3) || got["name"] != "alice" {
+		t.Fatalf("unexpected bound request: %#v", got)
+	}
+}
+
+func TestBearHandleRegistersOnRootWithoutApplyAll(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	app := Ignite(cfg)
+
+	app.Handle(http.MethodGet, "/direct", func() string { return "ok" })
+
+	req := httptest.NewRequest(http.MethodGet, "/direct", nil)
+	w := httptest.NewRecorder()
+	app.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ok") {
+		t.Fatalf("response missing handler result: %s", w.Body.String())
+	}
+}
+
+func TestRedisRateLimiterCanFailClosedWhenRedisUnavailable(t *testing.T) {
+	adapter := &RedisAdapter{Client: redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: time.Millisecond,
+		ReadTimeout: time.Millisecond,
+	})}
+	defer adapter.Client.Close()
+	limiter := NewRedisRateLimiter(adapter, 1, time.Second)
+	limiter.FailClosed = true
+
+	if limiter.Allow(context.Background(), "client") {
+		t.Fatal("expected unavailable redis to deny when fail closed")
+	}
+}
+
+func TestRedisRateLimiterDefaultsToFailOpenWhenRedisUnavailable(t *testing.T) {
+	adapter := &RedisAdapter{Client: redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: time.Millisecond,
+		ReadTimeout: time.Millisecond,
+	})}
+	defer adapter.Client.Close()
+	limiter := NewRedisRateLimiter(adapter, 1, time.Second)
+
+	if !limiter.Allow(context.Background(), "client") {
+		t.Fatal("expected unavailable redis to allow by default")
+	}
+}
+
+func TestWebSocketOriginPolicyUsesAllowlist(t *testing.T) {
+	cfg := NewSysConfig()
+	cfg.WS.AllowedOrigins = []string{"https://app.example.com"}
+
+	allowed := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	allowed.Header.Set("Origin", "https://app.example.com")
+	if !websocketOriginAllowed(cfg, allowed) {
+		t.Fatal("expected allowlisted websocket origin")
+	}
+
+	denied := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	denied.Header.Set("Origin", "https://evil.example.com")
+	if websocketOriginAllowed(cfg, denied) {
+		t.Fatal("expected non-allowlisted websocket origin to be denied")
+	}
+}
+
+func TestIgniteRejectsDisabledWebSocketOriginCheckInProduction(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Server.Mode = "release"
+	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.WS.CheckOrigin = false
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected unsafe websocket origin panic")
+		}
+		if !strings.Contains(r.(string), "websocket origin") {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	Ignite(cfg)
+}
+
+func TestProductionValidationChecksWebSocketOriginWhenAuthConfigIsNil(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.Auth = nil
+	cfg.DB.Enabled = false
+	cfg.Server.Mode = "release"
+	cfg.WS.CheckOrigin = false
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected unsafe websocket origin panic")
+		}
+		if !strings.Contains(r.(string), "websocket origin") {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	Ignite(cfg)
+}
+
+type repositoryUpdateTestModel struct {
+	ID   uint `gorm:"primaryKey"`
+	Name string
+	Note string
+}
+
+func TestRepositoryUpdateDoesNotOverwriteOmittedFieldsWithZeroValues(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&repositoryUpdateTestModel{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	adapter := &GormAdapter{DB: db}
+	repo := NewRepository[repositoryUpdateTestModel](adapter)
+
+	original := repositoryUpdateTestModel{Name: "alice", Note: "keep"}
+	if err := db.Create(&original).Error; err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	patch := repositoryUpdateTestModel{ID: original.ID, Name: "bob"}
+	if err := repo.Update(context.Background(), &patch); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	var got repositoryUpdateTestModel
+	if err := db.First(&got, original.ID).Error; err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if got.Name != "bob" {
+		t.Fatalf("name = %q", got.Name)
+	}
+	if got.Note != "keep" {
+		t.Fatalf("note was overwritten: %#v", got)
+	}
+}
+
+func TestLoadPluginDisabledByDefault(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	app := Ignite(cfg)
+
+	err := app.LoadPlugin("/tmp/example.so")
+
+	if err == nil {
+		t.Fatal("expected plugin loading to be disabled by default")
+	}
+	if !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadPluginRejectsPathOutsideAllowlist(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Plugins.Enabled = true
+	cfg.Plugins.AllowedDirs = []string{"/opt/gin-bear/plugins"}
+	app := Ignite(cfg)
+
+	err := app.LoadPlugin("/tmp/example.so")
+
+	if err == nil {
+		t.Fatal("expected plugin outside allowlist to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

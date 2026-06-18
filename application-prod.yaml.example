@@ -51,6 +51,14 @@ redis:
   read_timeout_seconds: 3
   write_timeout_seconds: 3
 
+websocket:
+  handshake_timeout_ms: 10000
+  read_buffer_size: 1024
+  write_buffer_size: 1024
+  check_origin: true
+  allowed_origins:
+    - "https://example.com"
+
 auth:
   storage_type: "redis"
   jwt_secret: "replace-with-at-least-32-random-characters"
@@ -65,3 +73,8 @@ auth:
 middleware:
   performance_log_level: "info"
   slow_request_threshold: "1s"
+
+plugins:
+  enabled: false
+  allowed_dirs:
+    - "/app/plugins"

@@ -44,6 +44,56 @@ Do not run implicit schema migrations from request-serving code. Keep schema cha
 
 `database.slow_query_threshold` enables GORM slow query logging for runtime visibility.
 
+## Request Binding
+
+Handler request structs can safely combine path, query, form, and JSON body tags:
+
+```go
+type UpdateUserRequest struct {
+    ID   int64  `uri:"id" binding:"required"`
+    Page int    `form:"page"`
+    Name string `json:"name" binding:"required"`
+}
+```
+
+The framework binds URI values first, query/form values second, JSON or form body values third, and then runs validation once.
+
+## WebSocket Origin Policy
+
+Keep `websocket.check_origin: true` in production. Use `websocket.allowed_origins` to list trusted browser origins:
+
+```yaml
+websocket:
+  check_origin: true
+  allowed_origins:
+    - "https://example.com"
+```
+
+Production startup rejects `check_origin: false` unless an explicit allowlist is configured.
+
+## Rate Limiting
+
+`NewRedisRateLimiter` remains fail-open by default for backward compatibility. Sensitive endpoints can deny requests when Redis is unavailable:
+
+```go
+limiter := bear.NewRedisRateLimiter(redisAdapter, 100, time.Minute)
+limiter.FailClosed = true
+app.Use(bear.RateLimitMiddleware(limiter))
+```
+
+## Dynamic Plugins
+
+Dynamic `.so` plugins are disabled by default. Enable them only when the deployment controls the plugin directory:
+
+```yaml
+plugins:
+  enabled: true
+  allowed_dirs:
+    - "/app/plugins"
+```
+
+Plugin paths are resolved to absolute paths and must live inside one of the configured directories.
+
 ## Containers
 
 Build the app image:

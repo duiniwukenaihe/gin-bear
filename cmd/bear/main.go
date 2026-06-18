@@ -125,6 +125,9 @@ auth:
     - "/live"
     - "/ready"
     - "/swagger/*"
+
+websocket:
+  check_origin: true
 `), 0644)
 	os.WriteFile(name+"/application-prod.yaml.example", []byte(`server:
   port: 8080
@@ -153,6 +156,16 @@ auth:
     - "/ready"
     - "/metrics"
     - "/swagger/*"
+
+websocket:
+  check_origin: true
+  allowed_origins:
+    - "https://example.com"
+
+plugins:
+  enabled: false
+  allowed_dirs:
+    - "/app/plugins"
 `), 0644)
 	os.WriteFile(name+"/.env.example", []byte(`BEAR_ENV=prod
 GIN_MODE=release
