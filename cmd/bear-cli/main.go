@@ -1,6 +1,6 @@
 package main
 
-import "bear/cmd/bear-cli/cmd"
+import "github.com/duiniwukenaihe/gin-bear/cmd/bear-cli/cmd"
 
 func main() {
 	cmd.Execute()

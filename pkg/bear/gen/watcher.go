@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"bear/pkg/bear"
-
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
 // LoadConfigForCLI 尝试加载配置，用于 CLI 决策
@@ -40,10 +40,10 @@ func RunOnce(dir string) {
 }
 
 type Watcher struct {
-	Dir      string
-	cmd      *exec.Cmd
-	mu       sync.Mutex
-	lastRun  time.Time
+	Dir     string
+	cmd     *exec.Cmd
+	mu      sync.Mutex
+	lastRun time.Time
 }
 
 func NewWatcher(dir string) *Watcher {

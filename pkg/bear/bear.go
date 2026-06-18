@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
-	"log/slog"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -104,6 +104,21 @@ func Ignite(args ...any) *Bear {
 	}
 	b.pluginManager = NewPluginManager(b)
 
+	if config == nil {
+		config = InitConfig()
+	} else {
+		config.PostProcess()
+	}
+
+	if config.DB != nil && config.DB.Enabled && config.DB.DSN == "" && config.DB.DBName == "" {
+		panic("database configuration is required when database.enabled=true (dsn or dbname)")
+	}
+
+	// 注册核心底座 Bean
+	SetDefaultLogger()
+	GetInjector().Set(b)
+	GetInjector().Set(config)
+
 	// 禁用 Gin 默认日志，由核心性能中间件接管结构化日志
 	gin.DefaultWriter = io.Discard
 	gin.DefaultErrorWriter = os.Stderr
@@ -113,22 +128,9 @@ func Ignite(args ...any) *Bear {
 	b.Use(PerformanceMiddleware())
 	b.Use(RecoveryMiddleware())
 	b.Use(b.pluginDispatcher.Dispatch())
-
-	if config == nil {
-		config = InitConfig()
-	} else {
-		config.PostProcess()
+	for _, middleware := range ginMiddlewares {
+		b.Use(middleware)
 	}
-
-	// 核心配置必须存在 (DSN 或传统字段至少有一个)
-	if config.DB == nil || (config.DB.DSN == "" && config.DB.DBName == "") {
-		panic("database configuration is required (dsn or dbname)")
-	}
-
-	// 注册核心底座 Bean
-	SetDefaultLogger()
-	GetInjector().Set(b)
-	GetInjector().Set(config)
 
 	slog.Info("WhiteBear core awakened", "server", config.Server.Name)
 	return b
@@ -165,22 +167,12 @@ func (this *Bear) Launch(ctx context.Context) error {
 
 	// MQ 启动已禁用 (精简模式)
 
-	// 如果配置中指定了端口，优先使用
-	port := 8080
-	if config.Server != nil && config.Server.Port > 0 {
-		port = int(config.Server.Port)
-	}
-
-	addr := fmt.Sprintf(":%d", port)
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: this.Engine,
-	}
+	srv := this.buildHTTPServer(config)
 
 	// HTTP 服务器启动错误通道
 	httpErrCh := make(chan error, 1)
 	go func() {
-		slog.Info("WhiteBear is emerging from ice", "addr", addr, "name", config.Server.Name)
+		slog.Info("WhiteBear is emerging from ice", "addr", srv.Addr, "name", config.Server.Name)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			httpErrCh <- err
 		}
@@ -270,6 +262,55 @@ func (this *Bear) Launch(ctx context.Context) error {
 
 	slog.Info("WhiteBear returning to ice")
 	return nil
+}
+
+func (this *Bear) buildHTTPServer(config *SysConfig) *http.Server {
+	port := 8080
+	if config != nil && config.Server != nil && config.Server.Port > 0 {
+		port = int(config.Server.Port)
+	}
+
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           this.Engine,
+		ReadHeaderTimeout: parseDurationOrDefault(configDuration(config, "read_header_timeout"), 5*time.Second),
+		ReadTimeout:       parseDurationOrDefault(configDuration(config, "read_timeout"), 15*time.Second),
+		WriteTimeout:      parseDurationOrDefault(configDuration(config, "write_timeout"), 30*time.Second),
+		IdleTimeout:       parseDurationOrDefault(configDuration(config, "idle_timeout"), 60*time.Second),
+	}
+	if config != nil && config.Server != nil && config.Server.MaxHeaderBytes > 0 {
+		srv.MaxHeaderBytes = config.Server.MaxHeaderBytes
+	}
+	return srv
+}
+
+func configDuration(config *SysConfig, key string) string {
+	if config == nil || config.Server == nil {
+		return ""
+	}
+	switch key {
+	case "read_header_timeout":
+		return config.Server.ReadHeaderTimeout
+	case "read_timeout":
+		return config.Server.ReadTimeout
+	case "write_timeout":
+		return config.Server.WriteTimeout
+	case "idle_timeout":
+		return config.Server.IdleTimeout
+	default:
+		return ""
+	}
+}
+
+func parseDurationOrDefault(raw string, fallback time.Duration) time.Duration {
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 // Mount 挂载控制器

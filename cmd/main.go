@@ -1,9 +1,10 @@
 package main
 
 import (
-	"bear/pkg/bear"
 	"context"
 	"fmt"
+
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
 func main() {
@@ -25,7 +26,7 @@ func main() {
 // --- 模型定义 ---
 
 type User struct {
-	ID   uint   `gorm:"primaryKey"`
+	ID   uint `gorm:"primaryKey"`
 	Name string
 	Age  int
 }

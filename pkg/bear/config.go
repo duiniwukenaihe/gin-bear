@@ -12,11 +12,16 @@ import (
 type UserConfig map[string]interface{}
 
 type ServerConfig struct {
-	Port           int32    `yaml:"port" json:"port" validate:"required,gt=0"`
-	Name           string   `yaml:"name" json:"name" validate:"required"`
-	TrustedProxies []string `yaml:"trusted_proxies" json:"trusted_proxies"`
-	HotReload      bool     `yaml:"hot_reload" json:"hot_reload"` // 是否开启热更新监听
-	MachineID      int64    `yaml:"machine_id" json:"machine_id"` // 分布式 ID 机器码 (-1 为自动)
+	Port              int32    `yaml:"port" json:"port" validate:"required,gt=0"`
+	Name              string   `yaml:"name" json:"name" validate:"required"`
+	TrustedProxies    []string `yaml:"trusted_proxies" json:"trusted_proxies"`
+	HotReload         bool     `yaml:"hot_reload" json:"hot_reload"` // 是否开启热更新监听
+	MachineID         int64    `yaml:"machine_id" json:"machine_id"` // 分布式 ID 机器码 (-1 为自动)
+	ReadHeaderTimeout string   `yaml:"read_header_timeout" json:"read_header_timeout"`
+	ReadTimeout       string   `yaml:"read_timeout" json:"read_timeout"`
+	WriteTimeout      string   `yaml:"write_timeout" json:"write_timeout"`
+	IdleTimeout       string   `yaml:"idle_timeout" json:"idle_timeout"`
+	MaxHeaderBytes    int      `yaml:"max_header_bytes" json:"max_header_bytes"`
 }
 
 type WafConfig struct {
@@ -34,6 +39,15 @@ type WafConfig struct {
 	} `yaml:"rules" json:"rules"`
 }
 
+type CORSConfig struct {
+	Enabled          bool     `yaml:"enabled" json:"enabled"`
+	AllowOrigins     []string `yaml:"allow_origins" json:"allow_origins"`
+	AllowMethods     []string `yaml:"allow_methods" json:"allow_methods"`
+	AllowHeaders     []string `yaml:"allow_headers" json:"allow_headers"`
+	AllowCredentials bool     `yaml:"allow_credentials" json:"allow_credentials"`
+	MaxAge           string   `yaml:"max_age" json:"max_age"`
+}
+
 type GeoIPConfig struct {
 	Enabled  bool   `yaml:"enabled" json:"enabled"`
 	CityMMDB string `yaml:"city_mmdb" json:"city_mmdb"`
@@ -45,16 +59,16 @@ type CronConfig struct {
 
 // MiddlewareConfig 中间件配置
 type MiddlewareConfig struct {
-	PerformanceLogLevel string `yaml:"performance_log_level" json:"performance_log_level"` // 日志级别: debug, info, warn, error
+	PerformanceLogLevel  string `yaml:"performance_log_level" json:"performance_log_level"`   // 日志级别: debug, info, warn, error
 	SlowRequestThreshold string `yaml:"slow_request_threshold" json:"slow_request_threshold"` // 慢请求阈值，如 "1s"
 }
 
 type OpenAPIConfig struct {
-	Enabled         bool          `yaml:"enabled" json:"enabled"`
-	TimeWindow      int           `yaml:"time_window_seconds" json:"time_window_seconds"` // 默认 60 秒
-	ReplayCheck     bool          `yaml:"replay_check" json:"replay_check"`
-	Apps            []OpenAPIApp  `yaml:"apps" json:"apps"`
-	HeaderPrefix    string        `yaml:"header_prefix" json:"header_prefix"` // X-API (X-API-Timestamp, X-API-Nonce)
+	Enabled      bool         `yaml:"enabled" json:"enabled"`
+	TimeWindow   int          `yaml:"time_window_seconds" json:"time_window_seconds"` // 默认 60 秒
+	ReplayCheck  bool         `yaml:"replay_check" json:"replay_check"`
+	Apps         []OpenAPIApp `yaml:"apps" json:"apps"`
+	HeaderPrefix string       `yaml:"header_prefix" json:"header_prefix"` // X-API (X-API-Timestamp, X-API-Nonce)
 }
 
 type OpenAPIApp struct {
@@ -67,7 +81,7 @@ type BigQueryConfig struct {
 	ProjectID          string `yaml:"project_id" json:"project_id"`
 	DatasetID          string `yaml:"dataset_id" json:"dataset_id"`
 	CredentialsPath    string `yaml:"credentials_path" json:"credentials_path"` // path to service account key file
-	Credentials        string `yaml:"credentials" json:"credentials"`      // raw credentials json content or path, compatible with legacy
+	Credentials        string `yaml:"credentials" json:"credentials"`           // raw credentials json content or path, compatible with legacy
 	Proxy              string `yaml:"proxy" json:"proxy"`
 	BatchSize          int    `yaml:"batch_size" json:"batch_size"`
 	BatchTimeout       int    `yaml:"batch_timeout_ms" json:"batch_timeout_ms"`
@@ -93,7 +107,7 @@ type KafkaConfig struct {
 	BatchTimeout int      `yaml:"batch_timeout_ms" json:"batch_timeout_ms"`
 	Async        bool     `yaml:"async" json:"async"`
 	Compression  string   `yaml:"compression" json:"compression"` // gzip, snappy, lz4, zstd
-	AckPolicy    string   `yaml:"ack_policy" json:"ack_policy"`  // none, leader, all
+	AckPolicy    string   `yaml:"ack_policy" json:"ack_policy"`   // none, leader, all
 	MaxRetries   int      `yaml:"max_retries" json:"max_retries"`
 	SASL         struct {
 		Enabled   bool   `yaml:"enabled" json:"enabled"`
@@ -113,16 +127,16 @@ type KafkaConfig struct {
 type TracingConfig struct {
 	Enabled      bool    `yaml:"enabled" json:"enabled"`
 	ServiceName  string  `yaml:"service_name" json:"service_name"`
-	Exporter     string  `yaml:"exporter" json:"exporter"`      // "stdout", "otlp"
+	Exporter     string  `yaml:"exporter" json:"exporter"`           // "stdout", "otlp"
 	OTLPEndpoint string  `yaml:"otlp_endpoint" json:"otlp_endpoint"` // e.g., "http://localhost:4318"
-	SampleRate   float64 `yaml:"sample_rate" json:"sample_rate"`   // 0.0 to 1.0
+	SampleRate   float64 `yaml:"sample_rate" json:"sample_rate"`     // 0.0 to 1.0
 }
 
 type I18nConfig struct {
-	BundlePath      string   `yaml:"bundle_path" json:"bundle_path"`      // e.g., "locales"
+	BundlePath      string   `yaml:"bundle_path" json:"bundle_path"`           // e.g., "locales"
 	DefaultLanguage string   `yaml:"default_language" json:"default_language"` // e.g., "en"
-	SupportedLangs  []string `yaml:"supported_langs" json:"supported_langs"`  // e.g., ["en", "zh"]
-	Format          string   `yaml:"format" json:"format"`           // e.g., "yaml"
+	SupportedLangs  []string `yaml:"supported_langs" json:"supported_langs"`   // e.g., ["en", "zh"]
+	Format          string   `yaml:"format" json:"format"`                     // e.g., "yaml"
 }
 
 type AuthConfig struct {
@@ -133,14 +147,14 @@ type AuthConfig struct {
 
 type DBConfig struct {
 	Enabled         bool   `yaml:"enabled" json:"enabled"`
-	Type            string `yaml:"type" json:"type"`             // mysql, postgres (default: mysql)
-	DSN             string `yaml:"dsn" json:"dsn"`               // 直接指定 DSN
-	Host            string `yaml:"host" json:"host"`             // 主机
-	User            string `yaml:"user" json:"user"`             // 用户名
-	Password        string `yaml:"password" json:"password"`       // 密码
-	DBName          string `yaml:"dbname" json:"dbname"`          // 数据库名
-	Port            string `yaml:"port" json:"port"`              // 端口
-	SSLMode         string `yaml:"sslmode" json:"sslmode"`        // SSL 模式
+	Type            string `yaml:"type" json:"type"`         // mysql, postgres (default: mysql)
+	DSN             string `yaml:"dsn" json:"dsn"`           // 直接指定 DSN
+	Host            string `yaml:"host" json:"host"`         // 主机
+	User            string `yaml:"user" json:"user"`         // 用户名
+	Password        string `yaml:"password" json:"password"` // 密码
+	DBName          string `yaml:"dbname" json:"dbname"`     // 数据库名
+	Port            string `yaml:"port" json:"port"`         // 端口
+	SSLMode         string `yaml:"sslmode" json:"sslmode"`   // SSL 模式
 	MaxIdleConns    int    `yaml:"max_idle_conns" json:"max_idle_conns"`
 	MaxOpenConns    int    `yaml:"max_open_conns" json:"max_open_conns"`
 	ConnMaxLifetime int    `yaml:"conn_max_lifetime_minutes" json:"conn_max_lifetime_minutes"`
@@ -165,54 +179,55 @@ type GRPCConfig struct {
 
 type CircuitBreakerConfig struct {
 	Enabled             bool    `yaml:"enabled" json:"enabled"`
-	MaxRequests         uint32  `yaml:"max_requests" json:"max_requests"`         // 半开状态下的最大请求数
-	IntervalSeconds     int     `yaml:"interval_seconds" json:"interval_seconds"` // 统计周期
-	TimeoutSeconds      int     `yaml:"timeout_seconds" json:"timeout_seconds"`   // 熔断后多久进入半开状态
+	MaxRequests         uint32  `yaml:"max_requests" json:"max_requests"`                 // 半开状态下的最大请求数
+	IntervalSeconds     int     `yaml:"interval_seconds" json:"interval_seconds"`         // 统计周期
+	TimeoutSeconds      int     `yaml:"timeout_seconds" json:"timeout_seconds"`           // 熔断后多久进入半开状态
 	ThresholdPercentage float64 `yaml:"threshold_percentage" json:"threshold_percentage"` // 错误率阈值 (0-1)
 }
 
 type ConfigCenterConfig struct {
 	Enabled  bool   `yaml:"enabled" json:"enabled"`
-	Type     string `yaml:"type" json:"type"`     // "redis", "etcd", "consul"
-	Address  string `yaml:"address" json:"address"`  // Remote address
+	Type     string `yaml:"type" json:"type"`         // "redis", "etcd", "consul"
+	Address  string `yaml:"address" json:"address"`   // Remote address
 	Password string `yaml:"password" json:"password"` // Auth
-	Key      string `yaml:"key" json:"key"`      // Config key e.g., "gin-bear:config"
-	Format   string `yaml:"format" json:"format"`   // "yaml", "json"
+	Key      string `yaml:"key" json:"key"`           // Config key e.g., "gin-bear:config"
+	Format   string `yaml:"format" json:"format"`     // "yaml", "json"
 }
 
 type SysConfig struct {
-	Server   *ServerConfig   `yaml:"server" json:"server" validate:"required"`
-	Auth     *AuthConfig     `yaml:"auth" json:"auth"`
-	DB       *DBConfig       `yaml:"database" json:"database"` // 映射到 config.json 的 database
-	Redis    *RedisConfig    `yaml:"redis" json:"redis"`
-	Casbin   *CasbinConfig   `yaml:"casbin" json:"casbin"`
-	Waf      *WafConfig      `yaml:"waf" json:"waf"`
-	GeoIP    *GeoIPConfig    `yaml:"geoip" json:"geoip"`
-	BigQuery *BigQueryConfig `yaml:"bigquery" json:"bigquery"`
-	MQ       *MQConfig       `yaml:"mq" json:"mq"`
-	Kafka    *KafkaConfig    `yaml:"kafka" json:"kafka"`
-	RocketMQ *RocketMQConfig `yaml:"rocketmq" json:"rocketmq"`
-	Pulsar   *PulsarConfig   `yaml:"pulsar" json:"pulsar"`
-	Schema   *SchemaConfig   `yaml:"schema" json:"schema"`
-	Tracing  *TracingConfig  `yaml:"tracing" json:"tracing"`
-	I18n     *I18nConfig     `yaml:"i18n" json:"i18n"`
-	Metrics  *MetricsConfig  `yaml:"metrics" json:"metrics"`
-	WS       *WebSocketConfig `yaml:"websocket" json:"websocket"`
-	GRPC     *GRPCConfig     `yaml:"grpc" json:"grpc"`
+	Server         *ServerConfig         `yaml:"server" json:"server" validate:"required"`
+	Auth           *AuthConfig           `yaml:"auth" json:"auth"`
+	DB             *DBConfig             `yaml:"database" json:"database"` // 映射到 config.json 的 database
+	Redis          *RedisConfig          `yaml:"redis" json:"redis"`
+	Casbin         *CasbinConfig         `yaml:"casbin" json:"casbin"`
+	CORS           *CORSConfig           `yaml:"cors" json:"cors"`
+	Waf            *WafConfig            `yaml:"waf" json:"waf"`
+	GeoIP          *GeoIPConfig          `yaml:"geoip" json:"geoip"`
+	BigQuery       *BigQueryConfig       `yaml:"bigquery" json:"bigquery"`
+	MQ             *MQConfig             `yaml:"mq" json:"mq"`
+	Kafka          *KafkaConfig          `yaml:"kafka" json:"kafka"`
+	RocketMQ       *RocketMQConfig       `yaml:"rocketmq" json:"rocketmq"`
+	Pulsar         *PulsarConfig         `yaml:"pulsar" json:"pulsar"`
+	Schema         *SchemaConfig         `yaml:"schema" json:"schema"`
+	Tracing        *TracingConfig        `yaml:"tracing" json:"tracing"`
+	I18n           *I18nConfig           `yaml:"i18n" json:"i18n"`
+	Metrics        *MetricsConfig        `yaml:"metrics" json:"metrics"`
+	WS             *WebSocketConfig      `yaml:"websocket" json:"websocket"`
+	GRPC           *GRPCConfig           `yaml:"grpc" json:"grpc"`
 	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker" json:"circuit_breaker"`
-	ConfigCenter *ConfigCenterConfig `yaml:"config_center" json:"config_center"`
-	Cron         *CronConfig         `yaml:"cron" json:"cron"`
-	OpenAPI      *OpenAPIConfig      `yaml:"openapi" json:"openapi"`
-	Swagger  *SwaggerConfig  `yaml:"swagger" json:"swagger"`
-	Middleware *MiddlewareConfig `yaml:"middleware" json:"middleware"`
-	Config   UserConfig      `yaml:"config" json:"config"`
+	ConfigCenter   *ConfigCenterConfig   `yaml:"config_center" json:"config_center"`
+	Cron           *CronConfig           `yaml:"cron" json:"cron"`
+	OpenAPI        *OpenAPIConfig        `yaml:"openapi" json:"openapi"`
+	Swagger        *SwaggerConfig        `yaml:"swagger" json:"swagger"`
+	Middleware     *MiddlewareConfig     `yaml:"middleware" json:"middleware"`
+	Config         UserConfig            `yaml:"config" json:"config"`
 }
 
 type MQConfig struct {
-	Enabled   bool   `yaml:"enabled" json:"enabled"`
-	Type      string `yaml:"type" json:"type"` // "kafka", "rocketmq", "pulsar", "noop"
-	DlqPrefix string `yaml:"dlq_prefix" json:"dlq_prefix"`
-	DlqSuffix string `yaml:"dlq_suffix" json:"dlq_suffix"`
+	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	Type       string `yaml:"type" json:"type"` // "kafka", "rocketmq", "pulsar", "noop"
+	DlqPrefix  string `yaml:"dlq_prefix" json:"dlq_prefix"`
+	DlqSuffix  string `yaml:"dlq_suffix" json:"dlq_suffix"`
 	MaxRetries int    `yaml:"max_retries" json:"max_retries"`
 }
 
@@ -233,10 +248,10 @@ type PulsarConfig struct {
 }
 
 type SwaggerConfig struct {
-	Enabled bool   `yaml:"enabled" json:"enabled"`
-	Title   string `yaml:"title" json:"title"`
-	Version string `yaml:"version" json:"version"`
-	Host    string `yaml:"host" json:"host"`
+	Enabled  bool   `yaml:"enabled" json:"enabled"`
+	Title    string `yaml:"title" json:"title"`
+	Version  string `yaml:"version" json:"version"`
+	Host     string `yaml:"host" json:"host"`
 	BasePath string `yaml:"base_path" json:"base_path"`
 }
 
@@ -264,16 +279,30 @@ func (this *SysConfig) PostProcess() {
 
 func NewSysConfig() *SysConfig {
 	return &SysConfig{
-		Server: &ServerConfig{Port: 8080, Name: "gin-bear", MachineID: -1},
+		Server: &ServerConfig{
+			Port:              8080,
+			Name:              "gin-bear",
+			MachineID:         -1,
+			ReadHeaderTimeout: "5s",
+			ReadTimeout:       "15s",
+			WriteTimeout:      "30s",
+			IdleTimeout:       "60s",
+		},
 		Auth:   &AuthConfig{StorageType: "file", JWTSecret: "bear-secret", TokenExpireHours: 24},
 		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root", SSLMode: "disable"},
 		Redis:  &RedisConfig{Addr: "localhost:6379", Password: "", DB: 0},
 		Casbin: &CasbinConfig{},
-		Waf:    &WafConfig{Enabled: false},
-		GeoIP:  &GeoIPConfig{Enabled: false},
+		CORS: &CORSConfig{
+			Enabled:      false,
+			AllowMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+			AllowHeaders: []string{"Content-Type", "Content-Length", "Accept-Encoding", "Authorization", "Accept", "Origin", "Cache-Control", "X-Requested-With", "X-Request-ID"},
+			MaxAge:       "12h",
+		},
+		Waf:      &WafConfig{Enabled: false},
+		GeoIP:    &GeoIPConfig{Enabled: false},
 		BigQuery: &BigQueryConfig{Enabled: false},
-		MQ:     &MQConfig{Enabled: false, Type: "noop", DlqSuffix: "_DLQ", MaxRetries: 3},
-		Kafka:  &KafkaConfig{Enabled: false},
+		MQ:       &MQConfig{Enabled: false, Type: "noop", DlqSuffix: "_DLQ", MaxRetries: 3},
+		Kafka:    &KafkaConfig{Enabled: false},
 		RocketMQ: &RocketMQConfig{Enabled: false},
 		Pulsar:   &PulsarConfig{Enabled: false},
 		Schema:   &SchemaConfig{Enabled: false},

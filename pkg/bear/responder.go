@@ -1,6 +1,7 @@
 package bear
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -109,7 +110,7 @@ func Convert(handler interface{}) gin.HandlerFunc {
 					)
 					ctx.AbortWithStatusJSON(400, Response{
 						Code:    400,
-						Message: fmt.Sprintf("Validation failed: %v", err),
+						Message: "Invalid request",
 					})
 					return
 				}
@@ -144,7 +145,7 @@ func Convert(handler interface{}) gin.HandlerFunc {
 					)
 					ctx.AbortWithStatusJSON(400, Response{
 						Code:    400,
-						Message: fmt.Sprintf("Validation failed: %v", err),
+						Message: "Invalid request",
 					})
 					return
 				}
@@ -265,7 +266,8 @@ func handleSuccess(ctx *gin.Context, result interface{}) {
 }
 
 func handleError(ctx *gin.Context, err error) {
-	msg := err.Error()
+	msg := "Internal server error"
+	status := 500
 	code := 500
 
 	// 记录 handler 执行失败日志
@@ -275,8 +277,14 @@ func handleError(ctx *gin.Context, err error) {
 		"method", ctx.Request.Method,
 	)
 
-	if be, ok := err.(*BearError); ok {
+	var be *BearError
+	if errors.As(err, &be) {
 		code = int(be.Code)
+		status = be.Status
+		if status == 0 {
+			status = code
+		}
+		msg = be.Message
 		if be.Key != "" {
 			msg = be.Key
 			localizer := GetLocalizer(ctx)
@@ -289,7 +297,9 @@ func handleError(ctx *gin.Context, err error) {
 				}
 			}
 		}
+	} else if rid, ok := ctx.Get(RequestIDKey); ok {
+		msg = fmt.Sprintf("Internal server error (RID: %v)", rid)
 	}
 
-	ctx.AbortWithStatusJSON(code, Response{Code: code, Message: msg})
+	ctx.AbortWithStatusJSON(status, Response{Code: code, Message: msg})
 }

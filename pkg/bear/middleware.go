@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -43,10 +44,29 @@ func RequestIDMiddleware() gin.HandlerFunc {
 // CORSMiddleware 处理跨域请求
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Request-ID")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
+		cfg := GetByType[*SysConfig]()
+		if cfg == nil || cfg.CORS == nil || !cfg.CORS.Enabled {
+			c.Next()
+			return
+		}
+
+		origin := c.GetHeader("Origin")
+		if origin != "" && corsOriginAllowed(origin, cfg.CORS.AllowOrigins, cfg.CORS.AllowCredentials) {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+			c.Writer.Header().Set("Vary", "Origin")
+		}
+		if cfg.CORS.AllowCredentials {
+			c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+		if len(cfg.CORS.AllowHeaders) > 0 {
+			c.Writer.Header().Set("Access-Control-Allow-Headers", strings.Join(cfg.CORS.AllowHeaders, ", "))
+		}
+		if len(cfg.CORS.AllowMethods) > 0 {
+			c.Writer.Header().Set("Access-Control-Allow-Methods", strings.Join(cfg.CORS.AllowMethods, ", "))
+		}
+		if maxAge := parseDurationOrDefault(cfg.CORS.MaxAge, 0); maxAge > 0 {
+			c.Writer.Header().Set("Access-Control-Max-Age", fmt.Sprintf("%.0f", maxAge.Seconds()))
+		}
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
@@ -55,6 +75,18 @@ func CORSMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func corsOriginAllowed(origin string, allowedOrigins []string, allowCredentials bool) bool {
+	for _, allowed := range allowedOrigins {
+		if allowed == origin {
+			return true
+		}
+		if allowed == "*" && !allowCredentials {
+			return true
+		}
+	}
+	return false
 }
 
 // PerformanceMiddleware 记录请求处理耗时与基础指标

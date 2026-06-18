@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"bear/pkg/bear/gen"
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear/gen"
 )
 
 func usage() {
