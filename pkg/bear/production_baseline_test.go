@@ -172,6 +172,27 @@ func TestBindingErrorUsesStableClientMessage(t *testing.T) {
 	}
 }
 
+func TestPathIntParameterRejectsInvalidValue(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	app := Ignite(cfg)
+	app.Mount("", &pathParamTestController{})
+	app.ApplyAll(context.Background())
+
+	req := httptest.NewRequest(http.MethodGet, "/users/not-a-number", nil)
+	w := httptest.NewRecorder()
+	app.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Invalid path parameter") {
+		t.Fatalf("response missing path parameter error: %s", w.Body.String())
+	}
+}
+
 func TestIgniteConfiguresGinReleaseMode(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)
@@ -272,6 +293,18 @@ func (c *authTestController) Build(b *Bear) {
 	b.Handle("GET", "/private/ping", func() string { return "secret" })
 }
 
+type pathParamTestController struct{}
+
+func (c *pathParamTestController) Name() string {
+	return "PathParamTestController"
+}
+
+func (c *pathParamTestController) Build(b *Bear) {
+	b.Handle("GET", "/users/:id", func(id int64) string {
+		return "user"
+	})
+}
+
 func TestHealthEndpointsExposeLiveAndReady(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)
@@ -355,6 +388,20 @@ func TestJWTUtilRejectsUnexpectedSigningMethod(t *testing.T) {
 
 	if _, err := util.ParseToken(tokenStr); err == nil {
 		t.Fatal("expected signing method rejection")
+	}
+}
+
+func TestAuthTokenBlacklistKeyUsesTokenHash(t *testing.T) {
+	manager := NewAuthTokenManager()
+	token := "header.payload.signature"
+
+	key := manager.blacklistKey(token)
+
+	if strings.Contains(key, token) {
+		t.Fatalf("blacklist key leaked token: %s", key)
+	}
+	if !strings.HasPrefix(key, "bear:auth:blacklist:") {
+		t.Fatalf("unexpected key prefix: %s", key)
 	}
 }
 

@@ -2,6 +2,8 @@ package bear
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"time"
 )
@@ -81,5 +83,6 @@ func (this *AuthTokenManager) IsTokenBlacklisted(ctx context.Context, tokenStr s
 }
 
 func (this *AuthTokenManager) blacklistKey(token string) string {
-	return fmt.Sprintf("bear:auth:blacklist:%s", token)
+	sum := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("bear:auth:blacklist:%s", hex.EncodeToString(sum[:]))
 }

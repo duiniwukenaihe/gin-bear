@@ -18,7 +18,7 @@ var (
 var genCmd = &cobra.Command{
 	Use:   "gen [type] [name]",
 	Short: "Generate code (api|model|dto)",
-	Long:  `Generate boilerplate code for Controller, Service, Repository, Model, DTO.
+	Long: `Generate boilerplate code for Controller, Service, Repository, Model, DTO.
 
 Types:
   api     - Generate full CRUD API (Controller, Service, Repository, Model, DTO, Module)
@@ -56,12 +56,12 @@ func init() {
 }
 
 type TemplateData struct {
-	PackageName string   // user
-	Title       string   // User
-	Name        string   // user
-	ModuleName  string   // bear (or project name)
-	Fields      []Field  // 额外字段
-	FieldsStr   string   // 字段字符串
+	PackageName string  // user
+	Title       string  // User
+	Name        string  // user
+	ModuleName  string  // bear (or project name)
+	Fields      []Field // 额外字段
+	FieldsStr   string  // 字段字符串
 }
 
 type Field struct {
@@ -198,13 +198,13 @@ func generateAPI(name string, fieldsStr string) {
 
 	// Generate files
 	files := map[string]string{
-		"model.go":       modelTmpl,
-		"dto.go":         dtoTmpl,
-		"repository.go":  repositoryTmpl,
-		"service.go":     serviceTmpl,
-		"controller.go":  controllerTmpl,
-		"module.go":      moduleTmpl,
-		"router.go":      routerTmpl,
+		"model.go":        modelTmpl,
+		"dto.go":          dtoTmpl,
+		"repository.go":   repositoryTmpl,
+		"service.go":      serviceTmpl,
+		"controller.go":   controllerTmpl,
+		"module.go":       moduleTmpl,
+		"router.go":       routerTmpl,
 		"test_example.go": testTmpl,
 	}
 
@@ -607,8 +607,11 @@ func (c *{{.Title}}Controller) List(ctx *gin.Context, query *{{.Title}}QueryDTO)
 // @Success 200 {object} {{.Title}}Response
 // @Router /api/v1/{{.Name}}/{id} [get]
 func (c *{{.Title}}Controller) Get(ctx *gin.Context) (interface{}, error) {
-	id := ctx.Param("id")
-	return c.Service.GetByID(ctx, mustParseID(id))
+	id, err := parseID(ctx.Param("id"))
+	if err != nil {
+		return nil, err
+	}
+	return c.Service.GetByID(ctx, id)
 }
 
 // Create 创建
@@ -633,12 +636,15 @@ func (c *{{.Title}}Controller) Create(ctx *gin.Context, req *{{.Title}}CreateDTO
 // @Success 200 {object} bear.Response
 // @Router /api/v1/{{.Name}}/{id} [put]
 func (c *{{.Title}}Controller) Update(ctx *gin.Context) (interface{}, error) {
-	id := ctx.Param("id")
-	req := &{{.Title}}UpdateDTO{}
-	if err := ctx.ShouldBindJSON(req); err != nil {
+	id, err := parseID(ctx.Param("id"))
+	if err != nil {
 		return nil, err
 	}
-	return bear.Success(nil), c.Service.Update(ctx, mustParseID(id), req)
+	req := &{{.Title}}UpdateDTO{}
+	if err := ctx.ShouldBindJSON(req); err != nil {
+		return nil, bear.ErrInvalidParams.WithErr(err)
+	}
+	return bear.Success(nil), c.Service.Update(ctx, id, req)
 }
 
 // Delete 删除
@@ -650,14 +656,20 @@ func (c *{{.Title}}Controller) Update(ctx *gin.Context) (interface{}, error) {
 // @Success 200 {object} bear.Response
 // @Router /api/v1/{{.Name}}/{id} [delete]
 func (c *{{.Title}}Controller) Delete(ctx *gin.Context) (interface{}, error) {
-	id := ctx.Param("id")
-	return bear.Success(nil), c.Service.Delete(ctx, mustParseID(id))
+	id, err := parseID(ctx.Param("id"))
+	if err != nil {
+		return nil, err
+	}
+	return bear.Success(nil), c.Service.Delete(ctx, id)
 }
 
-// mustParseID 解析 ID
-func mustParseID(s string) int64 {
-	id, _ := strconv.ParseInt(s, 10, 64)
-	return id
+// parseID 解析 ID
+func parseID(s string) (int64, error) {
+	id, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, bear.ErrInvalidParams.WithErr(err)
+	}
+	return id, nil
 }
 `
 

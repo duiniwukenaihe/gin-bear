@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -171,8 +172,14 @@ func Convert(handler interface{}) gin.HandlerFunc {
 				params := ctx.Params
 				for _, p := range params {
 					if p.Value != "" {
-						var intVal int64
-						fmt.Sscanf(p.Value, "%d", &intVal)
+						intVal, err := strconv.ParseInt(p.Value, 10, argType.Bits())
+						if err != nil {
+							ctx.AbortWithStatusJSON(400, Response{
+								Code:    400,
+								Message: "Invalid path parameter",
+							})
+							return
+						}
 						args[i] = reflect.ValueOf(intVal).Convert(argType)
 						break
 					}
