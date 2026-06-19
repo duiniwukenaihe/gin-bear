@@ -1,0 +1,42 @@
+groups:
+  - name: gin-bear.rules
+    rules:
+      - alert: GinBearNoReadyPods
+        expr: kube_deployment_status_replicas_ready{deployment="gin-bear"} < 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "gin-bear has no ready pods"
+          description: "No ready pods have been reported for the gin-bear deployment for 5 minutes."
+
+      - alert: GinBearHighErrorRate
+        expr: |
+          sum(rate(gin_bear_http_errors_total[5m]))
+            / clamp_min(sum(rate(gin_bear_http_requests_total[5m])), 1) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "gin-bear 5xx error rate is high"
+          description: "More than 5% of gin-bear requests are failing."
+
+      - alert: GinBearHighLatency
+        expr: |
+          histogram_quantile(0.95, sum(rate(gin_bear_http_request_duration_seconds_bucket[5m])) by (le)) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "gin-bear p95 latency is high"
+          description: "p95 latency has stayed above 1 second for 10 minutes."
+
+      - alert: GinBearReadinessFailures
+        expr: |
+          sum(rate(gin_bear_http_requests_total{route="/ready",status!="200"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "gin-bear readiness endpoint is failing"
+          description: "The readiness endpoint has returned non-200 responses."

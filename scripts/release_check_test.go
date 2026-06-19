@@ -131,3 +131,103 @@ func TestSecurityPolicyAndRunbookCoverOperations(t *testing.T) {
 		}
 	}
 }
+
+func TestKubernetesManifestsCoverProductionDefaults(t *testing.T) {
+	files := map[string][]string{
+		"../deploy/kubernetes/deployment.yaml": {
+			"kind: Deployment",
+			"replicas: 3",
+			"type: RollingUpdate",
+			"runAsNonRoot: true",
+			"readinessProbe:",
+			"path: /ready",
+			"livenessProbe:",
+			"path: /live",
+			"resources:",
+			"prometheus.io/scrape: \"true\"",
+			"configMap:",
+		},
+		"../deploy/kubernetes/service.yaml": {
+			"kind: Service",
+			"port: 8080",
+			"targetPort: http",
+		},
+		"../deploy/kubernetes/hpa.yaml": {
+			"kind: HorizontalPodAutoscaler",
+			"minReplicas: 3",
+			"maxReplicas: 10",
+			"averageUtilization: 70",
+		},
+		"../deploy/kubernetes/pdb.yaml": {
+			"kind: PodDisruptionBudget",
+			"minAvailable: 2",
+		},
+		"../deploy/kubernetes/configmap.yaml": {
+			"kind: ConfigMap",
+			"application.yaml:",
+			"metrics:",
+			"tracing:",
+		},
+	}
+
+	for path, wants := range files {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s should exist: %v", path, err)
+		}
+		text := string(content)
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s missing %q:\n%s", path, want, text)
+			}
+		}
+	}
+}
+
+func TestPrometheusRulesAndDocsCoverDeploymentAssets(t *testing.T) {
+	rules, err := os.ReadFile("../deploy/prometheus/rules.yaml")
+	if err != nil {
+		t.Fatalf("prometheus rules should exist: %v", err)
+	}
+	ruleText := string(rules)
+	for _, want := range []string{
+		"GinBearNoReadyPods",
+		"GinBearHighErrorRate",
+		"GinBearHighLatency",
+		"GinBearReadinessFailures",
+		"gin_bear_http_requests_total",
+		"gin_bear_http_request_duration_seconds_bucket",
+	} {
+		if !strings.Contains(ruleText, want) {
+			t.Fatalf("prometheus rules missing %q:\n%s", want, ruleText)
+		}
+	}
+
+	production, err := os.ReadFile("../docs/production.md")
+	if err != nil {
+		t.Fatalf("read production docs: %v", err)
+	}
+	for _, want := range []string{"deploy/kubernetes", "deploy/prometheus/rules.yaml", "kubectl apply"} {
+		if !strings.Contains(string(production), want) {
+			t.Fatalf("production docs missing %q", want)
+		}
+	}
+
+	runbook, err := os.ReadFile("../docs/runbook.md")
+	if err != nil {
+		t.Fatalf("read runbook: %v", err)
+	}
+	for _, want := range []string{"Kubernetes Rollout", "Prometheus Alerts", "kubectl rollout undo"} {
+		if !strings.Contains(string(runbook), want) {
+			t.Fatalf("runbook missing %q", want)
+		}
+	}
+
+	dockerignore, err := os.ReadFile("../.dockerignore")
+	if err != nil {
+		t.Fatalf("read .dockerignore: %v", err)
+	}
+	if !strings.Contains(string(dockerignore), "deploy") {
+		t.Fatalf(".dockerignore should exclude deploy assets:\n%s", string(dockerignore))
+	}
+}

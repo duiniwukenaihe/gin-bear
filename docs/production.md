@@ -242,3 +242,19 @@ Run local dependencies:
 ```bash
 docker compose up --build
 ```
+
+## Kubernetes Deployment Assets
+
+The `deploy/kubernetes` directory contains a conservative base deployment set:
+
+```bash
+kubectl apply -f deploy/kubernetes/configmap.yaml
+kubectl apply -f deploy/kubernetes/deployment.yaml
+kubectl apply -f deploy/kubernetes/service.yaml
+kubectl apply -f deploy/kubernetes/hpa.yaml
+kubectl apply -f deploy/kubernetes/pdb.yaml
+```
+
+Review image names, secrets, database settings, and namespace policy before applying to a real cluster.
+
+Prometheus alert starter rules live in `deploy/prometheus/rules.yaml`.

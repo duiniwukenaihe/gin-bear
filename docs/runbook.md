@@ -15,6 +15,20 @@
 3. Check `/ready` before restoring traffic.
 4. Review `/version` to confirm the running commit.
 
+## Kubernetes Rollout
+
+Use `deploy/kubernetes` as a base, then patch image names, namespace, secrets, resource limits, and ingress according to the target platform. Watch rollout progress with:
+
+```bash
+kubectl rollout status deployment/gin-bear
+```
+
+Rollback a failed rollout with:
+
+```bash
+kubectl rollout undo deployment/gin-bear
+```
+
 ## Migration Recovery
 
 Run migrations as a separate deploy step before starting the new app version. If a migration job is interrupted while holding the migration lock, verify no migration process is still running, then call `MigrationRunner.ForceUnlock(ctx)` from an admin command before retrying.
@@ -24,6 +38,10 @@ Use `MigrationRunner.Down(ctx, migrations, steps)` only for reviewed rollback SQ
 ## Observability
 
 Use `/metrics` for Prometheus scraping and `EnableTracing(ctx)` with OTLP for distributed tracing. Request logs include request id and latency information. During incidents, correlate `/version`, trace ids, request ids, and deployment timestamps.
+
+## Prometheus Alerts
+
+Starter alert rules live in `deploy/prometheus/rules.yaml`. Import them into your platform rule manager and tune thresholds per service SLO. The default rules cover ready pod loss, high error rate, high p95 latency, and readiness failures.
 
 ## Incident Response
 
