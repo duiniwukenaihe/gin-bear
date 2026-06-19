@@ -198,6 +198,7 @@ BEAR_SERVER_PORT=8080
 JWT_SECRET=replace-with-at-least-32-random-characters
 `), 0644)
 	os.WriteFile(name+"/Dockerfile", []byte(generatedDockerfileContent()), 0644)
+	os.WriteFile(name+"/.dockerignore", []byte(generatedDockerignoreContent()), 0644)
 	fmt.Println("Project created successfully!")
 }
 
@@ -223,6 +224,36 @@ USER app
 EXPOSE 8080
 ENTRYPOINT ["/app/app"]
 `, versionPackage)
+}
+
+func generatedDockerignoreContent() string {
+	return `.git
+.github
+.idea
+.vscode
+.claude
+.agents
+
+docs
+docs/superpowers
+scripts
+
+README.md
+Makefile
+.gitignore
+.env
+.env.*
+application-*.yaml
+config.json
+
+*_test.go
+coverage.out
+bin
+dist
+tmp
+server.log
+sbom.spdx.json
+`
 }
 
 func handleGen(args []string) {

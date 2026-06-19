@@ -75,6 +75,7 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 		}
 		// 统一路径格式
 		path = strings.ReplaceAll(path, "//", "/")
+		publicRoute := openAPIRouteIsPublic(path, config)
 		path = toOpenAPIPath(path)
 
 		if _, exists := schema.Paths[path]; !exists {
@@ -90,6 +91,9 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 			},
 		}
 		enrichOpenAPIOperation(op, route.HandlerType)
+		if publicRoute {
+			op["security"] = []map[string][]string{}
+		}
 
 		// 检查控制器是否提供了额外元数据
 		if bean := GetInjector().Get(route.HandlerType); bean != nil {
@@ -106,6 +110,18 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 	}
 
 	return json.MarshalIndent(schema, "", "  ")
+}
+
+func openAPIRouteIsPublic(path string, config *SysConfig) bool {
+	if config == nil || config.Auth == nil {
+		return false
+	}
+	for _, pattern := range config.Auth.PublicPaths {
+		if publicPathMatch(path, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func toOpenAPIPath(path string) string {

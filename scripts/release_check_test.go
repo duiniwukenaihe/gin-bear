@@ -27,6 +27,8 @@ func TestReleaseCheckScriptCoversProductionGates(t *testing.T) {
 		"govulncheck",
 		"go mod tidy",
 		"syft",
+		"GENERATE_SBOM",
+		"go install github.com/anchore/syft/cmd/syft@latest",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("release-check.sh missing %q:\n%s", want, text)
@@ -34,12 +36,40 @@ func TestReleaseCheckScriptCoversProductionGates(t *testing.T) {
 	}
 }
 
-func TestCIInvokesReleaseCheckScript(t *testing.T) {
+func TestDockerignoreExcludesNonRuntimeBuildContext(t *testing.T) {
+	content, err := os.ReadFile("../.dockerignore")
+	if err != nil {
+		t.Fatalf(".dockerignore should exist: %v", err)
+	}
+	text := string(content)
+	for _, want := range []string{
+		".git",
+		".github",
+		"docs/superpowers",
+		"scripts",
+		"*_test.go",
+		"sbom.spdx.json",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf(".dockerignore missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestCIInvokesReleaseCheckScriptAndUploadsSBOM(t *testing.T) {
 	content, err := os.ReadFile("../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatalf("read ci workflow: %v", err)
 	}
-	if !strings.Contains(string(content), "scripts/release-check.sh") {
-		t.Fatalf("CI should invoke scripts/release-check.sh:\n%s", string(content))
+	text := string(content)
+	for _, want := range []string{
+		"GENERATE_SBOM: \"true\"",
+		"scripts/release-check.sh",
+		"actions/upload-artifact",
+		"sbom.spdx.json",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("CI missing %q:\n%s", want, text)
+		}
 	}
 }

@@ -42,8 +42,14 @@ fi
 "${GOVULNCHECK_BIN}" ./...
 
 echo "==> Generating optional SBOM"
-if command -v syft >/dev/null 2>&1; then
-	syft dir:. -o spdx-json=sbom.spdx.json
+GENERATE_SBOM="${GENERATE_SBOM:-false}"
+SYFT_BIN="$(command -v syft || true)"
+if [[ "${GENERATE_SBOM}" == "true" && -z "${SYFT_BIN}" ]]; then
+	go install github.com/anchore/syft/cmd/syft@latest
+	SYFT_BIN="$(go env GOPATH)/bin/syft"
+fi
+if [[ -n "${SYFT_BIN}" && -x "${SYFT_BIN}" ]]; then
+	"${SYFT_BIN}" dir:. -o spdx-json=sbom.spdx.json
 else
 	echo "syft not found; skipping SBOM generation"
 fi

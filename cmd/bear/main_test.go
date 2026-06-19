@@ -36,3 +36,19 @@ func TestGeneratedDockerfileUsesFrameworkVersionPackage(t *testing.T) {
 		}
 	}
 }
+
+func TestGeneratedDockerignoreContentExcludesLocalAndSupplyChainFiles(t *testing.T) {
+	got := generatedDockerignoreContent()
+
+	for _, want := range []string{
+		".git",
+		".github",
+		"docs/superpowers",
+		"*_test.go",
+		"sbom.spdx.json",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("generated .dockerignore missing %q:\n%s", want, got)
+		}
+	}
+}

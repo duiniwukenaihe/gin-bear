@@ -21,7 +21,16 @@ jobs:
           cache: true
 
       - name: Release check
+        env:
+          GENERATE_SBOM: "true"
         run: scripts/release-check.sh
+
+      - name: Upload SBOM
+        if: ${{ hashFiles('sbom.spdx.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
 
       - name: Docker build
         run: |

@@ -186,6 +186,18 @@ func (r *MigrationRunner) Down(ctx context.Context, migrations []Migration, step
 	return nil
 }
 
+func (r *MigrationRunner) ForceUnlock(ctx context.Context) error {
+	if r == nil || r.DB == nil {
+		return fmt.Errorf("migration runner requires a database")
+	}
+	lockTable := r.lockTable()
+	if err := r.ensureLockTable(ctx, lockTable); err != nil {
+		return err
+	}
+	r.releaseLock(ctx, lockTable)
+	return nil
+}
+
 func (r *MigrationRunner) lockTable() string {
 	if r.LockTable != "" {
 		return r.LockTable

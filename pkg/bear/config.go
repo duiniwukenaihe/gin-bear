@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -267,7 +269,46 @@ type SwaggerConfig struct {
 
 func (this *SysConfig) Validate() error {
 	validate := validator.New()
-	return validate.Struct(this)
+	if err := validate.Struct(this); err != nil {
+		return err
+	}
+	return this.validateSemantic()
+}
+
+func (this *SysConfig) validateSemantic() error {
+	if this == nil {
+		return nil
+	}
+	if this.Tracing != nil {
+		exporter := strings.ToLower(strings.TrimSpace(this.Tracing.Exporter))
+		switch exporter {
+		case "", "stdout", "console", "otlp", "otlphttp", "none", "noop":
+		default:
+			return fmt.Errorf("tracing.exporter must be one of stdout, otlp, none")
+		}
+		if this.Tracing.SampleRate < 0 || this.Tracing.SampleRate > 1 {
+			return fmt.Errorf("tracing.sample_rate must be between 0 and 1")
+		}
+	}
+	if this.Metrics != nil && this.Metrics.Path != "" && !strings.HasPrefix(this.Metrics.Path, "/") {
+		return fmt.Errorf("metrics.path must start with /")
+	}
+	if this.Server != nil {
+		for name, value := range map[string]string{
+			"server.read_header_timeout": this.Server.ReadHeaderTimeout,
+			"server.read_timeout":        this.Server.ReadTimeout,
+			"server.write_timeout":       this.Server.WriteTimeout,
+			"server.idle_timeout":        this.Server.IdleTimeout,
+		} {
+			if value == "" {
+				continue
+			}
+			if _, err := time.ParseDuration(value); err != nil {
+				return fmt.Errorf("%s must be a valid duration: %w", name, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (this *SysConfig) Name() string {

@@ -227,6 +227,8 @@ docker build .
 
 `scripts/release-check.sh` installs `govulncheck` when needed and generates `sbom.spdx.json` when `syft` is available.
 
+Set `GENERATE_SBOM=true` to force SBOM generation. When `syft` is not installed, the script installs it with `go install github.com/anchore/syft/cmd/syft@latest`.
+
 ## Containers
 
 Build the app image:

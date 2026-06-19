@@ -73,6 +73,58 @@ func TestIgniteRegistersProvidedConfigBeforeMiddleware(t *testing.T) {
 	}
 }
 
+func TestSysConfigValidateRejectsSemanticErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*SysConfig)
+		wantErr string
+	}{
+		{
+			name: "unsupported tracing exporter",
+			mutate: func(cfg *SysConfig) {
+				cfg.Tracing.Enabled = true
+				cfg.Tracing.Exporter = "zipkin"
+			},
+			wantErr: "tracing.exporter",
+		},
+		{
+			name: "invalid tracing sample rate",
+			mutate: func(cfg *SysConfig) {
+				cfg.Tracing.SampleRate = 1.5
+			},
+			wantErr: "tracing.sample_rate",
+		},
+		{
+			name: "metrics path must be absolute",
+			mutate: func(cfg *SysConfig) {
+				cfg.Metrics.Path = "metrics"
+			},
+			wantErr: "metrics.path",
+		},
+		{
+			name: "server timeout must parse",
+			mutate: func(cfg *SysConfig) {
+				cfg.Server.ReadTimeout = "soon"
+			},
+			wantErr: "server.read_timeout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewSysConfig()
+			tt.mutate(cfg)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("expected validation error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validation error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestBuildHTTPServerAppliesConfiguredTimeouts(t *testing.T) {
 	resetTestInjector()
 	cfg := NewSysConfig()
@@ -319,6 +371,7 @@ func (c *pathParamTestController) Build(b *Bear) {
 }
 
 type openAPITestController struct{}
+type openAPIPublicTestController struct{}
 
 type openAPITestRequest struct {
 	ID   int64  `uri:"id" binding:"required"`
@@ -341,6 +394,19 @@ func (c *openAPITestController) Build(b *Bear) {
 
 func (c *openAPITestController) Update(req *openAPITestRequest) (*openAPITestResponse, error) {
 	return &openAPITestResponse{ID: req.ID, Name: req.Name}, nil
+}
+
+func (c *openAPIPublicTestController) Name() string {
+	return "OpenAPIPublicTestController"
+}
+
+func (c *openAPIPublicTestController) Build(b *Bear) {
+	b.Handle(http.MethodGet, "/public/ping", c.Ping)
+	b.Handle(http.MethodGet, "/private/ping", c.Ping)
+}
+
+func (c *openAPIPublicTestController) Ping() string {
+	return "pong"
 }
 
 func TestHealthEndpointsExposeLiveAndReady(t *testing.T) {
@@ -619,6 +685,43 @@ func TestGenerateOpenAPIIncludesJWTSecurityScheme(t *testing.T) {
 	requirement := security[0].(map[string]interface{})
 	if _, ok := requirement["BearerAuth"]; !ok {
 		t.Fatalf("missing BearerAuth requirement: %#v", requirement)
+	}
+}
+
+func TestGenerateOpenAPIMarksPublicPathsWithoutSecurity(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Auth.PublicPaths = []string{"/api/public/*"}
+
+	app := Ignite(cfg)
+	app.Mount("/api", &openAPIPublicTestController{})
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("apply all: %v", err)
+	}
+
+	doc, err := app.GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("generate openapi: %v", err)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v\n%s", err, string(doc))
+	}
+
+	paths := spec["paths"].(map[string]interface{})
+	publicOp := paths["/api/public/ping"].(map[string]interface{})["get"].(map[string]interface{})
+	security, ok := publicOp["security"].([]interface{})
+	if !ok {
+		t.Fatalf("public operation should override security: %#v", publicOp)
+	}
+	if len(security) != 0 {
+		t.Fatalf("public operation security = %#v, want empty override", security)
+	}
+	privateOp := paths["/api/private/ping"].(map[string]interface{})["get"].(map[string]interface{})
+	if _, ok := privateOp["security"]; ok {
+		t.Fatalf("private operation should inherit global security: %#v", privateOp)
 	}
 }
 
@@ -1049,6 +1152,26 @@ func TestMigrationRunnerUsesExecutionLock(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "migration lock") {
 		t.Fatalf("unexpected lock error: %v", err)
+	}
+}
+
+func TestMigrationRunnerForceUnlockReleasesHeldLock(t *testing.T) {
+	sqlDB := newMigrationTestDB(t)
+	runner := NewMigrationRunner(sqlDB)
+	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks"); err != nil {
+		t.Fatalf("ensure lock table: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name) VALUES (?)", defaultMigrationLockName); err != nil {
+		t.Fatalf("insert held lock: %v", err)
+	}
+
+	if err := runner.ForceUnlock(context.Background()); err != nil {
+		t.Fatalf("force unlock: %v", err)
+	}
+	if err := runner.Up(context.Background(), []Migration{
+		{Version: "001", Name: "create_users", UpSQL: "CREATE TABLE users (id INTEGER PRIMARY KEY);"},
+	}); err != nil {
+		t.Fatalf("up after force unlock: %v", err)
 	}
 }
 
