@@ -58,7 +58,7 @@ func Convert(handler interface{}) gin.HandlerFunc {
 		return h
 	}
 	if h, ok := handler.(func(*gin.Context)); ok {
-		return h
+		return gin.HandlerFunc(h)
 	}
 
 	// 2. 尝试从缓存获取
@@ -76,7 +76,7 @@ func Convert(handler interface{}) gin.HandlerFunc {
 		return nil
 	}
 
-	result := func(ctx *gin.Context) {
+	result := gin.HandlerFunc(func(ctx *gin.Context) {
 		args := make([]reflect.Value, h_type.NumIn())
 		for i := 0; i < h_type.NumIn(); i++ {
 			argType := h_type.In(i)
@@ -159,7 +159,7 @@ func Convert(handler interface{}) gin.HandlerFunc {
 
 		// 处理返回值
 		handleResults(ctx, results)
-	}
+	})
 
 	// 存入缓存
 	if h_ref.IsValid() {

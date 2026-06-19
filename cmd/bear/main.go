@@ -118,6 +118,13 @@ go 1.25.0
 database:
   enabled: false
 
+tracing:
+  enabled: false
+  service_name: "gin-bear-app"
+  exporter: "stdout"
+  otlp_endpoint: "http://localhost:4318"
+  sample_rate: 1.0
+
 auth:
   jwt_secret: "replace-with-at-least-32-random-characters"
   token_expire_hours: 24
@@ -152,6 +159,13 @@ database:
   dbname: "gin_bear"
   sslmode: "disable"
   slow_query_threshold: "500ms"
+
+tracing:
+  enabled: false
+  service_name: "gin-bear-app"
+  exporter: "otlp"
+  otlp_endpoint: "http://otel-collector:4318/v1/traces"
+  sample_rate: 1.0
 
 auth:
   jwt_secret: "replace-with-at-least-32-random-characters"

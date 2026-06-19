@@ -11,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,11 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -25,6 +31,7 @@ func resetTestInjector() {
 	injector = &BeanFactory{
 		beans: make(map[reflect.Type]any),
 	}
+	handlerCache = sync.Map{}
 }
 
 func resetGinModeForTest(t *testing.T) {
@@ -439,6 +446,86 @@ func TestMetricsEndpointExportsHTTPRequestMetrics(t *testing.T) {
 	}
 }
 
+func TestTracingMiddlewareCreatesServerSpanAndExtractsTraceparent(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+	})
+
+	router := gin.New()
+	router.Use(TracingMiddleware(provider, propagation.TraceContext{}))
+	router.GET("/users/:id", func(c *gin.Context) {
+		spanContext := oteltrace.SpanContextFromContext(c.Request.Context())
+		if !spanContext.IsValid() {
+			t.Fatal("expected handler context to contain a valid span")
+		}
+		c.String(http.StatusAccepted, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/users/42?debug=true", nil)
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	req.Header.Set("X-Request-ID", "rid-123")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("span count = %d, spans = %#v", len(spans), spans)
+	}
+	span := spans[0]
+	if span.Name != "GET /users/:id" {
+		t.Fatalf("span name = %q", span.Name)
+	}
+	if span.SpanKind != oteltrace.SpanKindServer {
+		t.Fatalf("span kind = %s", span.SpanKind)
+	}
+	if got := span.Parent.TraceID().String(); got != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("parent trace id = %s", got)
+	}
+	if !spanHasStringAttr(span.Attributes, "http.request.method", "GET") {
+		t.Fatalf("missing method attr: %#v", span.Attributes)
+	}
+	if !spanHasStringAttr(span.Attributes, "http.route", "/users/:id") {
+		t.Fatalf("missing route attr: %#v", span.Attributes)
+	}
+	if !spanHasIntAttr(span.Attributes, "http.response.status_code", 202) {
+		t.Fatalf("missing status attr: %#v", span.Attributes)
+	}
+	if !spanHasStringAttr(span.Attributes, "gin_bear.request_id", "rid-123") {
+		t.Fatalf("missing request id attr: %#v", span.Attributes)
+	}
+}
+
+func TestEnableTracingRegistersMiddlewareOnce(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Tracing.Enabled = true
+	cfg.Tracing.Exporter = "none"
+	cfg.Tracing.ServiceName = "trace-test"
+
+	app := Ignite(cfg)
+	before := len(app.Handlers)
+	app.EnableTracing(context.Background())
+	afterFirst := len(app.Handlers)
+	app.EnableTracing(context.Background())
+	afterSecond := len(app.Handlers)
+
+	if afterFirst != before+1 {
+		t.Fatalf("handler count after EnableTracing = %d, want %d", afterFirst, before+1)
+	}
+	if afterSecond != afterFirst {
+		t.Fatalf("EnableTracing should be idempotent, handlers after second call = %d, first = %d", afterSecond, afterFirst)
+	}
+}
+
 func TestGenerateOpenAPIIncludesParametersRequestBodyAndResponseSchema(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)
@@ -496,6 +583,45 @@ func TestGenerateOpenAPIIncludesParametersRequestBodyAndResponseSchema(t *testin
 	}
 }
 
+func TestGenerateOpenAPIIncludesJWTSecurityScheme(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Server.Name = "secure-openapi-test"
+	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+
+	app := Ignite(cfg)
+	app.Mount("/api", &openAPITestController{})
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("apply all: %v", err)
+	}
+
+	doc, err := app.GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("generate openapi: %v", err)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v\n%s", err, string(doc))
+	}
+
+	components := spec["components"].(map[string]interface{})
+	securitySchemes := components["securitySchemes"].(map[string]interface{})
+	bearerAuth := securitySchemes["BearerAuth"].(map[string]interface{})
+	if bearerAuth["type"] != "http" || bearerAuth["scheme"] != "bearer" || bearerAuth["bearerFormat"] != "JWT" {
+		t.Fatalf("unexpected bearer auth scheme: %#v", bearerAuth)
+	}
+	security := spec["security"].([]interface{})
+	if len(security) != 1 {
+		t.Fatalf("security length = %d: %#v", len(security), security)
+	}
+	requirement := security[0].(map[string]interface{})
+	if _, ok := requirement["BearerAuth"]; !ok {
+		t.Fatalf("missing BearerAuth requirement: %#v", requirement)
+	}
+}
+
 func openAPIHasParameter(parameters []interface{}, name, in, typ string) bool {
 	for _, raw := range parameters {
 		param := raw.(map[string]interface{})
@@ -504,6 +630,24 @@ func openAPIHasParameter(parameters []interface{}, name, in, typ string) bool {
 		}
 		schema := param["schema"].(map[string]interface{})
 		return schema["type"] == typ
+	}
+	return false
+}
+
+func spanHasStringAttr(attrs []attribute.KeyValue, key string, want string) bool {
+	for _, attr := range attrs {
+		if string(attr.Key) == key && attr.Value.AsString() == want {
+			return true
+		}
+	}
+	return false
+}
+
+func spanHasIntAttr(attrs []attribute.KeyValue, key string, want int64) bool {
+	for _, attr := range attrs {
+		if string(attr.Key) == key && attr.Value.AsInt64() == want {
+			return true
+		}
 	}
 	return false
 }
@@ -844,6 +988,67 @@ func TestMigrationRunnerStopsOnInvalidSQL(t *testing.T) {
 	}
 	if applied != 0 {
 		t.Fatalf("applied count after failure = %d", applied)
+	}
+}
+
+func TestMigrationRunnerRollsBackLatestMigrations(t *testing.T) {
+	sqlDB := newMigrationTestDB(t)
+	runner := NewMigrationRunner(sqlDB)
+	migrations := []Migration{
+		{
+			Version: "001",
+			Name:    "create_users",
+			UpSQL:   "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);",
+			DownSQL: "DROP TABLE users;",
+		},
+		{
+			Version: "002",
+			Name:    "create_audit",
+			UpSQL:   "CREATE TABLE audit_logs (id INTEGER PRIMARY KEY, message TEXT);",
+			DownSQL: "DROP TABLE audit_logs;",
+		},
+	}
+
+	if err := runner.Up(context.Background(), migrations); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if err := runner.Down(context.Background(), migrations, 1); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO audit_logs (message) VALUES ('rolled back')"); err == nil {
+		t.Fatal("expected audit_logs table to be removed after rollback")
+	}
+	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO users (name) VALUES ('alice')"); err != nil {
+		t.Fatalf("users table should remain after one-step rollback: %v", err)
+	}
+	var applied int
+	if err := sqlDB.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schema_migrations").Scan(&applied); err != nil {
+		t.Fatalf("count migrations: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("applied count after rollback = %d", applied)
+	}
+}
+
+func TestMigrationRunnerUsesExecutionLock(t *testing.T) {
+	sqlDB := newMigrationTestDB(t)
+	runner := NewMigrationRunner(sqlDB)
+	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks"); err != nil {
+		t.Fatalf("ensure lock table: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name) VALUES (?)", defaultMigrationLockName); err != nil {
+		t.Fatalf("insert held lock: %v", err)
+	}
+
+	err := runner.Up(context.Background(), []Migration{
+		{Version: "001", Name: "create_users", UpSQL: "CREATE TABLE users (id INTEGER PRIMARY KEY);"},
+	})
+	if err == nil {
+		t.Fatal("expected migration lock error")
+	}
+	if !strings.Contains(err.Error(), "migration lock") {
+		t.Fatalf("unexpected lock error: %v", err)
 	}
 }
 

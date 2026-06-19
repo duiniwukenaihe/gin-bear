@@ -20,31 +20,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Check module tidiness
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
-
-      - name: Build command packages
-        run: |
-          go build \
-            -ldflags="-X github.com/duiniwukenaihe/gin-bear/pkg/bear.Version=ci -X github.com/duiniwukenaihe/gin-bear/pkg/bear.Commit=${GITHUB_SHA} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            ./cmd ./cmd/bear ./cmd/bear-cli
-
-      - name: Test
-        run: go test ./... -count=1
-
-      - name: Race test
-        run: go test -race ./... -count=1
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
-
-      - name: Vulnerability scan
-        run: $(go env GOPATH)/bin/govulncheck ./...
+      - name: Release check
+        run: scripts/release-check.sh
 
       - name: Docker build
         run: |

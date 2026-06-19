@@ -37,6 +37,7 @@ type OpenAPISchema struct {
 	Info       map[string]interface{} `json:"info"`
 	Paths      map[string]interface{} `json:"paths"`
 	Components map[string]interface{} `json:"components"`
+	Security   []map[string][]string  `json:"security,omitempty"`
 }
 
 // GenerateOpenAPI 生成 OpenAPI 3.0 文档内容
@@ -52,6 +53,18 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 		Components: map[string]interface{}{
 			"schemas": make(map[string]interface{}),
 		},
+	}
+	if config != nil && config.Auth != nil {
+		schema.Components["securitySchemes"] = map[string]interface{}{
+			"BearerAuth": map[string]interface{}{
+				"type":         "http",
+				"scheme":       "bearer",
+				"bearerFormat": "JWT",
+			},
+		}
+		schema.Security = []map[string][]string{
+			{"BearerAuth": []string{}},
+		}
 	}
 
 	// 遍历路由元数据

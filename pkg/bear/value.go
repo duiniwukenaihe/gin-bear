@@ -16,9 +16,9 @@ import (
 //
 //	支持 int, string, bool, float64 等基础类型
 type Value struct {
-	prefix  string
-	key     string
-	value   interface{}
+	prefix string
+	key    string
+	value  interface{}
 }
 
 // NewValue 创建一个新的 Value 实例

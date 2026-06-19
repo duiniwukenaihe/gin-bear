@@ -51,6 +51,13 @@ redis:
   read_timeout_seconds: 3
   write_timeout_seconds: 3
 
+tracing:
+  enabled: false
+  service_name: "gin-bear"
+  exporter: "otlp"
+  otlp_endpoint: "http://otel-collector:4318/v1/traces"
+  sample_rate: 1.0
+
 websocket:
   handshake_timeout_ms: 10000
   read_buffer_size: 1024

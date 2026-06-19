@@ -11,6 +11,8 @@ import (
 )
 
 const defaultMigrationTable = "schema_migrations"
+const defaultMigrationLockTable = "schema_migration_locks"
+const defaultMigrationLockName = "global"
 
 type Migration struct {
 	Version string
@@ -20,14 +22,16 @@ type Migration struct {
 }
 
 type MigrationRunner struct {
-	DB    *sql.DB
-	Table string
+	DB        *sql.DB
+	Table     string
+	LockTable string
 }
 
 func NewMigrationRunner(db *sql.DB) *MigrationRunner {
 	return &MigrationRunner{
-		DB:    db,
-		Table: defaultMigrationTable,
+		DB:        db,
+		Table:     defaultMigrationTable,
+		LockTable: defaultMigrationLockTable,
 	}
 }
 
@@ -112,6 +116,14 @@ func (r *MigrationRunner) Up(ctx context.Context, migrations []Migration) error 
 	if err := r.ensureTable(ctx, table); err != nil {
 		return err
 	}
+	lockTable := r.lockTable()
+	if err := r.ensureLockTable(ctx, lockTable); err != nil {
+		return err
+	}
+	if err := r.acquireLock(ctx, lockTable); err != nil {
+		return err
+	}
+	defer r.releaseLock(context.Background(), lockTable)
 
 	for _, migration := range migrations {
 		applied, err := r.isApplied(ctx, table, migration.Version)
@@ -128,6 +140,59 @@ func (r *MigrationRunner) Up(ctx context.Context, migrations []Migration) error 
 	return nil
 }
 
+func (r *MigrationRunner) Down(ctx context.Context, migrations []Migration, steps int) error {
+	if r == nil || r.DB == nil {
+		return fmt.Errorf("migration runner requires a database")
+	}
+	if steps <= 0 {
+		return nil
+	}
+	table := r.Table
+	if table == "" {
+		table = defaultMigrationTable
+	}
+	if err := r.ensureTable(ctx, table); err != nil {
+		return err
+	}
+	lockTable := r.lockTable()
+	if err := r.ensureLockTable(ctx, lockTable); err != nil {
+		return err
+	}
+	if err := r.acquireLock(ctx, lockTable); err != nil {
+		return err
+	}
+	defer r.releaseLock(context.Background(), lockTable)
+
+	latest, err := r.latestApplied(ctx, table, steps)
+	if err != nil {
+		return err
+	}
+	byVersion := make(map[string]Migration, len(migrations))
+	for _, migration := range migrations {
+		byVersion[migration.Version] = migration
+	}
+	for _, applied := range latest {
+		migration, ok := byVersion[applied.Version]
+		if !ok {
+			return fmt.Errorf("rollback migration %s_%s: migration file not loaded", applied.Version, applied.Name)
+		}
+		if strings.TrimSpace(migration.DownSQL) == "" {
+			return fmt.Errorf("rollback migration %s_%s: down sql is empty", applied.Version, applied.Name)
+		}
+		if err := r.applyDown(ctx, table, migration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *MigrationRunner) lockTable() string {
+	if r.LockTable != "" {
+		return r.LockTable
+	}
+	return defaultMigrationLockTable
+}
+
 func (r *MigrationRunner) ensureTable(ctx context.Context, table string) error {
 	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 version TEXT PRIMARY KEY,
@@ -136,6 +201,28 @@ applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`, table)
 	_, err := r.DB.ExecContext(ctx, query)
 	return err
+}
+
+func (r *MigrationRunner) ensureLockTable(ctx context.Context, table string) error {
+	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+name TEXT PRIMARY KEY,
+locked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`, table)
+	_, err := r.DB.ExecContext(ctx, query)
+	return err
+}
+
+func (r *MigrationRunner) acquireLock(ctx context.Context, table string) error {
+	query := fmt.Sprintf("INSERT INTO %s (name) VALUES (?)", table)
+	if _, err := r.DB.ExecContext(ctx, query, defaultMigrationLockName); err != nil {
+		return fmt.Errorf("migration lock is already held: %w", err)
+	}
+	return nil
+}
+
+func (r *MigrationRunner) releaseLock(ctx context.Context, table string) {
+	query := fmt.Sprintf("DELETE FROM %s WHERE name = ?", table)
+	_, _ = r.DB.ExecContext(ctx, query, defaultMigrationLockName)
 }
 
 func (r *MigrationRunner) isApplied(ctx context.Context, table string, version string) (bool, error) {
@@ -169,6 +256,59 @@ func (r *MigrationRunner) applyUp(ctx context.Context, table string, migration M
 	insert := fmt.Sprintf("INSERT INTO %s (version, name) VALUES (?, ?)", table)
 	if _, err := tx.ExecContext(ctx, insert, migration.Version, migration.Name); err != nil {
 		return fmt.Errorf("record migration %s_%s: %w", migration.Version, migration.Name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+type appliedMigration struct {
+	Version string
+	Name    string
+}
+
+func (r *MigrationRunner) latestApplied(ctx context.Context, table string, steps int) ([]appliedMigration, error) {
+	query := fmt.Sprintf("SELECT version, name FROM %s ORDER BY version DESC LIMIT ?", table)
+	rows, err := r.DB.QueryContext(ctx, query, steps)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var applied []appliedMigration
+	for rows.Next() {
+		var migration appliedMigration
+		if err := rows.Scan(&migration.Version, &migration.Name); err != nil {
+			return nil, err
+		}
+		applied = append(applied, migration)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return applied, nil
+}
+
+func (r *MigrationRunner) applyDown(ctx context.Context, table string, migration Migration) error {
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, migration.DownSQL); err != nil {
+		return fmt.Errorf("rollback migration %s_%s: %w", migration.Version, migration.Name, err)
+	}
+	deleteRecord := fmt.Sprintf("DELETE FROM %s WHERE version = ?", table)
+	if _, err := tx.ExecContext(ctx, deleteRecord, migration.Version); err != nil {
+		return fmt.Errorf("remove migration record %s_%s: %w", migration.Version, migration.Name, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return err

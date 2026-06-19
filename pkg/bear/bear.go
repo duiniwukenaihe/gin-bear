@@ -17,6 +17,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/grpc"
 )
 
@@ -71,6 +73,7 @@ type Bear struct {
 	pluginManager     *PluginManager
 	pluginMode        bool // 标记当前是否处于插件加载模式
 	metricsRegistered atomic.Bool
+	tracingRegistered atomic.Bool
 }
 
 // OnShutdown 注册服务关闭时的清理函数
@@ -154,9 +157,26 @@ func (this *Bear) EnableMQ(ctx context.Context) *Bear {
 	return this
 }
 
-// EnableTracing 开启链路追踪 (已禁用)
+// EnableTracing 开启链路追踪
 func (this *Bear) EnableTracing(ctx context.Context) *Bear {
-	slog.Warn("Tracing is disabled in 精简 mode")
+	config := GetByType[*SysConfig]()
+	if config == nil || config.Tracing == nil || !config.Tracing.Enabled {
+		return this
+	}
+	if !this.tracingRegistered.CompareAndSwap(false, true) {
+		return this
+	}
+	provider, err := newTracerProvider(ctx, config.Tracing)
+	if err != nil {
+		slog.Error("Tracing initialization failed", "error", err)
+		return this
+	}
+	propagator := propagation.TraceContext{}
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagator)
+	this.Use(TracingMiddleware(provider, propagator))
+	this.OnShutdown(shutdownTracerProvider(provider))
+	slog.Info("Tracing enabled", "exporter", config.Tracing.Exporter, "service", config.Tracing.ServiceName)
 	return this
 }
 

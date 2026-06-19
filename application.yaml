@@ -13,6 +13,13 @@ database:
 redis:
   addr: "localhost:6379"
 
+tracing:
+  enabled: false
+  service_name: "gin-bear"
+  exporter: "stdout"
+  otlp_endpoint: "http://localhost:4318"
+  sample_rate: 1.0
+
 auth:
   jwt_secret: "bear-secret"
   token_expire_hours: 24

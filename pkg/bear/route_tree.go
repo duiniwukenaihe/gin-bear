@@ -6,7 +6,7 @@ import (
 
 // RouteFairing 存储路由和其绑定的 Fairings 的映射
 type RouteFairing struct {
-	Path    string
+	Path     string
 	Fairings []Fairing
 }
 
@@ -17,11 +17,11 @@ type RouteTree struct {
 
 // routeNode 路由树节点
 type routeNode struct {
-	path      string
-	fairings  []Fairing
-	children  map[string]*routeNode
-	wildcard  *routeNode      // 处理 :param 这种参数路由
-	catchAll  *routeNode      // 处理 *catchall 这种路由
+	path     string
+	fairings []Fairing
+	children map[string]*routeNode
+	wildcard *routeNode // 处理 :param 这种参数路由
+	catchAll *routeNode // 处理 *catchall 这种路由
 }
 
 func NewRouteTree() *RouteTree {
@@ -73,7 +73,7 @@ func (rt *RouteTree) addRoute(method, path string, fairings []Fairing) {
 			// 捕获所有路由 *catchall
 			if current.catchAll == nil {
 				current.catchAll = &routeNode{
-					path:    segment,
+					path: segment,
 				}
 			}
 			current.catchAll.fairings = fairings

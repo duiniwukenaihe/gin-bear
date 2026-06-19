@@ -82,6 +82,21 @@ metrics:
 
 Request metrics are labeled by `method`, Gin route pattern, and `status`.
 
+## Tracing
+
+Enable OpenTelemetry tracing explicitly:
+
+```yaml
+tracing:
+  enabled: true
+  service_name: "gin-bear"
+  exporter: "otlp"
+  otlp_endpoint: "http://otel-collector:4318/v1/traces"
+  sample_rate: 1.0
+```
+
+Call `app.EnableTracing(ctx)` during startup. The HTTP middleware extracts W3C `traceparent` headers, creates server spans named like `GET /users/:id`, and records method, route, status, client address, request id, and Gin errors. Supported exporters are `stdout`, `otlp`, and `none`.
+
 ## OpenAPI And Swagger
 
 Enable Swagger/OpenAPI with:
@@ -100,7 +115,9 @@ The generator uses route metadata and handler function signatures to infer:
 - `json` tags as request body fields.
 - the first non-error handler return value as the `200` response schema.
 
-This is a best-effort contract generator. For externally consumed APIs, review the generated document in code review and add explicit documentation around business errors, auth requirements, pagination, and non-200 responses.
+When auth config is present, the document includes a JWT bearer `BearerAuth` security scheme and top-level security requirement.
+
+This is a best-effort contract generator. For externally consumed APIs, review the generated document in code review and add explicit documentation around business errors, public-route exceptions, pagination, and non-200 responses.
 
 ## Database Migrations
 
@@ -140,6 +157,12 @@ return runner.Up(context.Background(), migrations)
 ```
 
 Applied versions are recorded in `schema_migrations`, and rerunning `Up` skips versions that have already been applied.
+
+`Up` and `Down` acquire a portable migration lock so concurrent runners do not apply or roll back schema changes at the same time. Roll back the latest applied migration steps with:
+
+```go
+return runner.Down(context.Background(), migrations, 1)
+```
 
 `database.slow_query_threshold` enables GORM slow query logging for runtime visibility.
 
@@ -198,21 +221,11 @@ Plugin paths are resolved to absolute paths and must live inside one of the conf
 Run the same core checks locally before cutting a release:
 
 ```bash
-GOPROXY=https://goproxy.cn,direct go mod tidy
-git diff --exit-code -- go.mod go.sum
-GOPROXY=https://goproxy.cn,direct go build ./cmd ./cmd/bear ./cmd/bear-cli
-GOPROXY=https://goproxy.cn,direct go test ./... -count=1
-GOPROXY=https://goproxy.cn,direct go test -race ./... -count=1
-GOPROXY=https://goproxy.cn,direct go vet ./...
-GOPROXY=https://goproxy.cn,direct govulncheck ./...
+GOPROXY=https://goproxy.cn,direct scripts/release-check.sh
 docker build .
 ```
 
-Install `govulncheck` when it is not already available:
-
-```bash
-GOPROXY=https://goproxy.cn,direct go install golang.org/x/vuln/cmd/govulncheck@latest
-```
+`scripts/release-check.sh` installs `govulncheck` when needed and generates `sbom.spdx.json` when `syft` is available.
 
 ## Containers
 
