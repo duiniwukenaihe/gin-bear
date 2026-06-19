@@ -77,10 +77,40 @@ This is a best-effort contract generator. For externally consumed APIs, review t
 
 Do not run implicit schema migrations from request-serving code. Keep schema changes explicit and reviewed:
 
-1. Generate SQL migrations with your migration tool of choice.
+1. Generate SQL migrations as reviewed files.
 2. Review migration SQL in code review.
 3. Run migrations as a separate deploy step before starting the new app version.
 4. Keep application startup limited to connection and readiness checks.
+
+Migration files can use this naming convention:
+
+```text
+migrations/
+  001_create_users.up.sql
+  001_create_users.down.sql
+  002_add_user_email.up.sql
+```
+
+Run them explicitly from a deploy command or one-off admin tool:
+
+```go
+adapter, err := bear.NewGormAdapter(cfg.DB)
+if err != nil {
+    return err
+}
+sqlDB, err := adapter.DB.DB()
+if err != nil {
+    return err
+}
+migrations, err := bear.LoadSQLMigrations("migrations")
+if err != nil {
+    return err
+}
+runner := bear.NewMigrationRunner(sqlDB)
+return runner.Up(context.Background(), migrations)
+```
+
+Applied versions are recorded in `schema_migrations`, and rerunning `Up` skips versions that have already been applied.
 
 `database.slow_query_threshold` enables GORM slow query logging for runtime visibility.
 

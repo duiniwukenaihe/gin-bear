@@ -3,10 +3,12 @@ package bear
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -735,6 +737,103 @@ func TestRepositoryUpdateDoesNotOverwriteOmittedFieldsWithZeroValues(t *testing.
 	if got.Note != "keep" {
 		t.Fatalf("note was overwritten: %#v", got)
 	}
+}
+
+func TestLoadSQLMigrationsSortsUpAndDownFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir+"/002_add_email.up.sql", "ALTER TABLE users ADD COLUMN email TEXT;")
+	writeTestFile(t, dir+"/001_create_users.up.sql", "CREATE TABLE users (id INTEGER PRIMARY KEY);")
+	writeTestFile(t, dir+"/001_create_users.down.sql", "DROP TABLE users;")
+
+	migrations, err := LoadSQLMigrations(dir)
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+
+	if len(migrations) != 2 {
+		t.Fatalf("migration count = %d", len(migrations))
+	}
+	if migrations[0].Version != "001" || migrations[0].Name != "create_users" {
+		t.Fatalf("first migration = %#v", migrations[0])
+	}
+	if migrations[0].DownSQL == "" {
+		t.Fatalf("expected down sql to be loaded: %#v", migrations[0])
+	}
+	if migrations[1].Version != "002" || migrations[1].Name != "add_email" {
+		t.Fatalf("second migration = %#v", migrations[1])
+	}
+}
+
+func TestMigrationRunnerAppliesMigrationsIdempotently(t *testing.T) {
+	sqlDB := newMigrationTestDB(t)
+	runner := NewMigrationRunner(sqlDB)
+	migrations := []Migration{
+		{Version: "001", Name: "create_users", UpSQL: "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);"},
+		{Version: "002", Name: "add_email", UpSQL: "ALTER TABLE users ADD COLUMN email TEXT;"},
+	}
+
+	if err := runner.Up(context.Background(), migrations); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	if err := runner.Up(context.Background(), migrations); err != nil {
+		t.Fatalf("second up should be idempotent: %v", err)
+	}
+
+	var applied int
+	if err := sqlDB.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schema_migrations").Scan(&applied); err != nil {
+		t.Fatalf("count migrations: %v", err)
+	}
+	if applied != 2 {
+		t.Fatalf("applied count = %d", applied)
+	}
+	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO users (name, email) VALUES ('alice', 'a@example.com')"); err != nil {
+		t.Fatalf("users table should exist with email column: %v", err)
+	}
+}
+
+func TestMigrationRunnerStopsOnInvalidSQL(t *testing.T) {
+	sqlDB := newMigrationTestDB(t)
+	runner := NewMigrationRunner(sqlDB)
+	migrations := []Migration{
+		{Version: "001", Name: "broken", UpSQL: "CREATE TABLE broken ("},
+	}
+
+	if err := runner.Up(context.Background(), migrations); err == nil {
+		t.Fatal("expected invalid SQL error")
+	}
+
+	var applied int
+	if err := sqlDB.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schema_migrations").Scan(&applied); err != nil {
+		t.Fatalf("count migrations: %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("applied count after failure = %d", applied)
+	}
+}
+
+func writeTestFile(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newMigrationTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	return sqlDB
 }
 
 func TestLoadPluginDisabledByDefault(t *testing.T) {
