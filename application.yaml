@@ -20,4 +20,5 @@ auth:
     - "/health"
     - "/live"
     - "/ready"
+    - "/version"
     - "/swagger/*"

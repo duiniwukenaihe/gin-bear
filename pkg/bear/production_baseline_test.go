@@ -356,6 +356,42 @@ func TestHealthEndpointsExposeLiveAndReady(t *testing.T) {
 	}
 }
 
+func TestVersionEndpointExposesBuildInfo(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	oldVersion, oldCommit, oldBuildTime := Version, Commit, BuildTime
+	Version = "v1.2.3"
+	Commit = "abc123"
+	BuildTime = "2026-06-19T00:00:00Z"
+	t.Cleanup(func() {
+		Version, Commit, BuildTime = oldVersion, oldCommit, oldBuildTime
+	})
+
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	app := Ignite(cfg)
+	app.EnableHealth()
+	app.ApplyAll(context.Background())
+
+	req := httptest.NewRequest(http.MethodGet, "/version", nil)
+	w := httptest.NewRecorder()
+	app.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	var got map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode version response: %v", err)
+	}
+	if got["version"] != "v1.2.3" || got["commit"] != "abc123" || got["build_time"] != "2026-06-19T00:00:00Z" {
+		t.Fatalf("unexpected build info: %#v", got)
+	}
+	if got["go_version"] == "" || got["os"] == "" || got["arch"] == "" {
+		t.Fatalf("missing runtime fields: %#v", got)
+	}
+}
+
 func TestMetricsEndpointExportsHTTPRequestMetrics(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)

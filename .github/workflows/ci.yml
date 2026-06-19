@@ -26,7 +26,10 @@ jobs:
           git diff --exit-code -- go.mod go.sum
 
       - name: Build command packages
-        run: go build ./cmd ./cmd/bear ./cmd/bear-cli
+        run: |
+          go build \
+            -ldflags="-X github.com/duiniwukenaihe/gin-bear/pkg/bear.Version=ci -X github.com/duiniwukenaihe/gin-bear/pkg/bear.Commit=${GITHUB_SHA} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            ./cmd ./cmd/bear ./cmd/bear-cli
 
       - name: Test
         run: go test ./... -count=1
@@ -44,4 +47,9 @@ jobs:
         run: $(go env GOPATH)/bin/govulncheck ./...
 
       - name: Docker build
-        run: docker build .
+        run: |
+          docker build \
+            --build-arg VERSION=ci \
+            --build-arg COMMIT=${GITHUB_SHA} \
+            --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            .

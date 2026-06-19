@@ -302,7 +302,7 @@ func NewSysConfig() *SysConfig {
 			StorageType:      "file",
 			JWTSecret:        "bear-secret",
 			TokenExpireHours: 24,
-			PublicPaths:      []string{"/health", "/live", "/ready", "/metrics", "/swagger/*", "/login"},
+			PublicPaths:      []string{"/health", "/live", "/ready", "/version", "/metrics", "/swagger/*", "/login"},
 		},
 		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root", SSLMode: "disable"},
 		Redis:  &RedisConfig{Addr: "localhost:6379", Password: "", DB: 0},

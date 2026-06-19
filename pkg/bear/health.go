@@ -24,6 +24,7 @@ func (h *HealthController) Build(bear *Bear) {
 	bear.GET("/health", h.live)
 	bear.GET("/live", h.live)
 	bear.GET("/ready", h.ready)
+	bear.GET("/version", h.version)
 }
 
 func (h *HealthController) live(ctx *gin.Context) {
@@ -62,4 +63,8 @@ func (h *HealthController) ready(ctx *gin.Context) {
 		"status": "ready",
 		"checks": checks,
 	})
+}
+
+func (h *HealthController) version(ctx *gin.Context) {
+	ctx.JSON(http.StatusOK, GetBuildInfo())
 }

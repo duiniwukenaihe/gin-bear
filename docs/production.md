@@ -30,8 +30,35 @@ Start from `application-prod.yaml.example` and keep real secrets outside git. Su
 - `/live` confirms the process is alive.
 - `/ready` confirms registered dependencies are ready.
 - `/health` remains as a backward-compatible liveness alias.
+- `/version` exposes build metadata for the running binary.
 
 Use `/ready` for load balancer readiness and rollout gates.
+
+## Version Metadata
+
+Inject release identity at build time:
+
+```bash
+VERSION=v1.2.3
+COMMIT="$(git rev-parse --short HEAD)"
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+go build \
+  -ldflags="-X github.com/duiniwukenaihe/gin-bear/pkg/bear.Version=${VERSION} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.Commit=${COMMIT} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.BuildTime=${BUILD_TIME}" \
+  ./cmd
+```
+
+For Docker builds:
+
+```bash
+docker build \
+  --build-arg VERSION="${VERSION}" \
+  --build-arg COMMIT="${COMMIT}" \
+  --build-arg BUILD_TIME="${BUILD_TIME}" \
+  -t gin-bear:${VERSION} .
+```
+
+The `/version` endpoint returns `version`, `commit`, `build_time`, `go_version`, `os`, and `arch`.
 
 ## Metrics
 

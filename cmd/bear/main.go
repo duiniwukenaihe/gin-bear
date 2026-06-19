@@ -125,6 +125,7 @@ auth:
     - "/health"
     - "/live"
     - "/ready"
+    - "/version"
     - "/swagger/*"
 
 websocket:
@@ -159,6 +160,7 @@ auth:
     - "/health"
     - "/live"
     - "/ready"
+    - "/version"
     - "/metrics"
     - "/swagger/*"
 
@@ -184,10 +186,13 @@ JWT_SECRET=replace-with-at-least-32-random-characters
 	os.WriteFile(name+"/Dockerfile", []byte(`FROM golang:1.25-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/app ./cmd
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/duiniwukenaihe/gin-bear/pkg/bear.Version=${VERSION} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.Commit=${COMMIT} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.BuildTime=${BUILD_TIME}" -o /out/app ./cmd
 
 FROM alpine:3.22
 RUN addgroup -S app && adduser -S app -G app

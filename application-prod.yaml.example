@@ -67,6 +67,7 @@ auth:
     - "/health"
     - "/live"
     - "/ready"
+    - "/version"
     - "/metrics"
     - "/swagger/*"
 
