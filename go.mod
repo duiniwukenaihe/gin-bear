@@ -3,7 +3,7 @@ module github.com/duiniwukenaihe/gin-bear
 go 1.25.0
 
 require (
-	github.com/bytedance/sonic v1.15.0
+	github.com/bytedance/sonic v1.15.2
 	github.com/casbin/casbin/v2 v2.110.0
 	github.com/casbin/gorm-adapter/v3 v3.20.0
 	github.com/fsnotify/fsnotify v1.9.0
@@ -34,7 +34,7 @@ require (
 require (
 	github.com/bmatcuk/doublestar/v4 v4.6.1 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
-	github.com/bytedance/sonic/loader v0.5.0 // indirect
+	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/casbin/govaluate v1.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
