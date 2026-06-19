@@ -1,6 +1,13 @@
 server:
   port: 8080
   name: "gin-bear"
+  shutdown_timeout: "5s"
+
+health:
+  readiness_timeout: "3s"
+
+log:
+  level: "info"
 
 database:
   type: "postgres"  # mysql 或 postgres
@@ -12,6 +19,7 @@ database:
 
 redis:
   addr: "localhost:6379"
+  required: false
 
 tracing:
   enabled: false

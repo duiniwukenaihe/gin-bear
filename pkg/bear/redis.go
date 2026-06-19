@@ -20,6 +20,7 @@ type RedisConfig struct {
 	DialTimeout  int    `yaml:"dial_timeout_seconds"`
 	ReadTimeout  int    `yaml:"read_timeout_seconds"`
 	WriteTimeout int    `yaml:"write_timeout_seconds"`
+	Required     bool   `yaml:"required"`
 }
 
 // RedisAdapter Redis 适配器
@@ -81,7 +82,10 @@ func NewRedisAdapter(cfg *RedisConfig) *RedisAdapter {
 
 	if err := client.Ping(ctx).Err(); err != nil {
 		slog.Error("Failed to connect to Redis", "error", err, "addr", cfg.Addr)
-		// 生产环境中，Redis 失败可能不一定 panic，取决于业务是否强依赖缓存
+		if cfg.Required {
+			_ = client.Close()
+			panic("required redis connection failed: " + err.Error())
+		}
 		return &RedisAdapter{Client: client}
 	}
 

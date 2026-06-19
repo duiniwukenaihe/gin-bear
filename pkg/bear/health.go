@@ -32,7 +32,7 @@ func (h *HealthController) live(ctx *gin.Context) {
 }
 
 func (h *HealthController) ready(ctx *gin.Context) {
-	checkCtx, cancel := context.WithTimeout(ctx.Request.Context(), 3*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx.Request.Context(), readinessTimeout(GetByType[*SysConfig]()))
 	defer cancel()
 
 	checks := make(map[string]string)
@@ -63,6 +63,13 @@ func (h *HealthController) ready(ctx *gin.Context) {
 		"status": "ready",
 		"checks": checks,
 	})
+}
+
+func readinessTimeout(config *SysConfig) time.Duration {
+	if config == nil || config.Health == nil {
+		return 3 * time.Second
+	}
+	return parseDurationOrDefault(config.Health.ReadinessTimeout, 3*time.Second)
 }
 
 func (h *HealthController) version(ctx *gin.Context) {

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -108,6 +109,27 @@ func TestSysConfigValidateRejectsSemanticErrors(t *testing.T) {
 			},
 			wantErr: "server.read_timeout",
 		},
+		{
+			name: "shutdown timeout must parse",
+			mutate: func(cfg *SysConfig) {
+				cfg.Server.ShutdownTimeout = "later"
+			},
+			wantErr: "server.shutdown_timeout",
+		},
+		{
+			name: "readiness timeout must parse",
+			mutate: func(cfg *SysConfig) {
+				cfg.Health.ReadinessTimeout = "eventually"
+			},
+			wantErr: "health.readiness_timeout",
+		},
+		{
+			name: "log level must be supported",
+			mutate: func(cfg *SysConfig) {
+				cfg.Log.Level = "verbose"
+			},
+			wantErr: "log.level",
+		},
 	}
 
 	for _, tt := range tests {
@@ -122,6 +144,33 @@ func TestSysConfigValidateRejectsSemanticErrors(t *testing.T) {
 				t.Fatalf("validation error = %v, want substring %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestRuntimeTimeoutHelpersUseConfiguredValues(t *testing.T) {
+	cfg := NewSysConfig()
+	cfg.Server.ShutdownTimeout = "12s"
+	cfg.Health.ReadinessTimeout = "1500ms"
+
+	if got := shutdownTimeout(cfg); got != 12*time.Second {
+		t.Fatalf("shutdown timeout = %s", got)
+	}
+	if got := readinessTimeout(cfg); got != 1500*time.Millisecond {
+		t.Fatalf("readiness timeout = %s", got)
+	}
+}
+
+func TestSetDefaultLoggerUsesConfiguredLevel(t *testing.T) {
+	cfg := NewSysConfig()
+	cfg.Log.Level = "debug"
+
+	SetDefaultLogger(cfg)
+	t.Cleanup(func() {
+		SetDefaultLogger(NewSysConfig())
+	})
+
+	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		t.Fatal("expected debug logging to be enabled")
 	}
 }
 
@@ -989,6 +1038,27 @@ func TestRedisRateLimiterDefaultsToFailOpenWhenRedisUnavailable(t *testing.T) {
 	}
 }
 
+func TestNewRedisAdapterPanicsWhenRequiredRedisUnavailable(t *testing.T) {
+	cfg := &RedisConfig{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: 1,
+		ReadTimeout: 1,
+		Required:    true,
+	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected required redis connection panic")
+		}
+		if !strings.Contains(r.(string), "required redis") {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	NewRedisAdapter(cfg)
+}
+
 func TestWebSocketOriginPolicyUsesAllowlist(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.WS.AllowedOrigins = []string{"https://app.example.com"}
@@ -1348,8 +1418,17 @@ func TestApplyEnvOverridesProductionSecretsAndDependencies(t *testing.T) {
 	cfg := NewSysConfig()
 	t.Setenv("JWT_SECRET", "env-secret-with-at-least-32-characters")
 	t.Setenv("REDIS_ADDR", "redis.example:6379")
+	t.Setenv("REDIS_REQUIRED", "true")
 	t.Setenv("POSTGRES_HOST", "db.example")
 	t.Setenv("POSTGRES_PASSWORD", "db-secret")
+	t.Setenv("DB_MAX_OPEN_CONNS", "77")
+	t.Setenv("DB_MAX_IDLE_CONNS", "11")
+	t.Setenv("LOG_LEVEL", "debug")
+	t.Setenv("BEAR_SHUTDOWN_TIMEOUT", "13s")
+	t.Setenv("BEAR_READINESS_TIMEOUT", "4s")
+	t.Setenv("METRICS_PATH", "/internal/metrics")
+	t.Setenv("TRACING_EXPORTER", "otlp")
+	t.Setenv("TRACING_OTLP_ENDPOINT", "https://otel.example/v1/traces")
 
 	applyEnvOverrides(cfg)
 
@@ -1359,10 +1438,31 @@ func TestApplyEnvOverridesProductionSecretsAndDependencies(t *testing.T) {
 	if cfg.Redis.Addr != "redis.example:6379" {
 		t.Fatalf("redis addr = %q", cfg.Redis.Addr)
 	}
+	if !cfg.Redis.Required {
+		t.Fatal("expected redis required override")
+	}
 	if cfg.DB.Host != "db.example" {
 		t.Fatalf("db host = %q", cfg.DB.Host)
 	}
 	if cfg.DB.Password != "db-secret" {
 		t.Fatalf("db password = %q", cfg.DB.Password)
+	}
+	if cfg.DB.MaxOpenConns != 77 || cfg.DB.MaxIdleConns != 11 {
+		t.Fatalf("db pool = maxOpen %d maxIdle %d", cfg.DB.MaxOpenConns, cfg.DB.MaxIdleConns)
+	}
+	if cfg.Log.Level != "debug" {
+		t.Fatalf("log level = %q", cfg.Log.Level)
+	}
+	if cfg.Server.ShutdownTimeout != "13s" {
+		t.Fatalf("shutdown timeout = %q", cfg.Server.ShutdownTimeout)
+	}
+	if cfg.Health.ReadinessTimeout != "4s" {
+		t.Fatalf("readiness timeout = %q", cfg.Health.ReadinessTimeout)
+	}
+	if cfg.Metrics.Path != "/internal/metrics" {
+		t.Fatalf("metrics path = %q", cfg.Metrics.Path)
+	}
+	if cfg.Tracing.Exporter != "otlp" || cfg.Tracing.OTLPEndpoint != "https://otel.example/v1/traces" {
+		t.Fatalf("tracing = %#v", cfg.Tracing)
 	}
 }

@@ -62,6 +62,7 @@ type TemplateData struct {
 	ModuleName  string  // bear (or project name)
 	Fields      []Field // 额外字段
 	FieldsStr   string  // 字段字符串
+	NeedsTime   bool    // generated package needs time import
 }
 
 type Field struct {
@@ -83,12 +84,13 @@ func parseFields(fieldsStr string) []Field {
 	var fields []Field
 	parts := strings.Split(fieldsStr, ",")
 	for _, part := range parts {
-		kv := strings.Split(strings.TrimSpace(part), ":")
+		kv := strings.SplitN(strings.TrimSpace(part), ":", 2)
 		if len(kv) != 2 {
 			continue
 		}
-		name := toTitle(kv[0])
-		fieldType := kv[1]
+		rawName := strings.TrimSpace(kv[0])
+		fieldType := strings.ToLower(strings.TrimSpace(kv[1]))
+		name := toTitle(rawName)
 		goType := getGoType(fieldType)
 		validate := getValidate(fieldType)
 		gormTag := getGormTag(fieldType)
@@ -97,7 +99,7 @@ func parseFields(fieldsStr string) []Field {
 			Name:     name,
 			Type:     fieldType,
 			GoType:   goType,
-			JsonTag:  strings.ToLower(kv[0]),
+			JsonTag:  toJSONName(rawName),
 			Validate: validate,
 			GormTag:  gormTag,
 		})
@@ -107,7 +109,7 @@ func parseFields(fieldsStr string) []Field {
 
 func getGoType(t string) string {
 	switch strings.ToLower(t) {
-	case "string":
+	case "string", "email", "url", "phone":
 		return "string"
 	case "int", "int64", "int32":
 		return "int64"
@@ -144,8 +146,12 @@ func getValidate(t string) string {
 		return "required,url"
 	case "phone":
 		return "required"
-	case "datetime":
+	case "time", "datetime":
 		return ""
+	case "text", "longtext", "bool":
+		return ""
+	case "decimal":
+		return "required,numeric"
 	default:
 		return ""
 	}
@@ -153,8 +159,10 @@ func getValidate(t string) string {
 
 func getGormTag(t string) string {
 	switch strings.ToLower(t) {
-	case "string":
+	case "string", "email", "url":
 		return "type:varchar(255)"
+	case "phone":
+		return "type:varchar(50)"
 	case "int", "int64", "int32", "int8", "int16":
 		return "type:bigint"
 	case "float", "float64":
@@ -175,22 +183,24 @@ func getGormTag(t string) string {
 }
 
 func generateAPI(name string, fieldsStr string) {
-	name = strings.ToLower(name)
+	routeName := toRouteName(name)
+	packageName := toPackageName(name)
 	title := toTitle(name)
 	moduleName := getModuleName()
 	fields := parseFields(fieldsStr)
 
 	data := TemplateData{
-		PackageName: name,
+		PackageName: packageName,
 		Title:       title,
-		Name:        name,
+		Name:        routeName,
 		ModuleName:  moduleName,
 		Fields:      fields,
 		FieldsStr:   fieldsStr,
+		NeedsTime:   fieldsNeedTime(fields),
 	}
 
 	// Create directory pkg/<name>
-	dir := filepath.Join("pkg", name)
+	dir := filepath.Join("pkg", packageName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Printf("Failed to create directory: %v\n", err)
 		os.Exit(1)
@@ -234,27 +244,29 @@ func generateAPI(name string, fieldsStr string) {
 		fmt.Printf("Generated %s\n", path)
 	}
 
-	printSuccess(name, title)
+	printSuccess(packageName, routeName, title)
 }
 
 func generateModel(name string, fieldsStr string) {
-	name = strings.ToLower(name)
+	routeName := toRouteName(name)
+	packageName := toPackageName(name)
 	title := toTitle(name)
 	moduleName := getModuleName()
 	fields := parseFields(fieldsStr)
 
-	dir := filepath.Join("pkg", name)
+	dir := filepath.Join("pkg", packageName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Printf("Failed to create directory: %v\n", err)
 		os.Exit(1)
 	}
 
 	data := TemplateData{
-		PackageName: name,
+		PackageName: packageName,
 		Title:       title,
-		Name:        name,
+		Name:        routeName,
 		ModuleName:  moduleName,
 		Fields:      fields,
+		NeedsTime:   fieldsNeedTime(fields),
 	}
 
 	path := filepath.Join(dir, "model.go")
@@ -270,23 +282,25 @@ func generateModel(name string, fieldsStr string) {
 }
 
 func generateDTO(name string, fieldsStr string) {
-	name = strings.ToLower(name)
+	routeName := toRouteName(name)
+	packageName := toPackageName(name)
 	title := toTitle(name)
 	moduleName := getModuleName()
 	fields := parseFields(fieldsStr)
 
-	dir := filepath.Join("pkg", name)
+	dir := filepath.Join("pkg", packageName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Printf("Failed to create directory: %v\n", err)
 		os.Exit(1)
 	}
 
 	data := TemplateData{
-		PackageName: name,
+		PackageName: packageName,
 		Title:       title,
-		Name:        name,
+		Name:        routeName,
 		ModuleName:  moduleName,
 		Fields:      fields,
+		NeedsTime:   fieldsNeedTime(fields),
 	}
 
 	path := filepath.Join(dir, "dto.go")
@@ -301,29 +315,99 @@ func generateDTO(name string, fieldsStr string) {
 	fmt.Println("\n✅ DTO generated!")
 }
 
-func printSuccess(name, title string) {
+func printSuccess(packageName, routeName, title string) {
 	fmt.Println("\n" + strings.Repeat("=", 50))
 	fmt.Println("✅ Generated successfully!")
 	fmt.Println("\n📝 Next steps:")
 	fmt.Printf("  1. Register module in main.go:\n")
-	fmt.Printf("     app.AddModule(&%s.%sModule{})\n\n", name, title)
+	fmt.Printf("     app.AddModule(&%s.%sModule{})\n\n", packageName, title)
 	fmt.Printf("  2. Run: go run main.go\n")
 	fmt.Printf("\n📦 Available endpoints:")
-	fmt.Printf("\n  GET    /api/v1/%s          - List %s (with pagination)\n", name, name)
-	fmt.Printf("  GET    /api/v1/%s/:id      - Get %s by ID\n", name, name)
-	fmt.Printf("  POST   /api/v1/%s          - Create %s\n", name, name)
-	fmt.Printf("  PUT    /api/v1/%s/:id      - Update %s\n", name, name)
-	fmt.Printf("  DELETE /api/v1/%s/:id      - Delete %s\n", name, name)
+	fmt.Printf("\n  GET    /api/v1/%s          - List %s (with pagination)\n", routeName, routeName)
+	fmt.Printf("  GET    /api/v1/%s/:id      - Get %s by ID\n", routeName, routeName)
+	fmt.Printf("  POST   /api/v1/%s          - Create %s\n", routeName, routeName)
+	fmt.Printf("  PUT    /api/v1/%s/:id      - Update %s\n", routeName, routeName)
+	fmt.Printf("  DELETE /api/v1/%s/:id      - Delete %s\n", routeName, routeName)
 	fmt.Println(strings.Repeat("=", 50))
 }
 
 func toTitle(s string) string {
-	if s == "" {
-		return s
+	parts := nameParts(s)
+	var b strings.Builder
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		r := []rune(strings.ToLower(part))
+		r[0] = unicode.ToUpper(r[0])
+		b.WriteString(string(r))
 	}
-	r := []rune(s)
-	r[0] = unicode.ToUpper(r[0])
-	return string(r)
+	out := b.String()
+	if out == "" {
+		return "Resource"
+	}
+	if first := []rune(out)[0]; !unicode.IsLetter(first) {
+		return "Resource" + out
+	}
+	return out
+}
+
+func toPackageName(s string) string {
+	var b strings.Builder
+	for _, part := range nameParts(s) {
+		for _, r := range strings.ToLower(part) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			}
+		}
+	}
+	if b.Len() == 0 {
+		return "resource"
+	}
+	out := b.String()
+	if out[0] < 'a' || out[0] > 'z' {
+		return "resource" + out
+	}
+	return out
+}
+
+func toRouteName(s string) string {
+	parts := nameParts(s)
+	if len(parts) == 0 {
+		return "resource"
+	}
+	return strings.Join(parts, "-")
+}
+
+func toJSONName(s string) string {
+	parts := nameParts(s)
+	if len(parts) == 0 {
+		return "field"
+	}
+	return strings.Join(parts, "_")
+}
+
+func fieldsNeedTime(fields []Field) bool {
+	for _, field := range fields {
+		if field.GoType == "time.Time" {
+			return true
+		}
+	}
+	return false
+}
+
+func nameParts(s string) []string {
+	rawParts := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	parts := make([]string, 0, len(rawParts))
+	for _, part := range rawParts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return parts
 }
 
 func getModuleName() string {
@@ -341,6 +425,9 @@ func getModuleName() string {
 // ==================== Templates ====================
 
 const modelTmpl = `package {{.PackageName}}
+{{if .NeedsTime}}
+import "time"
+{{end}}
 
 // {{.Title}}Model - {{.Title}} 数据模型
 // @model {{.Title}}
@@ -358,6 +445,9 @@ func (m *{{.Title}}Model) TableName() string {
 `
 
 const dtoTmpl = `package {{.PackageName}}
+{{if .NeedsTime}}
+import "time"
+{{end}}
 
 // ==================== DTOs ====================
 
@@ -371,7 +461,7 @@ type {{.Title}}CreateDTO struct {
 // {{.Title}}UpdateDTO - 更新 DTO
 type {{.Title}}UpdateDTO struct {
 	{{- range .Fields}}
-	{{.Name}} {{.GoType}} ` + "`json:\"{{.JsonTag}}\"`" + `
+	{{.Name}} *{{.GoType}} ` + "`json:\"{{.JsonTag}}\"`" + `
 	{{- end}}
 }
 
@@ -380,6 +470,19 @@ type {{.Title}}QueryDTO struct {
 	Page     int    ` + "`form:\"page\" json:\"page\"`" + `
 	PageSize int    ` + "`form:\"page_size\" json:\"page_size\"`" + `
 	Keyword  string ` + "`form:\"keyword\" json:\"keyword\"`" + `
+}
+
+// Normalize applies conservative pagination defaults.
+func (q *{{.Title}}QueryDTO) Normalize() {
+	if q.Page <= 0 {
+		q.Page = 1
+	}
+	if q.PageSize <= 0 {
+		q.PageSize = 20
+	}
+	if q.PageSize > 100 {
+		q.PageSize = 100
+	}
 }
 
 // {{.Title}}Response - 响应 DTO
@@ -421,15 +524,14 @@ func (r *{{.Title}}Repository) FindByID(ctx context.Context, id int64) (*{{.Titl
 
 // FindByCondition 条件查询
 func (r *{{.Title}}Repository) FindByCondition(ctx context.Context, query *{{.Title}}QueryDTO) ([]*{{.Title}}Model, error) {
+	if query == nil {
+		query = &{{.Title}}QueryDTO{}
+	}
+	query.Normalize()
 	db := r.DB(ctx)
 
-	// 分页
-	if query.Page > 0 {
-		offset := (query.Page - 1) * query.PageSize
-		db = db.Offset(offset).Limit(query.PageSize)
-	} else {
-		db = db.Limit(100)
-	}
+	offset := (query.Page - 1) * query.PageSize
+	db = db.Offset(offset).Limit(query.PageSize)
 
 	// 关键词搜索
 	if query.Keyword != "" {
@@ -441,6 +543,9 @@ func (r *{{.Title}}Repository) FindByCondition(ctx context.Context, query *{{.Ti
 
 // Count 统计数量
 func (r *{{.Title}}Repository) Count(ctx context.Context, query *{{.Title}}QueryDTO) (int64, error) {
+	if query == nil {
+		query = &{{.Title}}QueryDTO{}
+	}
 	db := r.DB(ctx)
 	if query.Keyword != "" {
 		// db = db.Where("name LIKE ?", "%"+query.Keyword+"%")
@@ -455,7 +560,7 @@ func (r *{{.Title}}Repository) Count(ctx context.Context, query *{{.Title}}Query
 func (r *{{.Title}}Repository) Create(ctx context.Context, dto *{{.Title}}CreateDTO) (*{{.Title}}Model, error) {
 	model := &{{.Title}}Model{
 		{{- range .Fields}}
-		{{.Name}}: {{.GetDefaultValue}},
+		{{.Name}}: dto.{{.Name}},
 		{{- end}}
 	}
 	err := r.Repository.Create(ctx, model)
@@ -464,10 +569,14 @@ func (r *{{.Title}}Repository) Create(ctx context.Context, dto *{{.Title}}Create
 
 // Update 更新
 func (r *{{.Title}}Repository) Update(ctx context.Context, id int64, dto *{{.Title}}UpdateDTO) error {
-	updates := map[string]interface{}{
-		{{- range .Fields}}
-		"{{.Name}}": dto.{{.Name}},
-		{{- end}}
+	updates := map[string]interface{}{}
+	{{- range .Fields}}
+	if dto.{{.Name}} != nil {
+		updates["{{.JsonTag}}"] = *dto.{{.Name}}
+	}
+	{{- end}}
+	if len(updates) == 0 {
+		return nil
 	}
 	return r.DB(ctx).Model(&{{.Title}}Model{}).Where("id = ?", id).Updates(updates).Error
 }
@@ -505,6 +614,10 @@ func (s *{{.Title}}Service) GetByID(ctx context.Context, id int64) (*{{.Title}}R
 
 // Query 查询列表
 func (s *{{.Title}}Service) Query(ctx context.Context, query *{{.Title}}QueryDTO) (*{{.Title}}ListResponse, error) {
+	if query == nil {
+		query = &{{.Title}}QueryDTO{}
+	}
+	query.Normalize()
 	list, err := s.Repo.FindByCondition(ctx, query)
 	if err != nil {
 		return nil, err

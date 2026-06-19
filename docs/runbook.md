@@ -6,6 +6,7 @@
 2. Run `GOPROXY=https://goproxy.cn,direct scripts/release-check.sh`.
 3. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
 4. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
+5. Confirm `server.shutdown_timeout`, `health.readiness_timeout`, `log.level`, and `redis.required` match the service's dependency profile.
 
 ## Rollback
 
@@ -23,6 +24,8 @@ Use `MigrationRunner.Down(ctx, migrations, steps)` only for reviewed rollback SQ
 ## Observability
 
 Use `/metrics` for Prometheus scraping and `EnableTracing(ctx)` with OTLP for distributed tracing. Request logs include request id and latency information. During incidents, correlate `/version`, trace ids, request ids, and deployment timestamps.
+
+For deeper framework diagnostics, temporarily raise `LOG_LEVEL=debug` and restore it after the incident.
 
 ## Incident Response
 

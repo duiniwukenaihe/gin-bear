@@ -102,6 +102,16 @@ func TestSecurityPolicyAndRunbookCoverOperations(t *testing.T) {
 			t.Fatalf("runbook missing %q:\n%s", want, string(runbook))
 		}
 	}
+
+	production, err := os.ReadFile("../docs/production.md")
+	if err != nil {
+		t.Fatalf("docs/production.md should exist: %v", err)
+	}
+	for _, want := range []string{"server.shutdown_timeout", "health.readiness_timeout", "log.level", "redis.required", "bear gen api"} {
+		if !strings.Contains(string(production), want) {
+			t.Fatalf("production docs missing %q:\n%s", want, string(production))
+		}
+	}
 }
 
 func TestRepositoryFocusesOnFrameworkNotContainerDelivery(t *testing.T) {

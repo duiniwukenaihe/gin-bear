@@ -83,6 +83,13 @@ func main() {
 server:
   port: 8080
   name: "my-app"
+  shutdown_timeout: "10s"
+
+health:
+  readiness_timeout: "3s"
+
+log:
+  level: "info"
 
 database:
   type: "mysql"
@@ -94,6 +101,7 @@ database:
 
 redis:
   addr: "localhost:6379"
+  required: false
 
 auth:
   jwt_secret: "replace-with-at-least-32-random-characters"
@@ -426,6 +434,13 @@ func main() {
 server:
   port: 8080
   name: "my-app"
+  shutdown_timeout: "10s"
+
+health:
+  readiness_timeout: "3s"
+
+log:
+  level: "info"
 
 database:
   type: "mysql"
@@ -437,6 +452,7 @@ database:
 
 redis:
   addr: "localhost:6379"
+  required: false
 
 auth:
   jwt_secret: "replace-with-at-least-32-random-characters"

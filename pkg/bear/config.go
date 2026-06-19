@@ -24,7 +24,16 @@ type ServerConfig struct {
 	ReadTimeout       string   `yaml:"read_timeout" json:"read_timeout"`
 	WriteTimeout      string   `yaml:"write_timeout" json:"write_timeout"`
 	IdleTimeout       string   `yaml:"idle_timeout" json:"idle_timeout"`
+	ShutdownTimeout   string   `yaml:"shutdown_timeout" json:"shutdown_timeout"`
 	MaxHeaderBytes    int      `yaml:"max_header_bytes" json:"max_header_bytes"`
+}
+
+type HealthConfig struct {
+	ReadinessTimeout string `yaml:"readiness_timeout" json:"readiness_timeout"`
+}
+
+type LogConfig struct {
+	Level string `yaml:"level" json:"level"`
 }
 
 type WafConfig struct {
@@ -223,6 +232,8 @@ type SysConfig struct {
 	Tracing        *TracingConfig        `yaml:"tracing" json:"tracing"`
 	I18n           *I18nConfig           `yaml:"i18n" json:"i18n"`
 	Metrics        *MetricsConfig        `yaml:"metrics" json:"metrics"`
+	Health         *HealthConfig         `yaml:"health" json:"health"`
+	Log            *LogConfig            `yaml:"log" json:"log"`
 	WS             *WebSocketConfig      `yaml:"websocket" json:"websocket"`
 	GRPC           *GRPCConfig           `yaml:"grpc" json:"grpc"`
 	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker" json:"circuit_breaker"`
@@ -290,6 +301,13 @@ func (this *SysConfig) validateSemantic() error {
 			return fmt.Errorf("tracing.sample_rate must be between 0 and 1")
 		}
 	}
+	if this.Log != nil {
+		switch strings.ToLower(strings.TrimSpace(this.Log.Level)) {
+		case "", "debug", "info", "warn", "warning", "error":
+		default:
+			return fmt.Errorf("log.level must be one of debug, info, warn, error")
+		}
+	}
 	if this.Metrics != nil && this.Metrics.Path != "" && !strings.HasPrefix(this.Metrics.Path, "/") {
 		return fmt.Errorf("metrics.path must start with /")
 	}
@@ -299,6 +317,7 @@ func (this *SysConfig) validateSemantic() error {
 			"server.read_timeout":        this.Server.ReadTimeout,
 			"server.write_timeout":       this.Server.WriteTimeout,
 			"server.idle_timeout":        this.Server.IdleTimeout,
+			"server.shutdown_timeout":    this.Server.ShutdownTimeout,
 		} {
 			if value == "" {
 				continue
@@ -306,6 +325,11 @@ func (this *SysConfig) validateSemantic() error {
 			if _, err := time.ParseDuration(value); err != nil {
 				return fmt.Errorf("%s must be a valid duration: %w", name, err)
 			}
+		}
+	}
+	if this.Health != nil && this.Health.ReadinessTimeout != "" {
+		if _, err := time.ParseDuration(this.Health.ReadinessTimeout); err != nil {
+			return fmt.Errorf("health.readiness_timeout must be a valid duration: %w", err)
 		}
 	}
 	return nil
@@ -338,6 +362,7 @@ func NewSysConfig() *SysConfig {
 			ReadTimeout:       "15s",
 			WriteTimeout:      "30s",
 			IdleTimeout:       "60s",
+			ShutdownTimeout:   "5s",
 		},
 		Auth: &AuthConfig{
 			StorageType:      "file",
@@ -377,6 +402,12 @@ func NewSysConfig() *SysConfig {
 		Metrics: &MetricsConfig{
 			Enabled: true,
 			Path:    "/metrics",
+		},
+		Health: &HealthConfig{
+			ReadinessTimeout: "3s",
+		},
+		Log: &LogConfig{
+			Level: "info",
 		},
 		WS: &WebSocketConfig{
 			HandshakeTimeout: 10000,
@@ -492,6 +523,9 @@ func applyEnvOverrides(config *SysConfig) {
 				slog.Info("Config override by env", "BEAR_SERVER_PORT", p)
 			}
 		}
+		if timeout := os.Getenv("BEAR_SHUTDOWN_TIMEOUT"); timeout != "" {
+			config.Server.ShutdownTimeout = timeout
+		}
 	}
 	if config.Auth != nil {
 		if secret := os.Getenv("JWT_SECRET"); secret != "" {
@@ -501,6 +535,11 @@ func applyEnvOverrides(config *SysConfig) {
 	if config.Redis != nil {
 		if addr := os.Getenv("REDIS_ADDR"); addr != "" {
 			config.Redis.Addr = addr
+		}
+		if required := os.Getenv("REDIS_REQUIRED"); required != "" {
+			if v, err := strconv.ParseBool(required); err == nil {
+				config.Redis.Required = v
+			}
 		}
 	}
 	if config.DB != nil {
@@ -518,6 +557,39 @@ func applyEnvOverrides(config *SysConfig) {
 		}
 		if dbname := os.Getenv("POSTGRES_DB"); dbname != "" {
 			config.DB.DBName = dbname
+		}
+		if maxOpen := os.Getenv("DB_MAX_OPEN_CONNS"); maxOpen != "" {
+			if v, err := strconv.Atoi(maxOpen); err == nil {
+				config.DB.MaxOpenConns = v
+			}
+		}
+		if maxIdle := os.Getenv("DB_MAX_IDLE_CONNS"); maxIdle != "" {
+			if v, err := strconv.Atoi(maxIdle); err == nil {
+				config.DB.MaxIdleConns = v
+			}
+		}
+	}
+	if config.Health != nil {
+		if timeout := os.Getenv("BEAR_READINESS_TIMEOUT"); timeout != "" {
+			config.Health.ReadinessTimeout = timeout
+		}
+	}
+	if config.Log != nil {
+		if level := os.Getenv("LOG_LEVEL"); level != "" {
+			config.Log.Level = level
+		}
+	}
+	if config.Metrics != nil {
+		if path := os.Getenv("METRICS_PATH"); path != "" {
+			config.Metrics.Path = path
+		}
+	}
+	if config.Tracing != nil {
+		if exporter := os.Getenv("TRACING_EXPORTER"); exporter != "" {
+			config.Tracing.Exporter = exporter
+		}
+		if endpoint := os.Getenv("TRACING_OTLP_ENDPOINT"); endpoint != "" {
+			config.Tracing.OTLPEndpoint = endpoint
 		}
 	}
 }

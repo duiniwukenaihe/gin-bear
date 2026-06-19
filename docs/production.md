@@ -24,6 +24,26 @@ Start from `application-prod.yaml.example` and keep real secrets outside git. Su
 - `POSTGRES_USER`
 - `POSTGRES_PASSWORD`
 - `POSTGRES_DB`
+- `DB_MAX_OPEN_CONNS`
+- `DB_MAX_IDLE_CONNS`
+- `LOG_LEVEL`
+- `BEAR_SHUTDOWN_TIMEOUT`
+- `BEAR_READINESS_TIMEOUT`
+- `METRICS_PATH`
+- `TRACING_EXPORTER`
+- `TRACING_OTLP_ENDPOINT`
+- `REDIS_REQUIRED`
+
+## Logging
+
+Configure structured JSON log verbosity with:
+
+```yaml
+log:
+  level: "info" # debug, info, warn, error
+```
+
+Use `log.level` for file-based configuration and `LOG_LEVEL=debug` locally when diagnosing framework binding, routing, or dependency behavior.
 
 ## Health Checks
 
@@ -33,6 +53,18 @@ Start from `application-prod.yaml.example` and keep real secrets outside git. Su
 - `/version` exposes build metadata for the running binary.
 
 Use `/ready` for load balancer readiness and rollout gates.
+
+Tune readiness checks and graceful shutdown for the service profile:
+
+```yaml
+server:
+  shutdown_timeout: "10s"
+
+health:
+  readiness_timeout: "3s"
+```
+
+The equivalent configuration keys are `server.shutdown_timeout` and `health.readiness_timeout`.
 
 ## Version Metadata
 
@@ -155,6 +187,28 @@ return runner.Down(context.Background(), migrations, 1)
 ```
 
 `database.slow_query_threshold` enables GORM slow query logging for runtime visibility.
+
+## Redis Dependency Mode
+
+Redis remains optional by default. When a service requires Redis for authentication state, distributed rate limiting, or core business behavior, fail fast at startup:
+
+```yaml
+redis:
+  addr: "redis:6379"
+  required: true
+```
+
+Use `redis.required` for file-based configuration. `REDIS_REQUIRED=true` applies the same behavior through environment configuration.
+
+## Code Generation
+
+`bear gen api` generates CRUD packages with DTO-to-model mapping, pointer-based update DTOs, bounded pagination, and safe package names for dashed or underscored resources:
+
+```bash
+bear gen api user-profile --fields "name:string,email:email,age:int,birthday:datetime,bio:text"
+```
+
+Generated query DTOs default to page `1`, page size `20`, and cap page size at `100`.
 
 ## Request Binding
 

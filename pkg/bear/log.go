@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 )
 
 var Log *slog.Logger
@@ -25,9 +26,13 @@ func (h *ContextHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 // SetDefaultLogger 初始化全局上下文感知日志
-func SetDefaultLogger() {
+func SetDefaultLogger(config ...*SysConfig) {
+	level := slog.LevelInfo
+	if len(config) > 0 && config[0] != nil && config[0].Log != nil {
+		level = parseLogLevel(config[0].Log.Level)
+	}
 	opts := &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: level,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
 				a.Value = slog.StringValue(a.Value.Time().Format("2006-01-02T15:04:05.000Z07:00"))
@@ -40,6 +45,19 @@ func SetDefaultLogger() {
 	}
 	Log = slog.New(handler)
 	slog.SetDefault(Log)
+}
+
+func parseLogLevel(raw string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 func Info(msg string, args ...any) {

@@ -123,7 +123,7 @@ func Ignite(args ...any) *Bear {
 	}
 
 	// 注册核心底座 Bean
-	SetDefaultLogger()
+	SetDefaultLogger(config)
 	GetInjector().Set(b)
 	GetInjector().Set(config)
 	configureGinRuntime(b, config)
@@ -260,8 +260,7 @@ func (this *Bear) Launch(ctx context.Context) error {
 		slog.Info("Context cancelled, shutting down...")
 	}
 
-	// 给予 5 秒清理时间
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout(config))
 	defer cancel()
 
 	// 自动从 IoC 容器中查找并关闭一些标准组件 (示例)
@@ -351,6 +350,13 @@ func parseDurationOrDefault(raw string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+func shutdownTimeout(config *SysConfig) time.Duration {
+	if config == nil || config.Server == nil {
+		return 5 * time.Second
+	}
+	return parseDurationOrDefault(config.Server.ShutdownTimeout, 5*time.Second)
 }
 
 func configureGinRuntime(b *Bear, config *SysConfig) {
