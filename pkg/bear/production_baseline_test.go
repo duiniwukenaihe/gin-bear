@@ -725,6 +725,52 @@ func TestGenerateOpenAPIMarksPublicPathsWithoutSecurity(t *testing.T) {
 	}
 }
 
+func TestGenerateOpenAPIIncludesStandardErrorResponses(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Auth.PublicPaths = []string{"/api/public/*"}
+
+	app := Ignite(cfg)
+	app.Mount("/api", &openAPIPublicTestController{})
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("apply all: %v", err)
+	}
+
+	doc, err := app.GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("generate openapi: %v", err)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v\n%s", err, string(doc))
+	}
+
+	components := spec["components"].(map[string]interface{})
+	schemas := components["schemas"].(map[string]interface{})
+	if _, ok := schemas["ErrorResponse"]; !ok {
+		t.Fatalf("missing ErrorResponse schema: %#v", schemas)
+	}
+	paths := spec["paths"].(map[string]interface{})
+	publicOp := paths["/api/public/ping"].(map[string]interface{})["get"].(map[string]interface{})
+	privateOp := paths["/api/private/ping"].(map[string]interface{})["get"].(map[string]interface{})
+	for _, status := range []string{"400", "500"} {
+		if !openAPIResponseUsesErrorRef(publicOp, status) {
+			t.Fatalf("public operation missing %s error ref: %#v", status, publicOp["responses"])
+		}
+		if !openAPIResponseUsesErrorRef(privateOp, status) {
+			t.Fatalf("private operation missing %s error ref: %#v", status, privateOp["responses"])
+		}
+	}
+	if _, ok := publicOp["responses"].(map[string]interface{})["401"]; ok {
+		t.Fatalf("public operation should not include 401 response: %#v", publicOp["responses"])
+	}
+	if !openAPIResponseUsesErrorRef(privateOp, "401") {
+		t.Fatalf("private operation missing 401 error ref: %#v", privateOp["responses"])
+	}
+}
+
 func openAPIHasParameter(parameters []interface{}, name, in, typ string) bool {
 	for _, raw := range parameters {
 		param := raw.(map[string]interface{})
@@ -735,6 +781,27 @@ func openAPIHasParameter(parameters []interface{}, name, in, typ string) bool {
 		return schema["type"] == typ
 	}
 	return false
+}
+
+func openAPIResponseUsesErrorRef(op map[string]interface{}, status string) bool {
+	responses := op["responses"].(map[string]interface{})
+	response, ok := responses[status].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	content, ok := response["content"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	jsonContent, ok := content["application/json"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	schema, ok := jsonContent["schema"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	return schema["$ref"] == "#/components/schemas/ErrorResponse"
 }
 
 func spanHasStringAttr(attrs []attribute.KeyValue, key string, want string) bool {
@@ -1172,6 +1239,37 @@ func TestMigrationRunnerForceUnlockReleasesHeldLock(t *testing.T) {
 		{Version: "001", Name: "create_users", UpSQL: "CREATE TABLE users (id INTEGER PRIMARY KEY);"},
 	}); err != nil {
 		t.Fatalf("up after force unlock: %v", err)
+	}
+}
+
+func TestMigrationRunnerRejectsUnsafeTableNames(t *testing.T) {
+	sqlDB := newMigrationTestDB(t)
+	for _, tt := range []struct {
+		name      string
+		table     string
+		lockTable string
+	}{
+		{name: "migration table", table: "schema_migrations;DROP"},
+		{name: "lock table", lockTable: "schema_migration_locks;DROP"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := NewMigrationRunner(sqlDB)
+			if tt.table != "" {
+				runner.Table = tt.table
+			}
+			if tt.lockTable != "" {
+				runner.LockTable = tt.lockTable
+			}
+			err := runner.Up(context.Background(), []Migration{
+				{Version: "001", Name: "create_users", UpSQL: "CREATE TABLE users (id INTEGER PRIMARY KEY);"},
+			})
+			if err == nil {
+				t.Fatal("expected unsafe table name error")
+			}
+			if !strings.Contains(err.Error(), "invalid migration table name") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 

@@ -37,6 +37,25 @@ func TestGeneratedDockerfileUsesFrameworkVersionPackage(t *testing.T) {
 	}
 }
 
+func TestGeneratedDockerfileIncludesOCILabelsAndHealthcheck(t *testing.T) {
+	got := generatedDockerfileContent()
+
+	for _, want := range []string{
+		`ARG VERSION=dev`,
+		`ARG COMMIT=unknown`,
+		`ARG BUILD_TIME=unknown`,
+		`org.opencontainers.image.version=${VERSION}`,
+		`org.opencontainers.image.revision=${COMMIT}`,
+		`org.opencontainers.image.created=${BUILD_TIME}`,
+		`HEALTHCHECK`,
+		`/live`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("generated Dockerfile missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestGeneratedDockerignoreContentExcludesLocalAndSupplyChainFiles(t *testing.T) {
 	got := generatedDockerignoreContent()
 

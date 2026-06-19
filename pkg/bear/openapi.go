@@ -51,7 +51,17 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 		},
 		Paths: make(map[string]interface{}),
 		Components: map[string]interface{}{
-			"schemas": make(map[string]interface{}),
+			"schemas": map[string]interface{}{
+				"ErrorResponse": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"code":    map[string]interface{}{"type": "integer"},
+						"message": map[string]interface{}{"type": "string"},
+						"data":    map[string]interface{}{"type": "object"},
+					},
+					"required": []string{"code", "message"},
+				},
+			},
 		},
 	}
 	if config != nil && config.Auth != nil {
@@ -94,6 +104,7 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 		if publicRoute {
 			op["security"] = []map[string][]string{}
 		}
+		addStandardOpenAPIErrorResponses(op, config != nil && config.Auth != nil && !publicRoute)
 
 		// 检查控制器是否提供了额外元数据
 		if bean := GetInjector().Get(route.HandlerType); bean != nil {
@@ -110,6 +121,32 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 	}
 
 	return json.MarshalIndent(schema, "", "  ")
+}
+
+func addStandardOpenAPIErrorResponses(op map[string]interface{}, includeUnauthorized bool) {
+	responses, ok := op["responses"].(map[string]interface{})
+	if !ok {
+		responses = make(map[string]interface{})
+		op["responses"] = responses
+	}
+	responses["400"] = openAPIErrorResponse("Bad Request")
+	if includeUnauthorized {
+		responses["401"] = openAPIErrorResponse("Unauthorized")
+	}
+	responses["500"] = openAPIErrorResponse("Internal Server Error")
+}
+
+func openAPIErrorResponse(description string) map[string]interface{} {
+	return map[string]interface{}{
+		"description": description,
+		"content": map[string]interface{}{
+			"application/json": map[string]interface{}{
+				"schema": map[string]interface{}{
+					"$ref": "#/components/schemas/ErrorResponse",
+				},
+			},
+		},
+	}
 }
 
 func openAPIRouteIsPublic(path string, config *SysConfig) bool {

@@ -113,10 +113,16 @@ func (r *MigrationRunner) Up(ctx context.Context, migrations []Migration) error 
 	if table == "" {
 		table = defaultMigrationTable
 	}
+	if err := validateMigrationTableName(table); err != nil {
+		return err
+	}
 	if err := r.ensureTable(ctx, table); err != nil {
 		return err
 	}
 	lockTable := r.lockTable()
+	if err := validateMigrationTableName(lockTable); err != nil {
+		return err
+	}
 	if err := r.ensureLockTable(ctx, lockTable); err != nil {
 		return err
 	}
@@ -151,10 +157,16 @@ func (r *MigrationRunner) Down(ctx context.Context, migrations []Migration, step
 	if table == "" {
 		table = defaultMigrationTable
 	}
+	if err := validateMigrationTableName(table); err != nil {
+		return err
+	}
 	if err := r.ensureTable(ctx, table); err != nil {
 		return err
 	}
 	lockTable := r.lockTable()
+	if err := validateMigrationTableName(lockTable); err != nil {
+		return err
+	}
 	if err := r.ensureLockTable(ctx, lockTable); err != nil {
 		return err
 	}
@@ -191,10 +203,29 @@ func (r *MigrationRunner) ForceUnlock(ctx context.Context) error {
 		return fmt.Errorf("migration runner requires a database")
 	}
 	lockTable := r.lockTable()
+	if err := validateMigrationTableName(lockTable); err != nil {
+		return err
+	}
 	if err := r.ensureLockTable(ctx, lockTable); err != nil {
 		return err
 	}
 	r.releaseLock(ctx, lockTable)
+	return nil
+}
+
+func validateMigrationTableName(name string) error {
+	if name == "" {
+		return fmt.Errorf("invalid migration table name %q", name)
+	}
+	for i, r := range name {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return fmt.Errorf("invalid migration table name %q", name)
+	}
+	if name[0] >= '0' && name[0] <= '9' {
+		return fmt.Errorf("invalid migration table name %q", name)
+	}
 	return nil
 }
 
