@@ -60,6 +60,8 @@ docker build \
 
 The `/version` endpoint returns `version`, `commit`, `build_time`, `go_version`, `os`, and `arch`.
 
+When `bear-cli new` clones this repository as a full application template, generated build artifacts rewrite the `-X` package path to the new module, for example `my-app/pkg/bear.Version`. This applies to the Dockerfile and the copied GitHub Actions workflow. The legacy `bear new` command generates a lightweight app that imports the upstream framework package, so its Dockerfile intentionally keeps `github.com/duiniwukenaihe/gin-bear/pkg/bear`.
+
 ## Metrics
 
 Enable the built-in Prometheus text endpoint with:

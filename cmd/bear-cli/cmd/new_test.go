@@ -37,3 +37,39 @@ import (
 		t.Fatalf("missing %s in %s", want, got)
 	}
 }
+
+func TestRewriteBuildMetadataPackage(t *testing.T) {
+	input := `RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/duiniwukenaihe/gin-bear/pkg/bear.Version=${VERSION} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.Commit=${COMMIT} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.BuildTime=${BUILD_TIME}" -o /out/app ./cmd`
+
+	got := rewriteBuildMetadataPackage(input, "my-app")
+
+	if strings.Contains(got, "github.com/duiniwukenaihe/gin-bear/pkg/bear") {
+		t.Fatalf("upstream package path should be rewritten: %s", got)
+	}
+	for _, want := range []string{
+		"-X my-app/pkg/bear.Version=${VERSION}",
+		"-X my-app/pkg/bear.Commit=${COMMIT}",
+		"-X my-app/pkg/bear.BuildTime=${BUILD_TIME}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %s in %s", want, got)
+		}
+	}
+}
+
+func TestBuildMetadataRewritePathsIncludesDockerfileAndCI(t *testing.T) {
+	got := buildMetadataRewritePaths("my-app")
+
+	want := []string{
+		"my-app/Dockerfile",
+		"my-app/.github/workflows/ci.yml",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("path count = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("path[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

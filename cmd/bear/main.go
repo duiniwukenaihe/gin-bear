@@ -183,7 +183,13 @@ GIN_MODE=release
 BEAR_SERVER_PORT=8080
 JWT_SECRET=replace-with-at-least-32-random-characters
 `), 0644)
-	os.WriteFile(name+"/Dockerfile", []byte(`FROM golang:1.25-alpine AS build
+	os.WriteFile(name+"/Dockerfile", []byte(generatedDockerfileContent()), 0644)
+	fmt.Println("Project created successfully!")
+}
+
+func generatedDockerfileContent() string {
+	versionPackage := "github.com/duiniwukenaihe/gin-bear/pkg/bear"
+	return fmt.Sprintf(`FROM golang:1.25-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates
 ARG VERSION=dev
@@ -192,7 +198,7 @@ ARG BUILD_TIME=unknown
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/duiniwukenaihe/gin-bear/pkg/bear.Version=${VERSION} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.Commit=${COMMIT} -X github.com/duiniwukenaihe/gin-bear/pkg/bear.BuildTime=${BUILD_TIME}" -o /out/app ./cmd
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X %[1]s.Version=${VERSION} -X %[1]s.Commit=${COMMIT} -X %[1]s.BuildTime=${BUILD_TIME}" -o /out/app ./cmd
 
 FROM alpine:3.22
 RUN addgroup -S app && adduser -S app -G app
@@ -202,8 +208,7 @@ COPY application.yaml /app/application.yaml
 USER app
 EXPOSE 8080
 ENTRYPOINT ["/app/app"]
-`), 0644)
-	fmt.Println("Project created successfully!")
+`, versionPackage)
 }
 
 func handleGen(args []string) {
