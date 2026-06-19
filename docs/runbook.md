@@ -4,30 +4,15 @@
 
 1. Review configuration from `application-prod.yaml.example`.
 2. Run `GOPROXY=https://goproxy.cn,direct scripts/release-check.sh`.
-3. Build the container with `VERSION`, `COMMIT`, and `BUILD_TIME` build args.
+3. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
 4. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
-5. Keep the generated `sbom.spdx.json` with release artifacts when CI produces one.
 
 ## Rollback
 
 1. Stop routing new traffic to the unhealthy version.
-2. Roll back to the previous image tag.
+2. Roll back to the previous application binary or release artifact.
 3. Check `/ready` before restoring traffic.
 4. Review `/version` to confirm the running commit.
-
-## Kubernetes Rollout
-
-Use `deploy/kubernetes` as a base, then patch image names, namespace, secrets, resource limits, and ingress according to the target platform. Watch rollout progress with:
-
-```bash
-kubectl rollout status deployment/gin-bear
-```
-
-Rollback a failed rollout with:
-
-```bash
-kubectl rollout undo deployment/gin-bear
-```
 
 ## Migration Recovery
 
@@ -38,10 +23,6 @@ Use `MigrationRunner.Down(ctx, migrations, steps)` only for reviewed rollback SQ
 ## Observability
 
 Use `/metrics` for Prometheus scraping and `EnableTracing(ctx)` with OTLP for distributed tracing. Request logs include request id and latency information. During incidents, correlate `/version`, trace ids, request ids, and deployment timestamps.
-
-## Prometheus Alerts
-
-Starter alert rules live in `deploy/prometheus/rules.yaml`. Import them into your platform rule manager and tune thresholds per service SLO. The default rules cover ready pod loss, high error rate, high p95 latency, and readiness failures.
 
 ## Incident Response
 

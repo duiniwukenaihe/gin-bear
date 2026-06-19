@@ -67,15 +67,6 @@ var newCmd = &cobra.Command{
 			fmt.Printf("Failed to rename imports: %v\n", err)
 		}
 
-		// 5. Update build metadata ldflags package paths in generated artifacts.
-		for _, path := range buildMetadataRewritePaths(projectName) {
-			if err := rewriteFileIfExists(path, func(content string) string {
-				return rewriteBuildMetadataPackage(content, projectName)
-			}); err != nil {
-				fmt.Printf("Failed to update build metadata in %s: %v\n", path, err)
-			}
-		}
-
 		fmt.Printf("\nProject %s created successfully!\n", projectName)
 		fmt.Printf("cd %s\n", projectName)
 		fmt.Println("go mod tidy")
@@ -100,16 +91,6 @@ func rewriteFile(path string, rewrite func(string) string) error {
 	return os.WriteFile(path, []byte(rewrite(string(content))), 0644)
 }
 
-func rewriteFileIfExists(path string, rewrite func(string) string) error {
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	return rewriteFile(path, rewrite)
-}
-
 func rewriteGoModModule(content, moduleName string) string {
 	lines := strings.Split(content, "\n")
 	for i, line := range lines {
@@ -125,15 +106,4 @@ func rewriteGoImports(content, moduleName string) string {
 	content = strings.ReplaceAll(content, "\"bear/", "\""+moduleName+"/")
 	content = strings.ReplaceAll(content, "\"github.com/duiniwukenaihe/gin-bear/", "\""+moduleName+"/")
 	return content
-}
-
-func rewriteBuildMetadataPackage(content, moduleName string) string {
-	return strings.ReplaceAll(content, "github.com/duiniwukenaihe/gin-bear/pkg/bear", moduleName+"/pkg/bear")
-}
-
-func buildMetadataRewritePaths(projectName string) []string {
-	return []string{
-		filepath.Join(projectName, "Dockerfile"),
-		filepath.Join(projectName, ".github", "workflows", "ci.yml"),
-	}
 }

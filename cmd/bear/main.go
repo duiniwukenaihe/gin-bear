@@ -197,73 +197,7 @@ GIN_MODE=release
 BEAR_SERVER_PORT=8080
 JWT_SECRET=replace-with-at-least-32-random-characters
 `), 0644)
-	os.WriteFile(name+"/Dockerfile", []byte(generatedDockerfileContent()), 0644)
-	os.WriteFile(name+"/.dockerignore", []byte(generatedDockerignoreContent()), 0644)
 	fmt.Println("Project created successfully!")
-}
-
-func generatedDockerfileContent() string {
-	versionPackage := "github.com/duiniwukenaihe/gin-bear/pkg/bear"
-	return fmt.Sprintf(`FROM golang:1.25-alpine AS build
-WORKDIR /src
-RUN apk add --no-cache git ca-certificates
-ARG VERSION=dev
-ARG COMMIT=unknown
-ARG BUILD_TIME=unknown
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X %[1]s.Version=${VERSION} -X %[1]s.Commit=${COMMIT} -X %[1]s.BuildTime=${BUILD_TIME}" -o /out/app ./cmd
-
-FROM alpine:3.22
-ARG VERSION=dev
-ARG COMMIT=unknown
-ARG BUILD_TIME=unknown
-LABEL org.opencontainers.image.title="gin-bear-app" \
-      org.opencontainers.image.description="Generated Gin-Bear application image" \
-      org.opencontainers.image.source="https://github.com/duiniwukenaihe/gin-bear" \
-      org.opencontainers.image.version=${VERSION} \
-      org.opencontainers.image.revision=${COMMIT} \
-      org.opencontainers.image.created=${BUILD_TIME}
-RUN addgroup -S app && adduser -S app -G app
-WORKDIR /app
-COPY --from=build /out/app /app/app
-COPY application.yaml /app/application.yaml
-USER app
-EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/live || exit 1
-ENTRYPOINT ["/app/app"]
-`, versionPackage)
-}
-
-func generatedDockerignoreContent() string {
-	return `.git
-.github
-.idea
-.vscode
-.claude
-.agents
-
-docs
-docs/superpowers
-scripts
-
-README.md
-Makefile
-.gitignore
-.env
-.env.*
-application-*.yaml
-config.json
-
-*_test.go
-coverage.out
-bin
-dist
-tmp
-server.log
-sbom.spdx.json
-`
 }
 
 func handleGen(args []string) {

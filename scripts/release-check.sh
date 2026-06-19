@@ -40,16 +40,3 @@ if [[ ! -x "${GOVULNCHECK_BIN}" ]]; then
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 fi
 "${GOVULNCHECK_BIN}" ./...
-
-echo "==> Generating optional SBOM"
-GENERATE_SBOM="${GENERATE_SBOM:-false}"
-SYFT_BIN="$(command -v syft || true)"
-if [[ "${GENERATE_SBOM}" == "true" && -z "${SYFT_BIN}" ]]; then
-	go install github.com/anchore/syft/cmd/syft@latest
-	SYFT_BIN="$(go env GOPATH)/bin/syft"
-fi
-if [[ -n "${SYFT_BIN}" && -x "${SYFT_BIN}" ]]; then
-	"${SYFT_BIN}" dir:. -o spdx-json=sbom.spdx.json
-else
-	echo "syft not found; skipping SBOM generation"
-fi

@@ -48,19 +48,9 @@ go build \
   ./cmd
 ```
 
-For Docker builds:
-
-```bash
-docker build \
-  --build-arg VERSION="${VERSION}" \
-  --build-arg COMMIT="${COMMIT}" \
-  --build-arg BUILD_TIME="${BUILD_TIME}" \
-  -t gin-bear:${VERSION} .
-```
-
 The `/version` endpoint returns `version`, `commit`, `build_time`, `go_version`, `os`, and `arch`.
 
-When `bear-cli new` clones this repository as a full application template, generated build artifacts rewrite the `-X` package path to the new module, for example `my-app/pkg/bear.Version`. This applies to the Dockerfile and the copied GitHub Actions workflow. The legacy `bear new` command generates a lightweight app that imports the upstream framework package, so its Dockerfile intentionally keeps `github.com/duiniwukenaihe/gin-bear/pkg/bear`.
+When building a generated application, target the generated module path in linker flags, for example `my-app/pkg/bear.Version`.
 
 ## Metrics
 
@@ -222,39 +212,6 @@ Run the same core checks locally before cutting a release:
 
 ```bash
 GOPROXY=https://goproxy.cn,direct scripts/release-check.sh
-docker build .
 ```
 
-`scripts/release-check.sh` installs `govulncheck` when needed and generates `sbom.spdx.json` when `syft` is available.
-
-Set `GENERATE_SBOM=true` to force SBOM generation. When `syft` is not installed, the script installs it with `go install github.com/anchore/syft/cmd/syft@latest`.
-
-## Containers
-
-Build the app image:
-
-```bash
-docker build -t gin-bear .
-```
-
-Run local dependencies:
-
-```bash
-docker compose up --build
-```
-
-## Kubernetes Deployment Assets
-
-The `deploy/kubernetes` directory contains a conservative base deployment set:
-
-```bash
-kubectl apply -f deploy/kubernetes/configmap.yaml
-kubectl apply -f deploy/kubernetes/deployment.yaml
-kubectl apply -f deploy/kubernetes/service.yaml
-kubectl apply -f deploy/kubernetes/hpa.yaml
-kubectl apply -f deploy/kubernetes/pdb.yaml
-```
-
-Review image names, secrets, database settings, and namespace policy before applying to a real cluster.
-
-Prometheus alert starter rules live in `deploy/prometheus/rules.yaml`.
+`scripts/release-check.sh` installs `govulncheck` when needed and keeps local verification aligned with CI.

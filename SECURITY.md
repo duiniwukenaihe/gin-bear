@@ -10,4 +10,4 @@ Please report suspected vulnerabilities privately to the repository maintainers 
 
 ## Security Updates
 
-Security fixes should include tests when practical, a clear changelog or commit message, and a fresh `govulncheck ./...` result. High-impact dependency updates should also pass Docker build in CI.
+Security fixes should include tests when practical, a clear changelog or commit message, and a fresh `govulncheck ./...` result.

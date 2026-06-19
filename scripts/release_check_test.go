@@ -26,69 +26,39 @@ func TestReleaseCheckScriptCoversProductionGates(t *testing.T) {
 		"go vet ./...",
 		"govulncheck",
 		"go mod tidy",
-		"syft",
-		"GENERATE_SBOM",
-		"go install github.com/anchore/syft/cmd/syft@latest",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("release-check.sh missing %q:\n%s", want, text)
 		}
 	}
-}
-
-func TestDockerignoreExcludesNonRuntimeBuildContext(t *testing.T) {
-	content, err := os.ReadFile("../.dockerignore")
-	if err != nil {
-		t.Fatalf(".dockerignore should exist: %v", err)
-	}
-	text := string(content)
-	for _, want := range []string{
-		".git",
-		".github",
-		"docs/superpowers",
-		"scripts",
-		"*_test.go",
+	for _, unwanted := range []string{
+		"syft",
+		"GENERATE_SBOM",
 		"sbom.spdx.json",
 	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf(".dockerignore missing %q:\n%s", want, text)
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("release-check.sh should focus on Go framework checks and not contain %q:\n%s", unwanted, text)
 		}
 	}
 }
 
-func TestRootDockerfileIncludesOCILabelsAndHealthcheck(t *testing.T) {
-	content, err := os.ReadFile("../Dockerfile")
-	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
-	}
-	text := string(content)
-	for _, want := range []string{
-		"org.opencontainers.image.version=${VERSION}",
-		"org.opencontainers.image.revision=${COMMIT}",
-		"org.opencontainers.image.created=${BUILD_TIME}",
-		"HEALTHCHECK",
-		"/live",
-	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("Dockerfile missing %q:\n%s", want, text)
-		}
-	}
-}
-
-func TestCIInvokesReleaseCheckScriptAndUploadsSBOM(t *testing.T) {
+func TestCIInvokesFrameworkReleaseCheckOnly(t *testing.T) {
 	content, err := os.ReadFile("../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatalf("read ci workflow: %v", err)
 	}
 	text := string(content)
-	for _, want := range []string{
-		"GENERATE_SBOM: \"true\"",
-		"scripts/release-check.sh",
-		"actions/upload-artifact",
+	if !strings.Contains(text, "scripts/release-check.sh") {
+		t.Fatalf("CI should invoke release-check.sh:\n%s", text)
+	}
+	for _, unwanted := range []string{
+		"docker build",
+		"GENERATE_SBOM",
 		"sbom.spdx.json",
+		"actions/upload-artifact",
 	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("CI missing %q:\n%s", want, text)
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("CI should not contain container delivery step %q:\n%s", unwanted, text)
 		}
 	}
 }
@@ -102,11 +72,13 @@ func TestDependabotCoversProductionDependencies(t *testing.T) {
 	for _, want := range []string{
 		`package-ecosystem: "gomod"`,
 		`package-ecosystem: "github-actions"`,
-		`package-ecosystem: "docker"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("dependabot config missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, `package-ecosystem: "docker"`) {
+		t.Fatalf("dependabot config should not include docker ecosystem:\n%s", text)
 	}
 }
 
@@ -132,102 +104,18 @@ func TestSecurityPolicyAndRunbookCoverOperations(t *testing.T) {
 	}
 }
 
-func TestKubernetesManifestsCoverProductionDefaults(t *testing.T) {
-	files := map[string][]string{
-		"../deploy/kubernetes/deployment.yaml": {
-			"kind: Deployment",
-			"replicas: 3",
-			"type: RollingUpdate",
-			"runAsNonRoot: true",
-			"readinessProbe:",
-			"path: /ready",
-			"livenessProbe:",
-			"path: /live",
-			"resources:",
-			"prometheus.io/scrape: \"true\"",
-			"configMap:",
-		},
-		"../deploy/kubernetes/service.yaml": {
-			"kind: Service",
-			"port: 8080",
-			"targetPort: http",
-		},
-		"../deploy/kubernetes/hpa.yaml": {
-			"kind: HorizontalPodAutoscaler",
-			"minReplicas: 3",
-			"maxReplicas: 10",
-			"averageUtilization: 70",
-		},
-		"../deploy/kubernetes/pdb.yaml": {
-			"kind: PodDisruptionBudget",
-			"minAvailable: 2",
-		},
-		"../deploy/kubernetes/configmap.yaml": {
-			"kind: ConfigMap",
-			"application.yaml:",
-			"metrics:",
-			"tracing:",
-		},
-	}
-
-	for path, wants := range files {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("%s should exist: %v", path, err)
-		}
-		text := string(content)
-		for _, want := range wants {
-			if !strings.Contains(text, want) {
-				t.Fatalf("%s missing %q:\n%s", path, want, text)
-			}
-		}
-	}
-}
-
-func TestPrometheusRulesAndDocsCoverDeploymentAssets(t *testing.T) {
-	rules, err := os.ReadFile("../deploy/prometheus/rules.yaml")
-	if err != nil {
-		t.Fatalf("prometheus rules should exist: %v", err)
-	}
-	ruleText := string(rules)
-	for _, want := range []string{
-		"GinBearNoReadyPods",
-		"GinBearHighErrorRate",
-		"GinBearHighLatency",
-		"GinBearReadinessFailures",
-		"gin_bear_http_requests_total",
-		"gin_bear_http_request_duration_seconds_bucket",
+func TestRepositoryFocusesOnFrameworkNotContainerDelivery(t *testing.T) {
+	for _, path := range []string{
+		"../Dockerfile",
+		"../docker-compose.yml",
+		"../.dockerignore",
+		"../deploy/kubernetes/deployment.yaml",
+		"../deploy/prometheus/rules.yaml",
 	} {
-		if !strings.Contains(ruleText, want) {
-			t.Fatalf("prometheus rules missing %q:\n%s", want, ruleText)
+		if _, err := os.Stat(path); err == nil {
+			t.Fatalf("container delivery artifact should not exist: %s", path)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat %s: %v", path, err)
 		}
-	}
-
-	production, err := os.ReadFile("../docs/production.md")
-	if err != nil {
-		t.Fatalf("read production docs: %v", err)
-	}
-	for _, want := range []string{"deploy/kubernetes", "deploy/prometheus/rules.yaml", "kubectl apply"} {
-		if !strings.Contains(string(production), want) {
-			t.Fatalf("production docs missing %q", want)
-		}
-	}
-
-	runbook, err := os.ReadFile("../docs/runbook.md")
-	if err != nil {
-		t.Fatalf("read runbook: %v", err)
-	}
-	for _, want := range []string{"Kubernetes Rollout", "Prometheus Alerts", "kubectl rollout undo"} {
-		if !strings.Contains(string(runbook), want) {
-			t.Fatalf("runbook missing %q", want)
-		}
-	}
-
-	dockerignore, err := os.ReadFile("../.dockerignore")
-	if err != nil {
-		t.Fatalf("read .dockerignore: %v", err)
-	}
-	if !strings.Contains(string(dockerignore), "deploy") {
-		t.Fatalf(".dockerignore should exclude deploy assets:\n%s", string(dockerignore))
 	}
 }
