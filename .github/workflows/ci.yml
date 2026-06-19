@@ -25,11 +25,23 @@ jobs:
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
+      - name: Build command packages
+        run: go build ./cmd ./cmd/bear ./cmd/bear-cli
+
       - name: Test
         run: go test ./... -count=1
 
+      - name: Race test
+        run: go test -race ./... -count=1
+
       - name: Vet
         run: go vet ./...
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Vulnerability scan
+        run: $(go env GOPATH)/bin/govulncheck ./...
 
       - name: Docker build
         run: docker build .

@@ -94,6 +94,27 @@ plugins:
 
 Plugin paths are resolved to absolute paths and must live inside one of the configured directories.
 
+## Delivery Checks
+
+Run the same core checks locally before cutting a release:
+
+```bash
+GOPROXY=https://goproxy.cn,direct go mod tidy
+git diff --exit-code -- go.mod go.sum
+GOPROXY=https://goproxy.cn,direct go build ./cmd ./cmd/bear ./cmd/bear-cli
+GOPROXY=https://goproxy.cn,direct go test ./... -count=1
+GOPROXY=https://goproxy.cn,direct go test -race ./... -count=1
+GOPROXY=https://goproxy.cn,direct go vet ./...
+GOPROXY=https://goproxy.cn,direct govulncheck ./...
+docker build .
+```
+
+Install `govulncheck` when it is not already available:
+
+```bash
+GOPROXY=https://goproxy.cn,direct go install golang.org/x/vuln/cmd/govulncheck@latest
+```
+
 ## Containers
 
 Build the app image:

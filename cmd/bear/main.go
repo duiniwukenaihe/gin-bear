@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear/gen"
 )
@@ -218,7 +219,7 @@ func handleGen(args []string) {
 		if len(args) < 2 {
 			log.Fatal("Controller name is required")
 		}
-		name := strings.Title(args[1])
+		name := exportedName(args[1])
 		generator := gen.NewGenerator("controllers")
 		data := struct{ Name string }{Name: name}
 		path := fmt.Sprintf("pkg/controllers/%s_controller.go", strings.ToLower(name))
@@ -231,7 +232,7 @@ func handleGen(args []string) {
 		if len(args) < 2 {
 			log.Fatal("Service name is required")
 		}
-		name := strings.Title(args[1])
+		name := exportedName(args[1])
 		generator := gen.NewGenerator("services")
 		data := struct{ Name string }{Name: name}
 		path := fmt.Sprintf("pkg/services/%s_service.go", strings.ToLower(name))
@@ -243,4 +244,27 @@ func handleGen(args []string) {
 	default:
 		fmt.Printf("Unknown gen command: %s\n", subCmd)
 	}
+}
+
+func exportedName(input string) string {
+	parts := strings.FieldsFunc(input, func(r rune) bool {
+		return r == '-' || r == '_' || unicode.IsSpace(r)
+	})
+	var b strings.Builder
+	for _, part := range parts {
+		b.WriteString(exportedPart(part))
+	}
+	return b.String()
+}
+
+func exportedPart(part string) string {
+	if part == "" {
+		return ""
+	}
+	if part == strings.ToUpper(part) {
+		return part
+	}
+	runes := []rune(part)
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
 }
