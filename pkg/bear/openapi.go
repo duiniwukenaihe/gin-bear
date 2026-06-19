@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -61,6 +62,7 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 		}
 		// 统一路径格式
 		path = strings.ReplaceAll(path, "//", "/")
+		path = toOpenAPIPath(path)
 
 		if _, exists := schema.Paths[path]; !exists {
 			schema.Paths[path] = make(map[string]interface{})
@@ -74,6 +76,7 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 				},
 			},
 		}
+		enrichOpenAPIOperation(op, route.HandlerType)
 
 		// 检查控制器是否提供了额外元数据
 		if bean := GetInjector().Get(route.HandlerType); bean != nil {
@@ -90,6 +93,222 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 	}
 
 	return json.MarshalIndent(schema, "", "  ")
+}
+
+func toOpenAPIPath(path string) string {
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		if strings.HasPrefix(part, ":") && len(part) > 1 {
+			parts[i] = "{" + part[1:] + "}"
+			continue
+		}
+		if strings.HasPrefix(part, "*") && len(part) > 1 {
+			parts[i] = "{" + part[1:] + "}"
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func enrichOpenAPIOperation(op map[string]interface{}, handlerType reflect.Type) {
+	if handlerType == nil || handlerType.Kind() != reflect.Func {
+		return
+	}
+	parameters := make([]interface{}, 0)
+	for i := 0; i < handlerType.NumIn(); i++ {
+		argType := derefType(handlerType.In(i))
+		if argType == reflect.TypeOf(gin.Context{}) || argType.Kind() != reflect.Struct {
+			continue
+		}
+		parameters = append(parameters, openAPIParametersFromStruct(argType)...)
+		if bodySchema := openAPIRequestBodySchema(argType); bodySchema != nil {
+			op["requestBody"] = map[string]interface{}{
+				"required": true,
+				"content": map[string]interface{}{
+					"application/json": map[string]interface{}{
+						"schema": bodySchema,
+					},
+				},
+			}
+		}
+	}
+	if len(parameters) > 0 {
+		op["parameters"] = parameters
+	}
+	if responseSchema := openAPIResponseSchema(handlerType); responseSchema != nil {
+		op["responses"] = map[string]interface{}{
+			"200": map[string]interface{}{
+				"description": "OK",
+				"content": map[string]interface{}{
+					"application/json": map[string]interface{}{
+						"schema": responseSchema,
+					},
+				},
+			},
+		}
+	}
+}
+
+func openAPIParametersFromStruct(structType reflect.Type) []interface{} {
+	params := make([]interface{}, 0)
+	for i := 0; i < structType.NumField(); i++ {
+		field := structType.Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
+		fieldType := derefType(field.Type)
+		if field.Anonymous && fieldType.Kind() == reflect.Struct {
+			params = append(params, openAPIParametersFromStruct(fieldType)...)
+			continue
+		}
+		if name := tagFieldName(field.Tag.Get("uri")); name != "" {
+			params = append(params, openAPIParameter(name, "path", true, field.Type))
+			continue
+		}
+		if name := tagFieldName(field.Tag.Get("query")); name != "" {
+			params = append(params, openAPIParameter(name, "query", hasRequiredBinding(field), field.Type))
+			continue
+		}
+		if name := tagFieldName(field.Tag.Get("form")); name != "" {
+			params = append(params, openAPIParameter(name, "query", hasRequiredBinding(field), field.Type))
+		}
+	}
+	return params
+}
+
+func openAPIParameter(name, in string, required bool, fieldType reflect.Type) map[string]interface{} {
+	return map[string]interface{}{
+		"name":     name,
+		"in":       in,
+		"required": required,
+		"schema":   openAPISchemaForType(fieldType),
+	}
+}
+
+func openAPIRequestBodySchema(structType reflect.Type) map[string]interface{} {
+	properties := make(map[string]interface{})
+	required := make([]string, 0)
+	for i := 0; i < structType.NumField(); i++ {
+		field := structType.Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
+		fieldType := derefType(field.Type)
+		if field.Anonymous && fieldType.Kind() == reflect.Struct {
+			nested := openAPIRequestBodySchema(fieldType)
+			if nested != nil {
+				if nestedProps, ok := nested["properties"].(map[string]interface{}); ok {
+					for key, value := range nestedProps {
+						properties[key] = value
+					}
+				}
+				if nestedRequired, ok := nested["required"].([]string); ok {
+					required = append(required, nestedRequired...)
+				}
+			}
+			continue
+		}
+		name := tagFieldName(field.Tag.Get("json"))
+		if name == "" {
+			continue
+		}
+		properties[name] = openAPISchemaForType(field.Type)
+		if hasRequiredBinding(field) {
+			required = append(required, name)
+		}
+	}
+	if len(properties) == 0 {
+		return nil
+	}
+	schema := map[string]interface{}{
+		"type":       "object",
+		"properties": properties,
+	}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return schema
+}
+
+func openAPIResponseSchema(handlerType reflect.Type) map[string]interface{} {
+	errorType := reflect.TypeOf((*error)(nil)).Elem()
+	for i := 0; i < handlerType.NumOut(); i++ {
+		outType := handlerType.Out(i)
+		if outType.Implements(errorType) {
+			continue
+		}
+		return openAPISchemaForType(outType)
+	}
+	return nil
+}
+
+func openAPISchemaForType(fieldType reflect.Type) map[string]interface{} {
+	if fieldType == nil {
+		return map[string]interface{}{"type": "object"}
+	}
+	fieldType = derefType(fieldType)
+	if fieldType == reflect.TypeOf(time.Time{}) {
+		return map[string]interface{}{"type": "string", "format": "date-time"}
+	}
+	switch fieldType.Kind() {
+	case reflect.Bool:
+		return map[string]interface{}{"type": "boolean"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return map[string]interface{}{"type": "integer"}
+	case reflect.Float32, reflect.Float64:
+		return map[string]interface{}{"type": "number"}
+	case reflect.String:
+		return map[string]interface{}{"type": "string"}
+	case reflect.Slice, reflect.Array:
+		return map[string]interface{}{
+			"type":  "array",
+			"items": openAPISchemaForType(fieldType.Elem()),
+		}
+	case reflect.Map:
+		return map[string]interface{}{
+			"type":                 "object",
+			"additionalProperties": true,
+		}
+	case reflect.Struct:
+		properties := make(map[string]interface{})
+		required := make([]string, 0)
+		for i := 0; i < fieldType.NumField(); i++ {
+			field := fieldType.Field(i)
+			if field.PkgPath != "" {
+				continue
+			}
+			name := tagFieldName(field.Tag.Get("json"))
+			if name == "" {
+				name = field.Name
+			}
+			properties[name] = openAPISchemaForType(field.Type)
+			if hasRequiredBinding(field) {
+				required = append(required, name)
+			}
+		}
+		schema := map[string]interface{}{
+			"type":       "object",
+			"properties": properties,
+		}
+		if len(required) > 0 {
+			schema["required"] = required
+		}
+		return schema
+	default:
+		return map[string]interface{}{"type": "string"}
+	}
+}
+
+func derefType(t reflect.Type) reflect.Type {
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t
+}
+
+func hasRequiredBinding(field reflect.StructField) bool {
+	binding := field.Tag.Get("binding")
+	return binding == "required" || strings.Contains(binding, "required,") || strings.Contains(binding, ",required")
 }
 
 // EnableSwagger 启用 Swagger 文档支持

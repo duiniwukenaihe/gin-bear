@@ -53,6 +53,26 @@ metrics:
 
 Request metrics are labeled by `method`, Gin route pattern, and `status`.
 
+## OpenAPI And Swagger
+
+Enable Swagger/OpenAPI with:
+
+```go
+app.EnableSwagger()
+```
+
+The JSON document is served at `/swagger/doc.json`, and the built-in Swagger UI entry is `/swagger`.
+
+The generator uses route metadata and handler function signatures to infer:
+
+- OpenAPI path syntax, for example `/users/:id` becomes `/users/{id}`.
+- `uri` tags as path parameters.
+- `form` and `query` tags as query parameters.
+- `json` tags as request body fields.
+- the first non-error handler return value as the `200` response schema.
+
+This is a best-effort contract generator. For externally consumed APIs, review the generated document in code review and add explicit documentation around business errors, auth requirements, pagination, and non-200 responses.
+
 ## Database Migrations
 
 Do not run implicit schema migrations from request-serving code. Keep schema changes explicit and reviewed:

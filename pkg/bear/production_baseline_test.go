@@ -309,6 +309,31 @@ func (c *pathParamTestController) Build(b *Bear) {
 	})
 }
 
+type openAPITestController struct{}
+
+type openAPITestRequest struct {
+	ID   int64  `uri:"id" binding:"required"`
+	Page int    `form:"page"`
+	Name string `json:"name" binding:"required"`
+}
+
+type openAPITestResponse struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+func (c *openAPITestController) Name() string {
+	return "OpenAPITestController"
+}
+
+func (c *openAPITestController) Build(b *Bear) {
+	b.Handle(http.MethodPut, "/users/:id", c.Update)
+}
+
+func (c *openAPITestController) Update(req *openAPITestRequest) (*openAPITestResponse, error) {
+	return &openAPITestResponse{ID: req.ID, Name: req.Name}, nil
+}
+
 func TestHealthEndpointsExposeLiveAndReady(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)
@@ -374,6 +399,75 @@ func TestMetricsEndpointExportsHTTPRequestMetrics(t *testing.T) {
 			t.Fatalf("metrics output missing %q:\n%s", want, body)
 		}
 	}
+}
+
+func TestGenerateOpenAPIIncludesParametersRequestBodyAndResponseSchema(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Server.Name = "openapi-test"
+
+	app := Ignite(cfg)
+	app.Mount("/api", &openAPITestController{})
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("apply all: %v", err)
+	}
+
+	doc, err := app.GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("generate openapi: %v", err)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v\n%s", err, string(doc))
+	}
+
+	paths := spec["paths"].(map[string]interface{})
+	pathItem, ok := paths["/api/users/{id}"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing openapi path /api/users/{id}: %s", string(doc))
+	}
+	op := pathItem["put"].(map[string]interface{})
+
+	parameters := op["parameters"].([]interface{})
+	if !openAPIHasParameter(parameters, "id", "path", "integer") {
+		t.Fatalf("missing path id integer parameter: %#v", parameters)
+	}
+	if !openAPIHasParameter(parameters, "page", "query", "integer") {
+		t.Fatalf("missing query page integer parameter: %#v", parameters)
+	}
+
+	requestBody := op["requestBody"].(map[string]interface{})
+	content := requestBody["content"].(map[string]interface{})
+	jsonContent := content["application/json"].(map[string]interface{})
+	bodySchema := jsonContent["schema"].(map[string]interface{})
+	bodyProps := bodySchema["properties"].(map[string]interface{})
+	if bodyProps["name"].(map[string]interface{})["type"] != "string" {
+		t.Fatalf("missing request body name string schema: %#v", bodySchema)
+	}
+
+	responses := op["responses"].(map[string]interface{})
+	okResponse := responses["200"].(map[string]interface{})
+	responseContent := okResponse["content"].(map[string]interface{})
+	responseJSON := responseContent["application/json"].(map[string]interface{})
+	responseSchema := responseJSON["schema"].(map[string]interface{})
+	responseProps := responseSchema["properties"].(map[string]interface{})
+	if responseProps["id"].(map[string]interface{})["type"] != "integer" {
+		t.Fatalf("missing response id integer schema: %#v", responseSchema)
+	}
+}
+
+func openAPIHasParameter(parameters []interface{}, name, in, typ string) bool {
+	for _, raw := range parameters {
+		param := raw.(map[string]interface{})
+		if param["name"] != name || param["in"] != in {
+			continue
+		}
+		schema := param["schema"].(map[string]interface{})
+		return schema["type"] == typ
+	}
+	return false
 }
 
 func TestReadyEndpointFailsWhenDependencyIsNotReady(t *testing.T) {
