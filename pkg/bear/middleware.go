@@ -131,6 +131,7 @@ func PerformanceMiddleware() gin.HandlerFunc {
 		if c.Writer.Status() >= 400 {
 			atomic.AddInt64(&TotalErrors, 1)
 		}
+		recordHTTPRequestMetric(c, latency)
 
 		status := c.Writer.Status()
 		isError := status >= 400

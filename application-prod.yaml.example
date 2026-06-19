@@ -74,6 +74,10 @@ middleware:
   performance_log_level: "info"
   slow_request_threshold: "1s"
 
+metrics:
+  enabled: true
+  path: "/metrics"
+
 plugins:
   enabled: false
   allowed_dirs:

@@ -319,12 +319,59 @@ func TestHealthEndpointsExposeLiveAndReady(t *testing.T) {
 	app.EnableHealth()
 	app.ApplyAll(context.Background())
 
-	for _, path := range []string{"/health", "/live", "/ready"} {
+	for _, path := range []string{"/health", "/live", "/ready", "/metrics"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		w := httptest.NewRecorder()
 		app.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("%s status = %d body = %s", path, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestMetricsEndpointExportsHTTPRequestMetrics(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	resetMetricsForTest()
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Metrics.Enabled = true
+	cfg.Metrics.Path = "/metrics"
+
+	app := Ignite(cfg)
+	app.EnableMetrics()
+	app.GET("/ok", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+	app.GET("/bad", func(c *gin.Context) {
+		c.String(http.StatusInternalServerError, "bad")
+	})
+
+	for _, path := range []string{"/ok", "/bad"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		app.ServeHTTP(w, req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	app.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`# HELP gin_bear_http_requests_total Total HTTP requests handled by gin-bear.`,
+		`gin_bear_http_requests_total{method="GET",route="/ok",status="200"} 1`,
+		`gin_bear_http_requests_total{method="GET",route="/bad",status="500"} 1`,
+		`gin_bear_http_errors_total{method="GET",route="/bad",status="500"} 1`,
+		`gin_bear_http_request_duration_seconds_bucket{method="GET",route="/ok",status="200",le="0.005"}`,
+		`gin_bear_http_request_duration_seconds_sum{method="GET",route="/ok",status="200"}`,
+		`gin_bear_http_request_duration_seconds_count{method="GET",route="/ok",status="200"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics output missing %q:\n%s", want, body)
 		}
 	}
 }

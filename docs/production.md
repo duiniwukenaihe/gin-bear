@@ -33,6 +33,26 @@ Start from `application-prod.yaml.example` and keep real secrets outside git. Su
 
 Use `/ready` for load balancer readiness and rollout gates.
 
+## Metrics
+
+Enable the built-in Prometheus text endpoint with:
+
+```yaml
+metrics:
+  enabled: true
+  path: "/metrics"
+```
+
+`EnableHealth()` registers `/metrics` when metrics are enabled. The endpoint exposes:
+
+- `gin_bear_http_requests_total`
+- `gin_bear_http_errors_total`
+- `gin_bear_http_request_duration_seconds_bucket`
+- `gin_bear_http_request_duration_seconds_sum`
+- `gin_bear_http_request_duration_seconds_count`
+
+Request metrics are labeled by `method`, Gin route pattern, and `status`.
+
 ## Database Migrations
 
 Do not run implicit schema migrations from request-serving code. Keep schema changes explicit and reviewed:

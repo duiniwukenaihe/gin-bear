@@ -129,6 +129,10 @@ auth:
 
 websocket:
   check_origin: true
+
+metrics:
+  enabled: true
+  path: "/metrics"
 `), 0644)
 	os.WriteFile(name+"/application-prod.yaml.example", []byte(`server:
   port: 8080
@@ -162,6 +166,10 @@ websocket:
   check_origin: true
   allowed_origins:
     - "https://example.com"
+
+metrics:
+  enabled: true
+  path: "/metrics"
 
 plugins:
   enabled: false

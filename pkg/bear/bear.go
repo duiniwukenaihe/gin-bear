@@ -56,20 +56,21 @@ type MountMetadata struct {
 // Bear 是核心框架引擎
 type Bear struct {
 	*gin.Engine
-	g                *gin.RouterGroup
-	exprData         map[string]interface{}
-	currentGroup     string
-	fairingHandler   *FairingHandler
-	routeTree        *RouteTree // 路由树，用于存储路由级别的 Fairing
-	onShutdown       []func()
-	routeRegistry    []RouteMetadata
-	grpcServices     []GRPCService
-	mounts           []MountMetadata
-	modules          []Module
-	applied          atomic.Bool // 增加应用标记
-	pluginDispatcher *PluginDispatcher
-	pluginManager    *PluginManager
-	pluginMode       bool // 标记当前是否处于插件加载模式
+	g                 *gin.RouterGroup
+	exprData          map[string]interface{}
+	currentGroup      string
+	fairingHandler    *FairingHandler
+	routeTree         *RouteTree // 路由树，用于存储路由级别的 Fairing
+	onShutdown        []func()
+	routeRegistry     []RouteMetadata
+	grpcServices      []GRPCService
+	mounts            []MountMetadata
+	modules           []Module
+	applied           atomic.Bool // 增加应用标记
+	pluginDispatcher  *PluginDispatcher
+	pluginManager     *PluginManager
+	pluginMode        bool // 标记当前是否处于插件加载模式
+	metricsRegistered atomic.Bool
 }
 
 // OnShutdown 注册服务关闭时的清理函数
@@ -159,9 +160,23 @@ func (this *Bear) EnableTracing(ctx context.Context) *Bear {
 	return this
 }
 
-// EnableMetrics 开启指标监控 (已禁用)
+// EnableMetrics 开启指标监控
 func (this *Bear) EnableMetrics() *Bear {
-	slog.Warn("Metrics is disabled in 精简 mode")
+	config := GetByType[*SysConfig]()
+	if config != nil && config.Metrics != nil && !config.Metrics.Enabled {
+		return this
+	}
+	if !this.metricsRegistered.CompareAndSwap(false, true) {
+		return this
+	}
+	path := "/metrics"
+	if config != nil && config.Metrics != nil && config.Metrics.Path != "" {
+		path = config.Metrics.Path
+	}
+	this.GET(path, func(ctx *gin.Context) {
+		ctx.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		ctx.String(http.StatusOK, httpMetrics.RenderPrometheus())
+	})
 	return this
 }
 
@@ -382,6 +397,10 @@ func (this *Bear) Mount(group string, classes ...IClass) *Bear {
 // EnableHealth 启用健康检查与指标端点
 func (this *Bear) EnableHealth() *Bear {
 	this.Mount("", &HealthController{})
+	config := GetByType[*SysConfig]()
+	if config == nil || config.Metrics == nil || config.Metrics.Enabled {
+		this.EnableMetrics()
+	}
 	return this
 }
 
