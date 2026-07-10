@@ -4,13 +4,13 @@ import (
 	"google.golang.org/grpc"
 )
 
-// GRPCService 规范化 gRPC 服务接口
+// Deprecated: GRPCService is compatibility-only. Prefer the supported HTTP lifecycle.
 type GRPCService interface {
 	Bean
 	Register(srv *grpc.Server)
 }
 
-// BaseGRPCService 提供基础实现
+// Deprecated: BaseGRPCService is compatibility-only. Prefer the supported HTTP lifecycle.
 type BaseGRPCService struct {
 }
 

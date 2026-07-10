@@ -124,6 +124,9 @@ func Ignite(args ...any) *Bear {
 
 	// 注册核心底座 Bean
 	SetDefaultLogger(config)
+	for _, warning := range config.compatibilityWarnings() {
+		slog.Warn(warning)
+	}
 	GetInjector().Set(b)
 	GetInjector().Set(config)
 	configureGinRuntime(b, config)
@@ -145,13 +148,13 @@ func Ignite(args ...any) *Bear {
 	return b
 }
 
-// EnableIDGenerator 开启分布式 ID 生成器 (已禁用)
+// Deprecated: EnableIDGenerator is compatibility-only and has no effect.
 func (b *Bear) EnableIDGenerator() error {
 	slog.Warn("ID Generator is disabled in精简 mode")
 	return nil
 }
 
-// EnableMQ 开启消息队列插件 (已禁用)
+// Deprecated: EnableMQ is compatibility-only and has no effect.
 func (b *Bear) EnableMQ(ctx context.Context) *Bear {
 	slog.Warn("MQ is disabled in 精简 mode")
 	return b

@@ -21,6 +21,12 @@
 | JWT Auth | Built-in authentication |
 | Rate Limiter | Memory or Redis-based |
 
+### Support Status
+
+Read the [supported feature states](docs/supported-features.md) and the
+[compatibility contract](docs/compatibility.md) before adopting optional
+framework integrations.
+
 ### Quick Start
 
 ```bash
@@ -371,6 +377,11 @@ psql> CREATE DATABASE myapp;
 | 模块系统 | 按模块组织代码 |
 | JWT 认证 | 内置认证鉴权 |
 | 接口限流 | 内存/Redis 限流 |
+
+### 支持状态
+
+在启用可选框架集成前，请阅读[功能支持状态](docs/supported-features.md)和
+[兼容性约定](docs/compatibility.md)。
 
 ### 快速开始
 

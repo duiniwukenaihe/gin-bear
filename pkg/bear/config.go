@@ -36,6 +36,7 @@ type LogConfig struct {
 	Level string `yaml:"level" json:"level"`
 }
 
+// Deprecated: WafConfig is compatibility-only and is not started.
 type WafConfig struct {
 	Enabled     bool   `yaml:"enabled" json:"enabled"`
 	StorageType string `yaml:"storage_type" json:"storage_type"`
@@ -60,6 +61,7 @@ type CORSConfig struct {
 	MaxAge           string   `yaml:"max_age" json:"max_age"`
 }
 
+// Deprecated: GeoIPConfig is compatibility-only and is not loaded.
 type GeoIPConfig struct {
 	Enabled  bool   `yaml:"enabled" json:"enabled"`
 	CityMMDB string `yaml:"city_mmdb" json:"city_mmdb"`
@@ -88,6 +90,7 @@ type OpenAPIApp struct {
 	AppSecret string `yaml:"app_secret" json:"app_secret"`
 }
 
+// Deprecated: BigQueryConfig is compatibility-only and is not started.
 type BigQueryConfig struct {
 	Enabled            bool   `yaml:"enabled" json:"enabled"`
 	ProjectID          string `yaml:"project_id" json:"project_id"`
@@ -102,6 +105,7 @@ type BigQueryConfig struct {
 	Async              bool   `yaml:"async" json:"async"`
 }
 
+// Deprecated: SchemaConfig is compatibility-only and is not loaded.
 type SchemaConfig struct {
 	Enabled     bool   `yaml:"enabled" json:"enabled"`
 	SchemaPath  string `yaml:"schema_path" json:"schema_path"` // directory containing json schemas
@@ -110,6 +114,7 @@ type SchemaConfig struct {
 	FilePath    string `yaml:"file_path" json:"file_path"`
 }
 
+// Deprecated: KafkaConfig is compatibility-only and is not started.
 type KafkaConfig struct {
 	Enabled      bool     `yaml:"enabled" json:"enabled"`
 	Brokers      []string `yaml:"brokers" json:"brokers"`
@@ -187,11 +192,13 @@ type WebSocketConfig struct {
 	AllowedOrigins   []string `yaml:"allowed_origins" json:"allowed_origins"`
 }
 
+// Deprecated: GRPCConfig is compatibility-only. Prefer the supported HTTP lifecycle.
 type GRPCConfig struct {
 	Enabled bool  `yaml:"enabled" json:"enabled"`
 	Port    int32 `yaml:"port" json:"port"`
 }
 
+// Deprecated: CircuitBreakerConfig is compatibility-only and is not started.
 type CircuitBreakerConfig struct {
 	Enabled             bool    `yaml:"enabled" json:"enabled"`
 	MaxRequests         uint32  `yaml:"max_requests" json:"max_requests"`                 // 半开状态下的最大请求数
@@ -200,6 +207,7 @@ type CircuitBreakerConfig struct {
 	ThresholdPercentage float64 `yaml:"threshold_percentage" json:"threshold_percentage"` // 错误率阈值 (0-1)
 }
 
+// Deprecated: ConfigCenterConfig is compatibility-only and is not loaded.
 type ConfigCenterConfig struct {
 	Enabled  bool   `yaml:"enabled" json:"enabled"`
 	Type     string `yaml:"type" json:"type"`         // "redis", "etcd", "consul"
@@ -246,6 +254,7 @@ type SysConfig struct {
 	Config         UserConfig            `yaml:"config" json:"config"`
 }
 
+// Deprecated: MQConfig is compatibility-only and is not started.
 type MQConfig struct {
 	Enabled    bool   `yaml:"enabled" json:"enabled"`
 	Type       string `yaml:"type" json:"type"` // "kafka", "rocketmq", "pulsar", "noop"
@@ -254,6 +263,7 @@ type MQConfig struct {
 	MaxRetries int    `yaml:"max_retries" json:"max_retries"`
 }
 
+// Deprecated: RocketMQConfig is compatibility-only and is not started.
 type RocketMQConfig struct {
 	Enabled     bool     `yaml:"enabled" json:"enabled"`
 	NameServers []string `yaml:"name_servers" json:"name_servers"`
@@ -262,6 +272,7 @@ type RocketMQConfig struct {
 	RetryTimes  int      `yaml:"retry_times" json:"retry_times"` // Added
 }
 
+// Deprecated: PulsarConfig is compatibility-only and is not started.
 type PulsarConfig struct {
 	Enabled          bool   `yaml:"enabled" json:"enabled"`
 	URL              string `yaml:"url" json:"url"`
@@ -337,6 +348,38 @@ func (c *SysConfig) validateSemantic() error {
 
 func (c *SysConfig) Name() string {
 	return "SysConfig"
+}
+
+func (c *SysConfig) compatibilityWarnings() []string {
+	if c == nil {
+		return nil
+	}
+
+	var warnings []string
+	seen := make(map[string]struct{})
+	add := func(enabled bool, warning string) {
+		if !enabled {
+			return
+		}
+		if _, exists := seen[warning]; exists {
+			return
+		}
+		seen[warning] = struct{}{}
+		warnings = append(warnings, warning)
+	}
+
+	add(c.Waf != nil && c.Waf.Enabled, "waf is compatibility-only and is not started")
+	add(c.GeoIP != nil && c.GeoIP.Enabled, "geoip is compatibility-only and is not loaded")
+	add(c.BigQuery != nil && c.BigQuery.Enabled, "bigquery is compatibility-only and is not started")
+	add(c.MQ != nil && c.MQ.Enabled, "mq is compatibility-only and is not started")
+	add(c.Kafka != nil && c.Kafka.Enabled, "kafka is compatibility-only and is not started")
+	add(c.RocketMQ != nil && c.RocketMQ.Enabled, "rocketmq is compatibility-only and is not started")
+	add(c.Pulsar != nil && c.Pulsar.Enabled, "pulsar is compatibility-only and is not started")
+	add(c.Schema != nil && c.Schema.Enabled, "schema is compatibility-only and is not loaded")
+	add(c.CircuitBreaker != nil && c.CircuitBreaker.Enabled, "circuit_breaker is compatibility-only and is not started")
+	add(c.ConfigCenter != nil && c.ConfigCenter.Enabled, "config_center is compatibility-only and is not loaded")
+
+	return warnings
 }
 
 // PostProcess 处理配置兼容性与默认值补全
