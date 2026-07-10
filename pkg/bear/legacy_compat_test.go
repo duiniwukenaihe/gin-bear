@@ -52,6 +52,7 @@ func TestCompatibilityWarningsAreLoggedOnceDuringIgnite(t *testing.T) {
 	cfg.Schema.Enabled = true
 	cfg.CircuitBreaker.Enabled = true
 	cfg.ConfigCenter.Enabled = true
+	cfg.GRPC.Enabled = true
 
 	output := captureStandardOutput(t, func() {
 		Ignite(cfg)
@@ -72,6 +73,9 @@ func TestCompatibilityWarningsAreLoggedOnceDuringIgnite(t *testing.T) {
 		if count := strings.Count(output, `"msg":"`+warning+`"`); count != 1 {
 			t.Errorf("warning %q logged %d times; output: %s", warning, count, output)
 		}
+	}
+	if strings.Contains(output, "grpc is compatibility-only") {
+		t.Errorf("working gRPC must not emit a compatibility-only warning; output: %s", output)
 	}
 }
 
