@@ -3,6 +3,7 @@ module github.com/duiniwukenaihe/gin-bear
 go 1.25.12
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/bytedance/sonic v1.15.0
 	github.com/casbin/casbin/v2 v2.110.0
 	github.com/casbin/gorm-adapter/v3 v3.20.0
@@ -76,6 +77,7 @@ require (
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect

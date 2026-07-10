@@ -3,7 +3,6 @@ package gen
 import (
 	"fmt"
 	"go/ast"
-	"go/build"
 	"go/parser"
 	"go/token"
 	"os"
@@ -42,14 +41,7 @@ func (s *Scanner) Scan() ([]InjectInfo, error) {
 
 	var results []InjectInfo
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		match, err := build.Default.MatchFile(s.Dir, entry.Name())
-		if err != nil {
-			return nil, err
-		}
-		if !match {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
 			continue
 		}
 		file, err := parser.ParseFile(fset, filepath.Join(s.Dir, entry.Name()), nil, parser.ParseComments)
