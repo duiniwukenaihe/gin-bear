@@ -14,6 +14,6 @@ type GRPCService interface {
 type BaseGRPCService struct {
 }
 
-func (this *BaseGRPCService) Name() string {
+func (g *BaseGRPCService) Name() string {
 	return "BaseGRPCService"
 }

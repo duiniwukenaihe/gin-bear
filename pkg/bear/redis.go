@@ -28,17 +28,17 @@ type RedisAdapter struct {
 	Client *redis.Client
 }
 
-func (this *RedisAdapter) Name() string {
+func (r *RedisAdapter) Name() string {
 	return "RedisAdapter"
 }
 
-func (this *RedisAdapter) Shutdown() error {
+func (r *RedisAdapter) Shutdown() error {
 	slog.Info("Closing Redis connection pool...")
-	return this.Client.Close()
+	return r.Client.Close()
 }
 
-func (this *RedisAdapter) CheckReady(ctx context.Context) error {
-	return this.Client.Ping(ctx).Err()
+func (r *RedisAdapter) CheckReady(ctx context.Context) error {
+	return r.Client.Ping(ctx).Err()
 }
 
 // NewRedisAdapter 创建 Redis 适配器
@@ -98,22 +98,22 @@ type CacheUtil struct {
 	Adapter *RedisAdapter `inject:"-"`
 }
 
-func (this *CacheUtil) Name() string {
+func (r *CacheUtil) Name() string {
 	return "CacheUtil"
 }
 
 // Set 序列化并存储对象
-func (this *CacheUtil) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+func (r *CacheUtil) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
 	b, err := sonic.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return this.Adapter.Client.Set(ctx, key, b, expiration).Err()
+	return r.Adapter.Client.Set(ctx, key, b, expiration).Err()
 }
 
 // Get 获取并反序列化对象
-func (this *CacheUtil) Get(ctx context.Context, key string, dest interface{}) error {
-	val, err := this.Adapter.Client.Get(ctx, key).Result()
+func (r *CacheUtil) Get(ctx context.Context, key string, dest interface{}) error {
+	val, err := r.Adapter.Client.Get(ctx, key).Result()
 	if err != nil {
 		return err
 	}
@@ -121,6 +121,6 @@ func (this *CacheUtil) Get(ctx context.Context, key string, dest interface{}) er
 }
 
 // Del 删除键
-func (this *CacheUtil) Del(ctx context.Context, keys ...string) error {
-	return this.Adapter.Client.Del(ctx, keys...).Err()
+func (r *CacheUtil) Del(ctx context.Context, keys ...string) error {
+	return r.Adapter.Client.Del(ctx, keys...).Err()
 }

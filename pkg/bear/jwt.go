@@ -30,27 +30,27 @@ func NewJWTUtil(secret string, expires int) *JWTUtil {
 }
 
 // GenerateToken 生成 Token
-func (this *JWTUtil) GenerateToken(userID uint, email string) (string, error) {
+func (j *JWTUtil) GenerateToken(userID uint, email string) (string, error) {
 	claims := CustomClaims{
 		UserID: userID,
 		Email:  email,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Duration(this.Config.Expires) * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Duration(j.Config.Expires) * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(this.Config.Secret))
+	return token.SignedString([]byte(j.Config.Secret))
 }
 
 // ParseToken 解析 Token
-func (this *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
+func (j *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if token.Method != jwt.SigningMethodHS256 {
 			return nil, errors.New("unexpected signing method")
 		}
-		return []byte(this.Config.Secret), nil
+		return []byte(j.Config.Secret), nil
 	})
 
 	if err != nil {
@@ -64,6 +64,6 @@ func (this *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
 	return nil, errors.New("invalid token")
 }
 
-func (this *JWTUtil) Name() string {
+func (j *JWTUtil) Name() string {
 	return "JWTUtil"
 }

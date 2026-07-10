@@ -278,46 +278,46 @@ type SwaggerConfig struct {
 	BasePath string `yaml:"base_path" json:"base_path"`
 }
 
-func (this *SysConfig) Validate() error {
+func (c *SysConfig) Validate() error {
 	validate := validator.New()
-	if err := validate.Struct(this); err != nil {
+	if err := validate.Struct(c); err != nil {
 		return err
 	}
-	return this.validateSemantic()
+	return c.validateSemantic()
 }
 
-func (this *SysConfig) validateSemantic() error {
-	if this == nil {
+func (c *SysConfig) validateSemantic() error {
+	if c == nil {
 		return nil
 	}
-	if this.Tracing != nil {
-		exporter := strings.ToLower(strings.TrimSpace(this.Tracing.Exporter))
+	if c.Tracing != nil {
+		exporter := strings.ToLower(strings.TrimSpace(c.Tracing.Exporter))
 		switch exporter {
 		case "", "stdout", "console", "otlp", "otlphttp", "none", "noop":
 		default:
 			return fmt.Errorf("tracing.exporter must be one of stdout, otlp, none")
 		}
-		if this.Tracing.SampleRate < 0 || this.Tracing.SampleRate > 1 {
+		if c.Tracing.SampleRate < 0 || c.Tracing.SampleRate > 1 {
 			return fmt.Errorf("tracing.sample_rate must be between 0 and 1")
 		}
 	}
-	if this.Log != nil {
-		switch strings.ToLower(strings.TrimSpace(this.Log.Level)) {
+	if c.Log != nil {
+		switch strings.ToLower(strings.TrimSpace(c.Log.Level)) {
 		case "", "debug", "info", "warn", "warning", "error":
 		default:
 			return fmt.Errorf("log.level must be one of debug, info, warn, error")
 		}
 	}
-	if this.Metrics != nil && this.Metrics.Path != "" && !strings.HasPrefix(this.Metrics.Path, "/") {
+	if c.Metrics != nil && c.Metrics.Path != "" && !strings.HasPrefix(c.Metrics.Path, "/") {
 		return fmt.Errorf("metrics.path must start with /")
 	}
-	if this.Server != nil {
+	if c.Server != nil {
 		for name, value := range map[string]string{
-			"server.read_header_timeout": this.Server.ReadHeaderTimeout,
-			"server.read_timeout":        this.Server.ReadTimeout,
-			"server.write_timeout":       this.Server.WriteTimeout,
-			"server.idle_timeout":        this.Server.IdleTimeout,
-			"server.shutdown_timeout":    this.Server.ShutdownTimeout,
+			"server.read_header_timeout": c.Server.ReadHeaderTimeout,
+			"server.read_timeout":        c.Server.ReadTimeout,
+			"server.write_timeout":       c.Server.WriteTimeout,
+			"server.idle_timeout":        c.Server.IdleTimeout,
+			"server.shutdown_timeout":    c.Server.ShutdownTimeout,
 		} {
 			if value == "" {
 				continue
@@ -327,24 +327,24 @@ func (this *SysConfig) validateSemantic() error {
 			}
 		}
 	}
-	if this.Health != nil && this.Health.ReadinessTimeout != "" {
-		if _, err := time.ParseDuration(this.Health.ReadinessTimeout); err != nil {
+	if c.Health != nil && c.Health.ReadinessTimeout != "" {
+		if _, err := time.ParseDuration(c.Health.ReadinessTimeout); err != nil {
 			return fmt.Errorf("health.readiness_timeout must be a valid duration: %w", err)
 		}
 	}
 	return nil
 }
 
-func (this *SysConfig) Name() string {
+func (c *SysConfig) Name() string {
 	return "SysConfig"
 }
 
 // PostProcess 处理配置兼容性与默认值补全
-func (this *SysConfig) PostProcess() {
+func (c *SysConfig) PostProcess() {
 	// 示例：BigQuery 兼容性处理
-	if this.BigQuery != nil && this.BigQuery.Enabled {
-		if this.BigQuery.CredentialsPath != "" && this.BigQuery.Credentials == "" {
-			this.BigQuery.Credentials = this.BigQuery.CredentialsPath
+	if c.BigQuery != nil && c.BigQuery.Enabled {
+		if c.BigQuery.CredentialsPath != "" && c.BigQuery.Credentials == "" {
+			c.BigQuery.Credentials = c.BigQuery.CredentialsPath
 		}
 	}
 

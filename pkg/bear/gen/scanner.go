@@ -3,8 +3,11 @@ package gen
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -32,56 +35,67 @@ func NewScanner(dir string) *Scanner {
 // Scan 扫描并识别带有 inject 标签的结构体
 func (s *Scanner) Scan() ([]InjectInfo, error) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, s.Dir, nil, parser.ParseComments)
+	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
 		return nil, err
 	}
 
 	var results []InjectInfo
-
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			ast.Inspect(file, func(n ast.Node) bool {
-				ts, ok := n.(*ast.TypeSpec)
-				if !ok {
-					return true
-				}
-
-				st, ok := ts.Type.(*ast.StructType)
-				if !ok {
-					return true
-				}
-
-				info := InjectInfo{
-					StructName: ts.Name.Name,
-				}
-
-				for _, field := range st.Fields.List {
-					if field.Tag == nil {
-						continue
-					}
-
-					tag := strings.Trim(field.Tag.Value, "`")
-					if strings.Contains(tag, "inject") {
-						typeName := fmt.Sprintf("%s", field.Type)
-						// 处理简单的类型名提取，如果是指针等复杂类型可能需要更复杂的逻辑
-						// 这里先简化处理
-						for _, name := range field.Names {
-							info.Fields = append(info.Fields, FieldInfo{
-								FieldName: name.Name,
-								TypeName:  typeName,
-							})
-						}
-					}
-				}
-
-				if len(info.Fields) > 0 {
-					results = append(results, info)
-				}
-
-				return true
-			})
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
+		match, err := build.Default.MatchFile(s.Dir, entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		if !match {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(s.Dir, entry.Name()), nil, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok {
+				return true
+			}
+
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				return true
+			}
+
+			info := InjectInfo{
+				StructName: ts.Name.Name,
+			}
+
+			for _, field := range st.Fields.List {
+				if field.Tag == nil {
+					continue
+				}
+
+				tag := strings.Trim(field.Tag.Value, "`")
+				if strings.Contains(tag, "inject") {
+					typeName := fmt.Sprintf("%s", field.Type)
+					// 处理简单的类型名提取，如果是指针等复杂类型可能需要更复杂的逻辑
+					// 这里先简化处理
+					for _, name := range field.Names {
+						info.Fields = append(info.Fields, FieldInfo{
+							FieldName: name.Name,
+							TypeName:  typeName,
+						})
+					}
+				}
+			}
+
+			if len(info.Fields) > 0 {
+				results = append(results, info)
+			}
+
+			return true
+		})
 	}
 
 	return results, nil

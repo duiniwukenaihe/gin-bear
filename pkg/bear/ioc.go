@@ -8,9 +8,8 @@ import (
 
 // BeanFactory 负责管理所有的 Bean
 type BeanFactory struct {
-	mu         sync.RWMutex
-	beans      map[reflect.Type]any
-	beansSlice []any // 用于接口类型匹配
+	mu    sync.RWMutex
+	beans map[reflect.Type]any
 }
 
 var injector *BeanFactory
@@ -40,46 +39,46 @@ func GetInjector() *BeanFactory {
 }
 
 // Set 注册一个 Bean
-func (this *BeanFactory) Set(bean any) {
+func (f *BeanFactory) Set(bean any) {
 	v := reflect.ValueOf(bean)
-	this.mu.Lock()
-	this.beans[v.Type()] = bean
-	this.mu.Unlock()
+	f.mu.Lock()
+	f.beans[v.Type()] = bean
+	f.mu.Unlock()
 }
 
 // SetWithInterface 注册一个 Bean 并绑定到指定接口类型
 // ifacePtr 必须是指向接口的指针，例如 (*MyInterface)(nil)
-func (this *BeanFactory) SetWithInterface(ifacePtr any, bean any) {
+func (f *BeanFactory) SetWithInterface(ifacePtr any, bean any) {
 	t := reflect.TypeOf(ifacePtr).Elem()
 	if t.Kind() != reflect.Interface {
 		// 如果不是接口，尝试作为普通类型注册
-		this.Set(bean)
+		f.Set(bean)
 		return
 	}
-	this.mu.Lock()
-	this.beans[t] = bean
-	this.mu.Unlock()
+	f.mu.Lock()
+	f.beans[t] = bean
+	f.mu.Unlock()
 }
 
 // Remove 移除一个 Bean
-func (this *BeanFactory) Remove(t reflect.Type) {
-	this.mu.Lock()
-	delete(this.beans, t)
-	this.mu.Unlock()
+func (f *BeanFactory) Remove(t reflect.Type) {
+	f.mu.Lock()
+	delete(f.beans, t)
+	f.mu.Unlock()
 }
 
 // Get 获取指定类型的 Bean
-func (this *BeanFactory) Get(t reflect.Type) any {
-	this.mu.RLock()
-	defer this.mu.RUnlock()
+func (f *BeanFactory) Get(t reflect.Type) any {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 
-	if v, ok := this.beans[t]; ok {
+	if v, ok := f.beans[t]; ok {
 		return v
 	}
 
 	// 如果是接口类型，尝试进行接口实现匹配
 	if t.Kind() == reflect.Interface {
-		for _, bean := range this.beans {
+		for _, bean := range f.beans {
 			bt := reflect.TypeOf(bean)
 			if bt.Implements(t) {
 				return bean
@@ -104,12 +103,12 @@ func GetByType[T any]() T {
 }
 
 // GetByType 快捷别名 (BeanFactory 实例版本)
-func (this *BeanFactory) GetByType(t reflect.Type) any {
-	return this.Get(t)
+func (f *BeanFactory) GetByType(t reflect.Type) any {
+	return f.Get(t)
 }
 
 // Apply 执行依赖注入 (优先使用静态注入，回退到反射)
-func (this *BeanFactory) Apply(obj any) {
+func (f *BeanFactory) Apply(obj any) {
 	v := reflect.ValueOf(obj)
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
@@ -136,7 +135,7 @@ func (this *BeanFactory) Apply(obj any) {
 		// 优先处理 @Value 配置注入
 		if fieldValue.Type() == reflect.TypeOf((*Value)(nil)) {
 			if valueTag, ok := field.Tag.Lookup("value"); ok && valueTag != "" {
-				this.injectValue(fieldValue, valueTag)
+				f.injectValue(fieldValue, valueTag)
 				continue
 			}
 		}
@@ -146,7 +145,7 @@ func (this *BeanFactory) Apply(obj any) {
 			fieldType := field.Type
 			// 如果标签是 "-"，则按类型自动注入
 			if tag == "-" || tag == "" {
-				bean := this.Get(fieldType)
+				bean := f.Get(fieldType)
 				if bean != nil {
 					f := v.Field(i)
 					if f.CanSet() {
@@ -162,7 +161,7 @@ func (this *BeanFactory) Apply(obj any) {
 }
 
 // injectValue 处理 @Value 配置注入
-func (this *BeanFactory) injectValue(fieldValue reflect.Value, valueTag string) {
+func (f *BeanFactory) injectValue(fieldValue reflect.Value, valueTag string) {
 	// 解析 prefix 和 key
 	var prefix, key string
 	parts := strings.Split(valueTag, ".")
@@ -180,9 +179,9 @@ func (this *BeanFactory) injectValue(fieldValue reflect.Value, valueTag string) 
 	}
 
 	// 从 SysConfig 中获取值
-	this.mu.RLock()
-	config := this.beans[reflect.TypeOf((*SysConfig)(nil)).Elem()]
-	this.mu.RUnlock()
+	f.mu.RLock()
+	config := f.beans[reflect.TypeOf((*SysConfig)(nil)).Elem()]
+	f.mu.RUnlock()
 
 	if config == nil {
 		return
@@ -206,24 +205,24 @@ func (this *BeanFactory) injectValue(fieldValue reflect.Value, valueTag string) 
 
 // StaticApply 是为了未来代码生成准备的，它允许显式地注入字段而不需要反射
 // 虽然目前仍然在 bear.go 中使用 Apply，但代码生成器会生成直接赋值的代码
-func (this *BeanFactory) StaticApply(obj any, fieldName string, bean any) {
+func (f *BeanFactory) StaticApply(obj any, fieldName string, bean any) {
 	v := reflect.ValueOf(obj)
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
-	f := v.FieldByName(fieldName)
-	if f.IsValid() && f.CanSet() {
-		f.Set(reflect.ValueOf(bean))
+	field := v.FieldByName(fieldName)
+	if field.IsValid() && field.CanSet() {
+		field.Set(reflect.ValueOf(bean))
 	}
 }
 
 // GetBeanMapper 获取所有的 Bean 映射
-func (this *BeanFactory) GetBeanMapper() map[reflect.Type]reflect.Value {
-	this.mu.RLock()
-	defer this.mu.RUnlock()
+func (f *BeanFactory) GetBeanMapper() map[reflect.Type]reflect.Value {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 
 	res := make(map[reflect.Type]reflect.Value)
-	for k, v := range this.beans {
+	for k, v := range f.beans {
 		res[k] = reflect.ValueOf(v)
 	}
 	return res

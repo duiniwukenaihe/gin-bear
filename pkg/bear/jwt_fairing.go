@@ -17,7 +17,7 @@ func NewAuthFairing() *AuthFairing {
 	return &AuthFairing{}
 }
 
-func (this *AuthFairing) OnRequest(ctx *gin.Context) error {
+func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 	path := ctx.Request.URL.Path
 	if isPublicAuthPath(path) {
 		return nil
@@ -39,10 +39,10 @@ func (this *AuthFairing) OnRequest(ctx *gin.Context) error {
 	var claims *CustomClaims
 	var err error
 
-	if this.TokenManager != nil {
-		claims, err = this.TokenManager.ParseToken(tokenStr)
+	if f.TokenManager != nil {
+		claims, err = f.TokenManager.ParseToken(tokenStr)
 	} else {
-		claims, err = this.JWTUtil.ParseToken(tokenStr)
+		claims, err = f.JWTUtil.ParseToken(tokenStr)
 	}
 
 	if err != nil {
@@ -55,7 +55,7 @@ func (this *AuthFairing) OnRequest(ctx *gin.Context) error {
 	return nil
 }
 
-func (this *AuthFairing) Name() string {
+func (f *AuthFairing) Name() string {
 	return "AuthFairing"
 }
 

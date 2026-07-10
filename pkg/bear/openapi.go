@@ -41,12 +41,16 @@ type OpenAPISchema struct {
 }
 
 // GenerateOpenAPI 生成 OpenAPI 3.0 文档内容
-func (this *Bear) GenerateOpenAPI() ([]byte, error) {
+func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 	config := GetByType[*SysConfig]()
+	title := "gin-bear"
+	if config != nil && config.Server != nil && config.Server.Name != "" {
+		title = config.Server.Name
+	}
 	schema := OpenAPISchema{
 		OpenAPI: "3.0.0",
 		Info: map[string]interface{}{
-			"title":   config.Server.Name,
+			"title":   title,
 			"version": "1.0.0",
 		},
 		Paths: make(map[string]interface{}),
@@ -78,7 +82,7 @@ func (this *Bear) GenerateOpenAPI() ([]byte, error) {
 	}
 
 	// 遍历路由元数据
-	for _, route := range this.routeRegistry {
+	for _, route := range b.routeRegistry {
 		path := route.Path
 		if route.GroupName != "" && !strings.HasPrefix(path, "/"+route.GroupName) {
 			path = "/" + route.GroupName + path
@@ -378,12 +382,12 @@ func hasRequiredBinding(field reflect.StructField) bool {
 }
 
 // EnableSwagger 启用 Swagger 文档支持
-func (this *Bear) EnableSwagger() *Bear {
-	swg := this.Group("/swagger")
+func (b *Bear) EnableSwagger() *Bear {
+	swg := b.Group("/swagger")
 
 	// 注册 JSON 文档端点
 	swg.GET("/doc.json", func(c *gin.Context) {
-		doc, err := this.GenerateOpenAPI()
+		doc, err := b.GenerateOpenAPI()
 		if err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
@@ -416,5 +420,5 @@ func (this *Bear) EnableSwagger() *Bear {
 </html>`)
 	})
 
-	return this
+	return b
 }

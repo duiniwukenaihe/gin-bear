@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"reflect"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -38,7 +37,7 @@ type GormAdapter struct {
 	*gorm.DB
 }
 
-func (this *GormAdapter) Name() string {
+func (r *GormAdapter) Name() string {
 	return "GormAdapter"
 }
 
@@ -190,13 +189,8 @@ func NewRepository[T any](adapter *GormAdapter) *Repository[T] {
 	return &Repository[T]{Adapter: adapter}
 }
 
-func (this *Repository[T]) getModelName() string {
-	var t T
-	return reflect.TypeOf(t).String()
-}
-
-func (this *Repository[T]) DB(ctx ...context.Context) *gorm.DB {
-	adapter := this.Adapter
+func (r *Repository[T]) DB(ctx ...context.Context) *gorm.DB {
+	adapter := r.Adapter
 	if adapter == nil {
 		adapter = GetByType[*GormAdapter]()
 	}
@@ -226,19 +220,19 @@ func (this *Repository[T]) DB(ctx ...context.Context) *gorm.DB {
 	return db
 }
 
-func (this *Repository[T]) Create(ctx context.Context, entity *T) error {
-	return this.DB(ctx).Create(entity).Error
+func (r *Repository[T]) Create(ctx context.Context, entity *T) error {
+	return r.DB(ctx).Create(entity).Error
 }
 
-func (this *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error) {
+func (r *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error) {
 	var entity T
-	err := this.DB(ctx).First(&entity, id).Error
+	err := r.DB(ctx).First(&entity, id).Error
 	return &entity, err
 }
 
 // FindOne 根据条件查询单条数据，支持预加载关联模型
-func (this *Repository[T]) FindOne(ctx context.Context, query any, preloads ...string) (*T, error) {
-	db := this.DB(ctx)
+func (r *Repository[T]) FindOne(ctx context.Context, query any, preloads ...string) (*T, error) {
+	db := r.DB(ctx)
 	for _, p := range preloads {
 		db = db.Preload(p)
 	}
@@ -249,8 +243,8 @@ func (this *Repository[T]) FindOne(ctx context.Context, query any, preloads ...s
 }
 
 // FindList 根据条件查询列表数据，支持预加载关联模型
-func (this *Repository[T]) FindList(ctx context.Context, query any, preloads ...string) ([]*T, error) {
-	db := this.DB(ctx)
+func (r *Repository[T]) FindList(ctx context.Context, query any, preloads ...string) ([]*T, error) {
+	db := r.DB(ctx)
 	for _, p := range preloads {
 		db = db.Preload(p)
 	}
@@ -260,8 +254,8 @@ func (this *Repository[T]) FindList(ctx context.Context, query any, preloads ...
 	return list, err
 }
 
-func (this *GormAdapter) Shutdown() error {
-	sqlDB, err := this.DB.DB()
+func (r *GormAdapter) Shutdown() error {
+	sqlDB, err := r.DB.DB()
 	if err != nil {
 		return err
 	}
@@ -269,8 +263,8 @@ func (this *GormAdapter) Shutdown() error {
 	return sqlDB.Close()
 }
 
-func (this *GormAdapter) CheckReady(ctx context.Context) error {
-	sqlDB, err := this.DB.DB()
+func (r *GormAdapter) CheckReady(ctx context.Context) error {
+	sqlDB, err := r.DB.DB()
 	if err != nil {
 		return err
 	}
@@ -326,8 +320,8 @@ func getUserIDFromContext(ctx context.Context) string {
 }
 
 // Update 更新实体，支持乐观锁
-func (this *Repository[T]) Update(ctx context.Context, entity *T) error {
-	db := this.DB(ctx)
+func (r *Repository[T]) Update(ctx context.Context, entity *T) error {
+	db := r.DB(ctx)
 
 	// 乐观锁检查
 	if v, ok := any(entity).(VersionedModel); ok {
@@ -363,48 +357,48 @@ func (this *Repository[T]) Update(ctx context.Context, entity *T) error {
 }
 
 // Delete 删除实体
-func (this *Repository[T]) Delete(ctx context.Context, entity *T) error {
-	return this.DB(ctx).Delete(entity).Error
+func (r *Repository[T]) Delete(ctx context.Context, entity *T) error {
+	return r.DB(ctx).Delete(entity).Error
 }
 
 // FindUnscoped 查询包含已删除的数据 (软删除)
-func (this *Repository[T]) FindUnscoped(ctx context.Context, id interface{}) (*T, error) {
+func (r *Repository[T]) FindUnscoped(ctx context.Context, id interface{}) (*T, error) {
 	var entity T
-	err := this.DB(ctx).Unscoped().First(&entity, id).Error
+	err := r.DB(ctx).Unscoped().First(&entity, id).Error
 	return &entity, err
 }
 
 // Restore 恢复已删除的数据
-func (this *Repository[T]) Restore(ctx context.Context, id interface{}) error {
+func (r *Repository[T]) Restore(ctx context.Context, id interface{}) error {
 	// GORM 恢复软删除通常是 Update DeletedAt = null
 	var entity T
-	return this.DB(ctx).Unscoped().Model(&entity).Where("id = ?", id).Update("deleted_at", nil).Error
+	return r.DB(ctx).Unscoped().Model(&entity).Where("id = ?", id).Update("deleted_at", nil).Error
 }
 
 // UpdateByID 根据 ID 更新（使用 map 避免全量更新）
-func (this *Repository[T]) UpdateByID(ctx context.Context, id interface{}, updates map[string]interface{}) error {
+func (r *Repository[T]) UpdateByID(ctx context.Context, id interface{}, updates map[string]interface{}) error {
 	var entity T
-	return this.DB(ctx).Model(&entity).Where("id = ?", id).Updates(updates).Error
+	return r.DB(ctx).Model(&entity).Where("id = ?", id).Updates(updates).Error
 }
 
 // DeleteByID 根据 ID 删除
-func (this *Repository[T]) DeleteByID(ctx context.Context, id interface{}) error {
+func (r *Repository[T]) DeleteByID(ctx context.Context, id interface{}) error {
 	var entity T
-	return this.DB(ctx).Delete(&entity, id).Error
+	return r.DB(ctx).Delete(&entity, id).Error
 }
 
 // Count 统计数量
-func (this *Repository[T]) Count(ctx context.Context) (int64, error) {
+func (r *Repository[T]) Count(ctx context.Context) (int64, error) {
 	var entity T
 	var count int64
-	err := this.DB(ctx).Model(&entity).Count(&count).Error
+	err := r.DB(ctx).Model(&entity).Count(&count).Error
 	return count, err
 }
 
 // Exists 检查记录是否存在
-func (this *Repository[T]) Exists(ctx context.Context, id interface{}) (bool, error) {
+func (r *Repository[T]) Exists(ctx context.Context, id interface{}) (bool, error) {
 	var entity T
 	var count int64
-	err := this.DB(ctx).Model(&entity).Where("id = ?", id).Count(&count).Error
+	err := r.DB(ctx).Model(&entity).Where("id = ?", id).Count(&count).Error
 	return count > 0, err
 }

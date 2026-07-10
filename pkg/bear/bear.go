@@ -77,11 +77,11 @@ type Bear struct {
 }
 
 // OnShutdown 注册服务关闭时的清理函数
-func (this *Bear) OnShutdown(f ...func()) {
-	this.onShutdown = append(this.onShutdown, f...)
+func (b *Bear) OnShutdown(f ...func()) {
+	b.onShutdown = append(b.onShutdown, f...)
 }
 
-func (this *Bear) Name() string {
+func (b *Bear) Name() string {
 	return "Bear"
 }
 
@@ -146,68 +146,68 @@ func Ignite(args ...any) *Bear {
 }
 
 // EnableIDGenerator 开启分布式 ID 生成器 (已禁用)
-func (this *Bear) EnableIDGenerator() error {
+func (b *Bear) EnableIDGenerator() error {
 	slog.Warn("ID Generator is disabled in精简 mode")
 	return nil
 }
 
 // EnableMQ 开启消息队列插件 (已禁用)
-func (this *Bear) EnableMQ(ctx context.Context) *Bear {
+func (b *Bear) EnableMQ(ctx context.Context) *Bear {
 	slog.Warn("MQ is disabled in 精简 mode")
-	return this
+	return b
 }
 
 // EnableTracing 开启链路追踪
-func (this *Bear) EnableTracing(ctx context.Context) *Bear {
+func (b *Bear) EnableTracing(ctx context.Context) *Bear {
 	config := GetByType[*SysConfig]()
 	if config == nil || config.Tracing == nil || !config.Tracing.Enabled {
-		return this
+		return b
 	}
-	if !this.tracingRegistered.CompareAndSwap(false, true) {
-		return this
+	if !b.tracingRegistered.CompareAndSwap(false, true) {
+		return b
 	}
 	provider, err := newTracerProvider(ctx, config.Tracing)
 	if err != nil {
 		slog.Error("Tracing initialization failed", "error", err)
-		return this
+		return b
 	}
 	propagator := propagation.TraceContext{}
 	otel.SetTracerProvider(provider)
 	otel.SetTextMapPropagator(propagator)
-	this.Use(TracingMiddleware(provider, propagator))
-	this.OnShutdown(shutdownTracerProvider(provider))
+	b.Use(TracingMiddleware(provider, propagator))
+	b.OnShutdown(shutdownTracerProvider(provider))
 	slog.Info("Tracing enabled", "exporter", config.Tracing.Exporter, "service", config.Tracing.ServiceName)
-	return this
+	return b
 }
 
 // EnableMetrics 开启指标监控
-func (this *Bear) EnableMetrics() *Bear {
+func (b *Bear) EnableMetrics() *Bear {
 	config := GetByType[*SysConfig]()
 	if config != nil && config.Metrics != nil && !config.Metrics.Enabled {
-		return this
+		return b
 	}
-	if !this.metricsRegistered.CompareAndSwap(false, true) {
-		return this
+	if !b.metricsRegistered.CompareAndSwap(false, true) {
+		return b
 	}
 	path := "/metrics"
 	if config != nil && config.Metrics != nil && config.Metrics.Path != "" {
 		path = config.Metrics.Path
 	}
-	this.GET(path, func(ctx *gin.Context) {
+	b.GET(path, func(ctx *gin.Context) {
 		ctx.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		ctx.String(http.StatusOK, httpMetrics.RenderPrometheus())
 	})
-	return this
+	return b
 }
 
 // Launch 启动 Bear 引擎，支持优雅退出
 // ctx 用于控制启动过程中的超时和取消操作
-func (this *Bear) Launch(ctx context.Context) error {
+func (b *Bear) Launch(ctx context.Context) error {
 	config := GetInjector().Get(reflect.TypeOf((*SysConfig)(nil))).(*SysConfig)
 
 	// MQ 启动已禁用 (精简模式)
 
-	srv := this.buildHTTPServer(config)
+	srv := b.buildHTTPServer(config)
 
 	// HTTP 服务器启动错误通道
 	httpErrCh := make(chan error, 1)
@@ -229,7 +229,7 @@ func (this *Bear) Launch(ctx context.Context) error {
 		grpcServer := grpc.NewServer()
 
 		// 注册服务
-		for _, s := range this.grpcServices {
+		for _, s := range b.grpcServices {
 			slog.Info("Registering gRPC service", "name", s.Name())
 			s.Register(grpcServer)
 		}
@@ -241,7 +241,7 @@ func (this *Bear) Launch(ctx context.Context) error {
 			}
 		}()
 
-		this.OnShutdown(func() {
+		b.OnShutdown(func() {
 			slog.Info("Shutting down WhiteBear gRPC...")
 			grpcServer.GracefulStop()
 		})
@@ -271,8 +271,8 @@ func (this *Bear) Launch(ctx context.Context) error {
 	}
 
 	// 倒序执行清理钩子 (后注册的先退出，通常符合依赖关系)
-	for i := len(this.onShutdown) - 1; i >= 0; i-- {
-		this.onShutdown[i]()
+	for i := len(b.onShutdown) - 1; i >= 0; i-- {
+		b.onShutdown[i]()
 	}
 
 	// 自动化组件关闭：按照 LIFO (后进先出) 顺序执行销毁，确保依赖安全
@@ -303,7 +303,7 @@ func (this *Bear) Launch(ctx context.Context) error {
 	return nil
 }
 
-func (this *Bear) buildHTTPServer(config *SysConfig) *http.Server {
+func (b *Bear) buildHTTPServer(config *SysConfig) *http.Server {
 	port := 8080
 	if config != nil && config.Server != nil && config.Server.Port > 0 {
 		port = int(config.Server.Port)
@@ -311,7 +311,7 @@ func (this *Bear) buildHTTPServer(config *SysConfig) *http.Server {
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
-		Handler:           this.Engine,
+		Handler:           b.Engine,
 		ReadHeaderTimeout: parseDurationOrDefault(configDuration(config, "read_header_timeout"), 5*time.Second),
 		ReadTimeout:       parseDurationOrDefault(configDuration(config, "read_timeout"), 15*time.Second),
 		WriteTimeout:      parseDurationOrDefault(configDuration(config, "write_timeout"), 30*time.Second),
@@ -412,82 +412,82 @@ func validateProductionSecurity(config *SysConfig) error {
 }
 
 // Mount 挂载控制器
-func (this *Bear) Mount(group string, classes ...IClass) *Bear {
-	this.mounts = append(this.mounts, MountMetadata{Group: group, Classes: classes})
+func (b *Bear) Mount(group string, classes ...IClass) *Bear {
+	b.mounts = append(b.mounts, MountMetadata{Group: group, Classes: classes})
 	for _, class := range classes {
-		this.Beans(class)
+		b.Beans(class)
 	}
-	return this
+	return b
 }
 
 // EnableHealth 启用健康检查与指标端点
-func (this *Bear) EnableHealth() *Bear {
-	this.Mount("", &HealthController{})
+func (b *Bear) EnableHealth() *Bear {
+	b.Mount("", &HealthController{})
 	config := GetByType[*SysConfig]()
 	if config == nil || config.Metrics == nil || config.Metrics.Enabled {
-		this.EnableMetrics()
+		b.EnableMetrics()
 	}
-	return this
+	return b
 }
 
 // EnableGzip 启用 Gzip 响应压缩 (阶段 84)
-func (this *Bear) EnableGzip(minLength ...int) *Bear {
+func (b *Bear) EnableGzip(minLength ...int) *Bear {
 	limit := 1024
 	if len(minLength) > 0 {
 		limit = minLength[0]
 	}
-	this.Use(GzipMiddleware(limit))
-	return this
+	b.Use(GzipMiddleware(limit))
+	return b
 }
 
 // Beans 注册 Bean
-func (this *Bear) Beans(beans ...Bean) *Bear {
+func (b *Bear) Beans(beans ...Bean) *Bear {
 	for _, bean := range beans {
-		this.exprData[bean.Name()] = bean
+		b.exprData[bean.Name()] = bean
 		GetInjector().Set(bean)
 	}
-	return this
+	return b
 }
 
 // Attach 注册全局 Fairing
-func (this *Bear) Attach(f ...Fairing) *Bear {
-	this.fairingHandler.AddFairing(f...)
+func (b *Bear) Attach(f ...Fairing) *Bear {
+	b.fairingHandler.AddFairing(f...)
 	for _, f1 := range f {
 		GetInjector().Set(f1)
 	}
-	return this
+	return b
 }
 
 // LoadPlugin 动态加载 .so 插件 (阶段 85)
-func (this *Bear) LoadPlugin(path string) error {
-	return this.pluginManager.Load(path)
+func (b *Bear) LoadPlugin(path string) error {
+	return b.pluginManager.Load(path)
 }
 
 // ReloadPlugin 热更新 .so 插件 (阶段 85)
-func (this *Bear) ReloadPlugin(path string) error {
-	return this.pluginManager.Reload(path)
+func (b *Bear) ReloadPlugin(path string) error {
+	return b.pluginManager.Reload(path)
 }
 
 // AddModule 注册模块
-func (this *Bear) AddModule(modules ...Module) *Bear {
+func (b *Bear) AddModule(modules ...Module) *Bear {
 	for _, mod := range modules {
 		slog.Info("Loading module", "name", mod.Name())
 		// 1. 注册模块中的 Beans
-		this.Beans(mod.Beans()...)
+		b.Beans(mod.Beans()...)
 		// 2. 暂存模块
-		this.modules = append(this.modules, mod)
+		b.modules = append(b.modules, mod)
 	}
-	return this
+	return b
 }
 
 // HandleWS 注册 WebSocket 路由
-func (this *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
+func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 	// 1. 执行依赖注入
 	GetInjector().Apply(handler)
 
-	this.activeGroup().GET(relativePath, func(ctx *gin.Context) {
+	b.activeGroup().GET(relativePath, func(ctx *gin.Context) {
 		// 2. 触发 Fairing OnRequest (支持鉴权、限流等)
-		if err := this.fairingHandler.OnRequest(ctx); err != nil {
+		if err := b.fairingHandler.OnRequest(ctx); err != nil {
 			return
 		}
 
@@ -529,78 +529,78 @@ func (this *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear 
 			}
 		}
 	})
-	return this
+	return b
 }
 
 // Handle 注册路由，支持 Responder 转换
-func (this *Bear) Handle(httpMethod, relativePath string, handler interface{}) *Bear {
-	if this.pluginMode {
+func (b *Bear) Handle(httpMethod, relativePath string, handler interface{}) *Bear {
+	if b.pluginMode {
 		// 如果处于插件模式，注册到动态分发器
 		if h, ok := handler.(func(*gin.Context)); ok {
-			this.pluginDispatcher.Register(httpMethod, relativePath, h)
+			b.pluginDispatcher.Register(httpMethod, relativePath, h)
 		} else if h := Convert(handler); h != nil {
-			this.pluginDispatcher.Register(httpMethod, relativePath, h)
+			b.pluginDispatcher.Register(httpMethod, relativePath, h)
 		}
-		return this
+		return b
 	}
 
 	if h := Convert(handler); h != nil {
 		// 包装 handler 以支持全局 Fairing
-		wrappedHandler := this.wrapWithFairing(h)
-		this.activeGroup().Handle(httpMethod, relativePath, wrappedHandler)
+		wrappedHandler := b.wrapWithFairing(h)
+		b.activeGroup().Handle(httpMethod, relativePath, wrappedHandler)
 
 		// 记录路由元数据
-		this.routeRegistry = append(this.routeRegistry, RouteMetadata{
+		b.routeRegistry = append(b.routeRegistry, RouteMetadata{
 			Method:      httpMethod,
 			Path:        relativePath,
-			GroupName:   this.currentGroup,
+			GroupName:   b.currentGroup,
 			HandlerType: reflect.TypeOf(handler),
 			HandlerName: runtimeFuncName(handler),
 		})
 	}
-	return this
+	return b
 }
 
 // HandleWithFairing 注册路由并绑定路由级别的 Fairing
 // 路由级别的 Fairing 会在全局 Fairing 之前执行（OnRequest）
 // 在全局 Fairing 之后执行（OnResponse）
-func (this *Bear) HandleWithFairing(httpMethod, relativePath string, handler interface{}, fairings ...Fairing) *Bear {
+func (b *Bear) HandleWithFairing(httpMethod, relativePath string, handler interface{}, fairings ...Fairing) *Bear {
 	// 1. 对 fairings 进行依赖注入
 	for _, f := range fairings {
 		GetInjector().Apply(f)
 	}
 
 	// 2. 注册到路由树
-	this.routeTree.addRoute(httpMethod, relativePath, fairings)
+	b.routeTree.addRoute(httpMethod, relativePath, fairings)
 
 	// 3. 使用包装器处理请求，集成路由级别的 Fairing
-	wrappedHandler := this.wrapWithRouteFairing(handler, fairings)
+	wrappedHandler := b.wrapWithRouteFairing(handler, fairings)
 
-	if this.pluginMode {
+	if b.pluginMode {
 		// 插件模式下注册到动态分发器
-		this.pluginDispatcher.Register(httpMethod, relativePath, wrappedHandler)
-		return this
+		b.pluginDispatcher.Register(httpMethod, relativePath, wrappedHandler)
+		return b
 	}
 
-	this.activeGroup().Handle(httpMethod, relativePath, wrappedHandler)
+	b.activeGroup().Handle(httpMethod, relativePath, wrappedHandler)
 
 	// 4. 记录路由元数据
-	this.routeRegistry = append(this.routeRegistry, RouteMetadata{
+	b.routeRegistry = append(b.routeRegistry, RouteMetadata{
 		Method:      httpMethod,
 		Path:        relativePath,
-		GroupName:   this.currentGroup,
+		GroupName:   b.currentGroup,
 		HandlerType: reflect.TypeOf(handler),
 		HandlerName: runtimeFuncName(handler),
 	})
 
-	return this
+	return b
 }
 
-func (this *Bear) activeGroup() *gin.RouterGroup {
-	if this.g != nil {
-		return this.g
+func (b *Bear) activeGroup() *gin.RouterGroup {
+	if b.g != nil {
+		return b.g
 	}
-	return &this.Engine.RouterGroup
+	return &b.Engine.RouterGroup
 }
 
 func websocketOriginAllowed(config *SysConfig, r *http.Request) bool {
@@ -618,7 +618,7 @@ func websocketOriginAllowed(config *SysConfig, r *http.Request) bool {
 }
 
 // wrapWithRouteFairing 包装 handler 以集成路由级别的 Fairing
-func (this *Bear) wrapWithRouteFairing(handler interface{}, fairings []Fairing) gin.HandlerFunc {
+func (b *Bear) wrapWithRouteFairing(handler interface{}, fairings []Fairing) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		// 1. 执行路由级别 Fairing 的 OnRequest
 		for _, f := range fairings {
@@ -660,10 +660,10 @@ func (this *Bear) wrapWithRouteFairing(handler interface{}, fairings []Fairing) 
 }
 
 // wrapWithFairing 包装 handler 以集成全局 Fairing
-func (this *Bear) wrapWithFairing(handler gin.HandlerFunc) gin.HandlerFunc {
+func (b *Bear) wrapWithFairing(handler gin.HandlerFunc) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		// 执行全局 Fairing 的 OnRequest
-		if err := this.fairingHandler.OnRequest(ctx); err != nil {
+		if err := b.fairingHandler.OnRequest(ctx); err != nil {
 			ctx.AbortWithStatusJSON(400, Response{
 				Code:    400,
 				Message: err.Error(),
@@ -681,8 +681,8 @@ func runtimeFuncName(i interface{}) string {
 
 // ApplyAll 应用依赖注入并执行初始化
 // ctx 用于控制初始化过程中的超时和取消操作
-func (this *Bear) ApplyAll(ctx context.Context) error {
-	if !this.applied.CompareAndSwap(false, true) {
+func (b *Bear) ApplyAll(ctx context.Context) error {
+	if !b.applied.CompareAndSwap(false, true) {
 		slog.Warn("ApplyAll already called, skipping redundant initialization")
 		return nil
 	}
@@ -708,21 +708,21 @@ func (this *Bear) ApplyAll(ctx context.Context) error {
 	slog.Info("Building routes...")
 
 	// 3.1 先处理模块 (模块的 Build() 可能会调用 b.Mount() 添加控制器)
-	for _, mod := range this.modules {
+	for _, mod := range b.modules {
 		// 模块构建前重置当前 group 为根路径
-		this.g = &this.Engine.RouterGroup
-		mod.Build(this)
+		b.g = &b.Engine.RouterGroup
+		mod.Build(b)
 	}
 
 	// 3.2 后处理 mounts (包括模块中添加的控制器)
-	for _, m := range this.mounts {
-		this.g = this.Engine.Group(m.Group)
+	for _, m := range b.mounts {
+		b.g = b.Engine.Group(m.Group)
 		for _, class := range m.Classes {
-			this.currentGroup = m.Group
+			b.currentGroup = m.Group
 			// 检查是否有控制器级别的拦截器
 			if inter, ok := class.(IInterceptors); ok {
 				for _, f := range inter.Interceptors() {
-					this.g.Use(func(ctx *gin.Context) {
+					b.g.Use(func(ctx *gin.Context) {
 						if err := f.OnRequest(ctx); err != nil {
 							ctx.AbortWithStatusJSON(400, gin.H{"error": err.Error()})
 							return
@@ -731,94 +731,94 @@ func (this *Bear) ApplyAll(ctx context.Context) error {
 					})
 				}
 			}
-			class.Build(this)
+			class.Build(b)
 		}
 	}
 
 	// 预热 Handler 缓存
-	WarmupHandlers(this.routeRegistry)
-	slog.Info("Handler cache warmed up", "count", len(this.routeRegistry))
+	WarmupHandlers(b.routeRegistry)
+	slog.Info("Handler cache warmed up", "count", len(b.routeRegistry))
 
 	return nil
 }
 
 // Group 创建路由组 (自动感知当前的挂载点)，支持 IClass 接口的 Handler 自动构建路由
-func (this *Bear) Group(relativePath string, classes ...IClass) *gin.RouterGroup {
+func (b *Bear) Group(relativePath string, classes ...IClass) *gin.RouterGroup {
 	var group *gin.RouterGroup
-	if this.g != nil {
-		group = this.g.Group(relativePath)
+	if b.g != nil {
+		group = b.g.Group(relativePath)
 	} else {
-		group = this.Engine.Group(relativePath)
+		group = b.Engine.Group(relativePath)
 	}
 
 	// 自动调用 IClass 的 Build 方法构建路由
 	for _, class := range classes {
-		class.Build(this)
+		class.Build(b)
 	}
 
 	return group
 }
 
 // POST 注册 POST 路由 (自动感知当前的挂载点)
-func (this *Bear) POST(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if this.g != nil {
-		return this.g.POST(relativePath, handlers...)
+func (b *Bear) POST(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
+	if b.g != nil {
+		return b.g.POST(relativePath, handlers...)
 	}
-	return this.Engine.POST(relativePath, handlers...)
+	return b.Engine.POST(relativePath, handlers...)
 }
 
 // GET 注册 GET 路由 (自动感知当前的挂载点)
-func (this *Bear) GET(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if this.g != nil {
-		return this.g.GET(relativePath, handlers...)
+func (b *Bear) GET(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
+	if b.g != nil {
+		return b.g.GET(relativePath, handlers...)
 	}
-	return this.Engine.GET(relativePath, handlers...)
+	return b.Engine.GET(relativePath, handlers...)
 }
 
 // PUT 注册 PUT 路由 (自动感知当前的挂载点)
-func (this *Bear) PUT(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if this.g != nil {
-		return this.g.PUT(relativePath, handlers...)
+func (b *Bear) PUT(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
+	if b.g != nil {
+		return b.g.PUT(relativePath, handlers...)
 	}
-	return this.Engine.PUT(relativePath, handlers...)
+	return b.Engine.PUT(relativePath, handlers...)
 }
 
 // DELETE 注册 DELETE 路由 (自动感知当前的挂载点)
-func (this *Bear) DELETE(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if this.g != nil {
-		return this.g.DELETE(relativePath, handlers...)
+func (b *Bear) DELETE(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
+	if b.g != nil {
+		return b.g.DELETE(relativePath, handlers...)
 	}
-	return this.Engine.DELETE(relativePath, handlers...)
+	return b.Engine.DELETE(relativePath, handlers...)
 }
 
 // PATCH 注册 PATCH 路由 (自动感知当前的挂载点)
-func (this *Bear) PATCH(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if this.g != nil {
-		return this.g.PATCH(relativePath, handlers...)
+func (b *Bear) PATCH(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
+	if b.g != nil {
+		return b.g.PATCH(relativePath, handlers...)
 	}
-	return this.Engine.PATCH(relativePath, handlers...)
+	return b.Engine.PATCH(relativePath, handlers...)
 }
 
 // OPTIONS 注册 OPTIONS 路由 (自动感知当前的挂载点)
-func (this *Bear) OPTIONS(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if this.g != nil {
-		return this.g.OPTIONS(relativePath, handlers...)
+func (b *Bear) OPTIONS(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
+	if b.g != nil {
+		return b.g.OPTIONS(relativePath, handlers...)
 	}
-	return this.Engine.OPTIONS(relativePath, handlers...)
+	return b.Engine.OPTIONS(relativePath, handlers...)
 }
 
 // HEAD 注册 HEAD 路由 (自动感知当前的挂载点)
-func (this *Bear) HEAD(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if this.g != nil {
-		return this.g.HEAD(relativePath, handlers...)
+func (b *Bear) HEAD(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
+	if b.g != nil {
+		return b.g.HEAD(relativePath, handlers...)
 	}
-	return this.Engine.HEAD(relativePath, handlers...)
+	return b.Engine.HEAD(relativePath, handlers...)
 }
 
 // Any 注册 Any 路由 (自动感知当前的挂载点)
-func (this *Bear) Any(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if this.g != nil {
-		return this.g.Any(relativePath, handlers...)
+func (b *Bear) Any(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
+	if b.g != nil {
+		return b.g.Any(relativePath, handlers...)
 	}
-	return this.Engine.Any(relativePath, handlers...)
+	return b.Engine.Any(relativePath, handlers...)
 }

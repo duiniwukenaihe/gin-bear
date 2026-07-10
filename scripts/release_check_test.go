@@ -42,14 +42,19 @@ func TestReleaseCheckScriptCoversProductionGates(t *testing.T) {
 	}
 }
 
-func TestCIInvokesFrameworkReleaseCheckOnly(t *testing.T) {
+func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 	content, err := os.ReadFile("../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatalf("read ci workflow: %v", err)
 	}
 	text := string(content)
-	if !strings.Contains(text, "scripts/release-check.sh") {
-		t.Fatalf("CI should invoke release-check.sh:\n%s", text)
+	for _, want := range []string{
+		"run: make verify",
+		"run: go test -race ./... -count=1",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("CI missing %q:\n%s", want, text)
+		}
 	}
 	for _, unwanted := range []string{
 		"docker build",
@@ -63,22 +68,24 @@ func TestCIInvokesFrameworkReleaseCheckOnly(t *testing.T) {
 	}
 }
 
-func TestDependabotCoversProductionDependencies(t *testing.T) {
-	content, err := os.ReadFile("../.github/dependabot.yml")
+func TestRepositoryDependencyChecksDoNotCreateUpdateBranches(t *testing.T) {
+	content, err := os.ReadFile("release-check.sh")
 	if err != nil {
-		t.Fatalf("dependabot config should exist: %v", err)
+		t.Fatal(err)
 	}
 	text := string(content)
 	for _, want := range []string{
-		`package-ecosystem: "gomod"`,
-		`package-ecosystem: "github-actions"`,
+		"go mod tidy",
+		"govulncheck@v1.6.0",
+		"staticcheck@v0.7.0",
+		"check-coverage.sh",
 	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("dependabot config missing %q:\n%s", want, text)
+			t.Fatalf("release check missing %q", want)
 		}
 	}
-	if strings.Contains(text, `package-ecosystem: "docker"`) {
-		t.Fatalf("dependabot config should not include docker ecosystem:\n%s", text)
+	if _, err := os.Stat("../.github/dependabot.yml"); !os.IsNotExist(err) {
+		t.Fatalf("dependabot config must remain absent: %v", err)
 	}
 }
 

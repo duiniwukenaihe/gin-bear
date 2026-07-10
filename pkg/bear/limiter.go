@@ -49,20 +49,20 @@ func NewMemoryRateLimiter(limit int, window time.Duration) *MemoryRateLimiter {
 	return l
 }
 
-func (this *MemoryRateLimiter) Allow(ctx context.Context, key string) bool {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	this.counts[key]++
-	return this.counts[key] <= this.limit
+func (l *MemoryRateLimiter) Allow(ctx context.Context, key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.counts[key]++
+	return l.counts[key] <= l.limit
 }
 
-func (this *MemoryRateLimiter) Stop() {
-	this.stopOnce.Do(func() {
-		close(this.done)
+func (l *MemoryRateLimiter) Stop() {
+	l.stopOnce.Do(func() {
+		close(l.done)
 	})
 }
 
-func (this *MemoryRateLimiter) Name() string {
+func (l *MemoryRateLimiter) Name() string {
 	return "MemoryRateLimiter"
 }
 
@@ -99,23 +99,23 @@ end
 return 1
 `
 
-func (this *RedisRateLimiter) Allow(ctx context.Context, key string) bool {
-	if this.Adapter == nil || this.Adapter.Client == nil {
-		return !this.FailClosed
+func (l *RedisRateLimiter) Allow(ctx context.Context, key string) bool {
+	if l.Adapter == nil || l.Adapter.Client == nil {
+		return !l.FailClosed
 	}
 
-	fullKey := this.Prefix + key
+	fullKey := l.Prefix + key
 	// Window 以毫秒为单位传递给 Lua
-	res, err := this.Adapter.Client.Eval(ctx, luaIncr, []string{fullKey}, this.Limit, this.Window.Milliseconds()).Int()
+	res, err := l.Adapter.Client.Eval(ctx, luaIncr, []string{fullKey}, l.Limit, l.Window.Milliseconds()).Int()
 	if err != nil {
 		slog.ErrorContext(ctx, "Redis RateLimiter error", "error", err)
-		return !this.FailClosed
+		return !l.FailClosed
 	}
 
 	return res == 1
 }
 
-func (this *RedisRateLimiter) Name() string {
+func (l *RedisRateLimiter) Name() string {
 	return "RedisRateLimiter"
 }
 

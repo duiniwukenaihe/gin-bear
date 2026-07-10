@@ -19,7 +19,7 @@ type I18nManager struct {
 	Config *I18nConfig
 }
 
-func (this *I18nManager) Name() string {
+func (i *I18nManager) Name() string {
 	return "I18nManager"
 }
 
@@ -44,8 +44,8 @@ func NewI18nManager(cfg *I18nConfig) *I18nManager {
 	return &I18nManager{Bundle: bundle, Config: cfg}
 }
 
-func (this *I18nManager) GetLocalizer(langs ...string) *i18n.Localizer {
-	return i18n.NewLocalizer(this.Bundle, langs...)
+func (i *I18nManager) GetLocalizer(langs ...string) *i18n.Localizer {
+	return i18n.NewLocalizer(i.Bundle, langs...)
 }
 
 // I18nFairing 处理语言检测的中间件
@@ -53,11 +53,11 @@ type I18nFairing struct {
 	BaseFairing
 }
 
-func (this *I18nFairing) Name() string {
+func (i *I18nFairing) Name() string {
 	return "I18nFairing"
 }
 
-func (this *I18nFairing) OnRequest(ctx *gin.Context) error {
+func (i *I18nFairing) OnRequest(ctx *gin.Context) error {
 	manager := GetByType[*I18nManager]()
 	if manager == nil {
 		return nil

@@ -230,6 +230,128 @@ func TestGenerateAPIHandlesDashedNamesFieldsAndSafeUpdates(t *testing.T) {
 	}
 }
 
+func TestGenerateModelAndDTOCreatePackageFiles(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("go.mod", []byte("module generated-model\n\ngo 1.25.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	generateModel("release-note", "published_at:datetime")
+	generateDTO("release-note", "published_at:datetime")
+
+	modelPath := filepath.Join(dir, "pkg", "releasenote", "model.go")
+	dtoPath := filepath.Join(dir, "pkg", "releasenote", "dto.go")
+	for _, path := range []string{modelPath, dtoPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected generated file %s: %v", path, err)
+		}
+	}
+
+	if got := readGeneratedFile(t, modelPath); !strings.Contains(got, `package releasenote`) {
+		t.Fatalf("unexpected model contents:\n%s", got)
+	}
+	if got := readGeneratedFile(t, dtoPath); !strings.Contains(got, `type ReleaseNoteQueryDTO struct`) {
+		t.Fatalf("unexpected dto contents:\n%s", got)
+	}
+}
+
+func TestGetModuleNameUsesGoModAndFallback(t *testing.T) {
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	withGoMod := t.TempDir()
+	if err := os.WriteFile(filepath.Join(withGoMod, "go.mod"), []byte("module example.com/app\n\ngo 1.25.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(withGoMod); err != nil {
+		t.Fatal(err)
+	}
+	if got := getModuleName(); got != "example.com/app" {
+		t.Fatalf("getModuleName() = %q", got)
+	}
+
+	withoutGoMod := t.TempDir()
+	if err := os.Chdir(withoutGoMod); err != nil {
+		t.Fatal(err)
+	}
+	if got := getModuleName(); got != "bear" {
+		t.Fatalf("fallback getModuleName() = %q", got)
+	}
+}
+
+func TestFieldGetDefaultValueCoversSupportedTypes(t *testing.T) {
+	tests := map[string]string{
+		"string":    `""`,
+		"int64":     "0",
+		"int":       "0",
+		"float64":   "0.0",
+		"bool":      "false",
+		"time.Time": "time.Now()",
+		"struct{}":  "nil",
+	}
+
+	for goType, want := range tests {
+		if got := (Field{GoType: goType}).GetDefaultValue(); got != want {
+			t.Fatalf("GetDefaultValue(%q) = %q, want %q", goType, got, want)
+		}
+	}
+}
+
+func TestFieldTypeMappingsCoverSupportedAliases(t *testing.T) {
+	tests := []struct {
+		fieldType string
+		goType    string
+		validate  string
+		gormTag   string
+	}{
+		{fieldType: "STRING", goType: "string", validate: "required", gormTag: "type:varchar(255)"},
+		{fieldType: "email", goType: "string", validate: "required,email", gormTag: "type:varchar(255)"},
+		{fieldType: "url", goType: "string", validate: "required,url", gormTag: "type:varchar(255)"},
+		{fieldType: "phone", goType: "string", validate: "required", gormTag: "type:varchar(50)"},
+		{fieldType: "int32", goType: "int64", validate: "required,numeric", gormTag: "type:bigint"},
+		{fieldType: "int8", goType: "int", validate: "required,numeric", gormTag: "type:bigint"},
+		{fieldType: "float32", goType: "float32", validate: "required,numeric", gormTag: "type:float"},
+		{fieldType: "bool", goType: "bool", validate: "", gormTag: "type:tinyint(1)"},
+		{fieldType: "time", goType: "time.Time", validate: "", gormTag: "type:datetime"},
+		{fieldType: "longtext", goType: "string", validate: "", gormTag: "type:text"},
+		{fieldType: "decimal", goType: "float64", validate: "required,numeric", gormTag: "type:decimal(10,2)"},
+		{fieldType: "unknown", goType: "string", validate: "", gormTag: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.fieldType, func(t *testing.T) {
+			if got := getGoType(tt.fieldType); got != tt.goType {
+				t.Fatalf("getGoType(%q) = %q, want %q", tt.fieldType, got, tt.goType)
+			}
+			if got := getValidate(tt.fieldType); got != tt.validate {
+				t.Fatalf("getValidate(%q) = %q, want %q", tt.fieldType, got, tt.validate)
+			}
+			if got := getGormTag(tt.fieldType); got != tt.gormTag {
+				t.Fatalf("getGormTag(%q) = %q, want %q", tt.fieldType, got, tt.gormTag)
+			}
+		})
+	}
+}
+
 func readGeneratedFile(t *testing.T, path string) string {
 	t.Helper()
 	content, err := os.ReadFile(path)

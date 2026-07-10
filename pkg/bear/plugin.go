@@ -26,42 +26,42 @@ func NewPluginDispatcher() *PluginDispatcher {
 	}
 }
 
-func (this *PluginDispatcher) Register(method, path string, handler gin.HandlerFunc) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	if _, ok := this.handlers[method]; !ok {
-		this.handlers[method] = make(map[string]gin.HandlerFunc)
+func (p *PluginDispatcher) Register(method, path string, handler gin.HandlerFunc) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.handlers[method]; !ok {
+		p.handlers[method] = make(map[string]gin.HandlerFunc)
 	}
-	this.handlers[method][path] = handler
+	p.handlers[method][path] = handler
 	slog.Info("Dynamic route registered", "method", method, "path", path)
 }
 
-func (this *PluginDispatcher) Unregister(method, path string) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	if m, ok := this.handlers[method]; ok {
+func (p *PluginDispatcher) Unregister(method, path string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if m, ok := p.handlers[method]; ok {
 		delete(m, path)
 	}
 }
 
-func (this *PluginDispatcher) Dispatch() gin.HandlerFunc {
+func (p *PluginDispatcher) Dispatch() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		this.mu.RLock()
+		p.mu.RLock()
 		method := ctx.Request.Method
 		path := ctx.FullPath()
 		if path == "" {
 			path = ctx.Request.URL.Path
 		}
 
-		if m, ok := this.handlers[method]; ok {
+		if m, ok := p.handlers[method]; ok {
 			if handler, exists := m[path]; exists {
-				this.mu.RUnlock()
+				p.mu.RUnlock()
 				handler(ctx)
 				ctx.Abort()
 				return
 			}
 		}
-		this.mu.RUnlock()
+		p.mu.RUnlock()
 		ctx.Next()
 	}
 }
@@ -85,20 +85,20 @@ func NewPluginManager(bear *Bear) *PluginManager {
 	}
 }
 
-func (this *PluginManager) Load(path string) error {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+func (p *PluginManager) Load(path string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	if err := validatePluginPath(path); err != nil {
 		return err
 	}
 
-	p, err := plugin.Open(path)
+	pluginHandle, err := plugin.Open(path)
 	if err != nil {
 		return fmt.Errorf("failed to open plugin %s: %w", path, err)
 	}
 
-	sym, err := p.Lookup("GetModule")
+	sym, err := pluginHandle.Lookup("GetModule")
 	if err != nil {
 		return fmt.Errorf("plugin %s does not export 'GetModule' symbol", path)
 	}
@@ -120,11 +120,11 @@ func (this *PluginManager) Load(path string) error {
 
 	// 2. 构建模块路由
 	// 我们需要将 Bear 切换到“插件模式”，使其路由注册到 PluginDispatcher
-	this.bear.pluginMode = true
-	mod.Build(this.bear)
-	this.bear.pluginMode = false
+	p.bear.pluginMode = true
+	mod.Build(p.bear)
+	p.bear.pluginMode = false
 
-	this.plugins[path] = &loadedPlugin{Module: mod, Symbol: sym}
+	p.plugins[path] = &loadedPlugin{Module: mod, Symbol: sym}
 	return nil
 }
 
@@ -176,8 +176,8 @@ func stringsHasPathTraversal(rel string) bool {
 	return rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
-func (this *PluginManager) Reload(path string) error {
+func (p *PluginManager) Reload(path string) error {
 	// Go plugin 无法真正从内存卸载，Reload 实际上是加载新版本并覆盖分发器映射
 	// 注意：旧版本的对象可能仍然在内存中，但分发器会指向新版本
-	return this.Load(path)
+	return p.Load(path)
 }

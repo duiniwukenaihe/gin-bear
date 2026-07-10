@@ -16,13 +16,13 @@ type WebSocketHandler interface {
 type BaseWebSocketHandler struct {
 }
 
-func (this *BaseWebSocketHandler) OnConnect(ctx *gin.Context, conn *websocket.Conn) error {
+func (h *BaseWebSocketHandler) OnConnect(ctx *gin.Context, conn *websocket.Conn) error {
 	return nil
 }
 
-func (this *BaseWebSocketHandler) OnMessage(ctx *gin.Context, conn *websocket.Conn, messageType int, p []byte) error {
+func (h *BaseWebSocketHandler) OnMessage(ctx *gin.Context, conn *websocket.Conn, messageType int, p []byte) error {
 	return nil
 }
 
-func (this *BaseWebSocketHandler) OnClose(ctx *gin.Context, conn *websocket.Conn) {
+func (h *BaseWebSocketHandler) OnClose(ctx *gin.Context, conn *websocket.Conn) {
 }

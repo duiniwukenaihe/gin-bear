@@ -29,9 +29,9 @@ type Responder interface {
 // JSONResponse 处理 struct/map 返回，自动包装为标准格式 (兼容旧版，但建议直接使用通用签名)
 type JSONResponse func(*gin.Context) Response
 
-func (this JSONResponse) RespondTo() gin.HandlerFunc {
+func (r JSONResponse) RespondTo() gin.HandlerFunc {
 	return Convert((func(*gin.Context) (interface{}, error))(func(ctx *gin.Context) (interface{}, error) {
-		return this(ctx), nil
+		return r(ctx), nil
 	}))
 }
 

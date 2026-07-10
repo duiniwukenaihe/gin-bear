@@ -7,8 +7,15 @@ on:
       - "codex/**"
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -20,5 +27,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Release check
-        run: scripts/release-check.sh
+      - name: Verify quality baseline
+        run: make verify
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run race tests
+        run: go test -race ./... -count=1
