@@ -185,6 +185,7 @@ func TestRCGateAndReleaseWorkflowAreAuditable(t *testing.T) {
 		"go clean -testcache",
 		"go test ./... -count=1",
 		"-shuffle=\"${shuffle_seed}\" -count=20",
+		"-shuffle=\"${shuffle_seed}\" -count=20 -timeout=30m",
 		"go test -race ./... -count=3",
 		"go vet ./...",
 		"staticcheck@v0.7.0",

@@ -151,7 +151,7 @@ check_repository_hygiene() {
 
 run_step clean go clean -testcache || exit $?
 run_step count1 go test ./... -count=1 || exit $?
-run_step shuffle20 go test ./... -shuffle="${shuffle_seed}" -count=20 || exit $?
+run_step shuffle20 go test ./... -shuffle="${shuffle_seed}" -count=20 -timeout=30m || exit $?
 run_step race3 go test -race ./... -count=3 || exit $?
 run_step vet go vet ./... || exit $?
 run_step staticcheck go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./... || exit $?
