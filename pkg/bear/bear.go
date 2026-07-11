@@ -83,6 +83,7 @@ type Bear struct {
 	applyState        applyState
 	applyErr          error
 	applyDone         chan struct{}
+	pluginBarrier     *pluginRegistrationBarrier
 	pluginDispatcher  *PluginDispatcher
 	pluginManager     *PluginManager
 	pluginMode        bool // 标记当前是否处于插件加载模式
@@ -160,6 +161,7 @@ func Ignite(args ...any) *Bear {
 		exprData:         map[string]interface{}{},
 		fairingHandler:   NewFairingHandler(),
 		routeTree:        NewRouteTree(),
+		pluginBarrier:    newPluginRegistrationBarrier(),
 		pluginDispatcher: newPluginDispatcher(runtime.Logger),
 		runtime:          runtime,
 	}
@@ -946,6 +948,9 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := b.closePluginRegistration(ctx); err != nil {
+		return err
+	}
 	b.applyMu.Lock()
 	switch b.applyState {
 	case applySucceeded:
@@ -987,11 +992,12 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 }
 
 func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
+	lifecycleStartFailed := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			resultErr = fmt.Errorf("ApplyAll failed while building application: %v", recovered)
 		}
-		if resultErr != nil {
+		if resultErr != nil && !lifecycleStartFailed {
 			rollbackErr := runShutdownPhase(shutdownTimeout(b.runtime.Config), b.runtime.Lifecycle.Stop)
 			if rollbackErr != nil {
 				resultErr = errors.Join(resultErr, fmt.Errorf("ApplyAll rollback failed: %w", rollbackErr))
@@ -1009,6 +1015,7 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 	// 2. 第二遍遍历：执行 Init 初始化钩子
 	b.runtime.Logger.Info("Executing component initializers...")
 	if err := b.runtime.Lifecycle.Start(ctx); err != nil {
+		lifecycleStartFailed = true
 		return err
 	}
 
@@ -1046,14 +1053,28 @@ func (b *Bear) launchApplyError() error {
 	}
 }
 
-func (b *Bear) rejectsLateLifecycleRegistration() bool {
-	b.applyMu.Lock()
-	applyClosed := b.applyState != applyNotStarted
-	b.applyMu.Unlock()
-	if applyClosed {
-		return true
+func (b *Bear) beginPluginRegistration() error {
+	if b == nil || b.runtime == nil || b.runtime.Lifecycle.registrationClosed() {
+		return ErrPluginHotReloadUnsupported
 	}
-	return b.runtime == nil || b.runtime.Lifecycle.registrationClosed()
+	if b.pluginBarrier == nil {
+		return ErrPluginHotReloadUnsupported
+	}
+	return b.pluginBarrier.begin()
+}
+
+func (b *Bear) endPluginRegistration() {
+	if b == nil || b.pluginBarrier == nil {
+		return
+	}
+	b.pluginBarrier.end()
+}
+
+func (b *Bear) closePluginRegistration(ctx context.Context) error {
+	if b == nil || b.pluginBarrier == nil {
+		return ErrPluginHotReloadUnsupported
+	}
+	return b.pluginBarrier.close(ctx)
 }
 
 // Group 创建路由组 (自动感知当前的挂载点)，支持 IClass 接口的 Handler 自动构建路由

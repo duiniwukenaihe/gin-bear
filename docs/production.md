@@ -436,6 +436,13 @@ plugins:
 
 Plugin paths are resolved to absolute paths and must live inside one of the configured directories.
 
+For v0.10, dynamic plugins are a startup-only, experimental integration point.
+Load every required plugin before `ApplyAll`. Once startup begins, `LoadPlugin` and
+`ReloadPlugin` return `bear.ErrPluginHotReloadUnsupported`; Go plugins cannot
+safely replace lifecycle-owned resources in a live process. Publish the new
+plugin with a new application instance and use a readiness-checked rolling
+replacement to move traffic.
+
 ## Delivery Checks
 
 Run the project verification gate locally before cutting a release:

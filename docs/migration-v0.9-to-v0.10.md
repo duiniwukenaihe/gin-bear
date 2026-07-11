@@ -61,6 +61,14 @@ Redis client exists, but `RevokeToken` and `IsTokenBlacklisted` return
 `errors.Is(err, bear.ErrTokenRevocationUnavailable)` and treat it as a failed
 logout/revocation operation rather than assuming the token was revoked.
 
+### Dynamic Plugins
+
+In v0.10, dynamic Go plugins remain experimental and are loaded only before
+`ApplyAll`. A running application returns
+`bear.ErrPluginHotReloadUnsupported` from `LoadPlugin` and `ReloadPlugin`.
+Deploy a changed plugin by starting a new instance, passing readiness checks,
+and rolling traffic over; do not attempt an in-process plugin replacement.
+
 ### Comparable Configuration Collection Fields
 
 During the v0.10 prerelease, `AuthConfig.PublicPaths` and

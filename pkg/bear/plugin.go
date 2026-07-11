@@ -1,6 +1,7 @@
 package bear
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// ErrPluginHotReloadUnsupported reports that a plugin cannot be loaded once
+// application startup has begun. Replace running instances through a rolling
+// deployment instead of mutating their lifecycle in place.
+var ErrPluginHotReloadUnsupported = errors.New("plugin hot reload unsupported after application startup begins; use rolling replacement")
 
 // PluginDispatcher 负责动态路由分发
 type PluginDispatcher struct {
@@ -83,6 +89,88 @@ type PluginManager struct {
 	mu      sync.Mutex
 }
 
+type pluginRegistrationBarrier struct {
+	mu            sync.Mutex
+	registrations int
+	blocked       bool
+	transition    chan struct{}
+	changed       chan struct{}
+}
+
+func newPluginRegistrationBarrier() *pluginRegistrationBarrier {
+	return &pluginRegistrationBarrier{changed: make(chan struct{})}
+}
+
+func (b *pluginRegistrationBarrier) begin() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.blocked {
+		return ErrPluginHotReloadUnsupported
+	}
+	b.registrations++
+	return nil
+}
+
+func (b *pluginRegistrationBarrier) end() {
+	b.mu.Lock()
+	if b.registrations > 0 {
+		b.registrations--
+		close(b.changed)
+		b.changed = make(chan struct{})
+	}
+	b.mu.Unlock()
+}
+
+func (b *pluginRegistrationBarrier) close(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	for {
+		b.mu.Lock()
+		if b.blocked {
+			if b.transition == nil {
+				b.mu.Unlock()
+				return nil
+			}
+			transition := b.transition
+			b.mu.Unlock()
+			select {
+			case <-transition:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		b.blocked = true
+		b.transition = make(chan struct{})
+		transition := b.transition
+		for b.registrations > 0 {
+			changed := b.changed
+			b.mu.Unlock()
+			select {
+			case <-changed:
+				b.mu.Lock()
+			case <-ctx.Done():
+				b.mu.Lock()
+				b.blocked = false
+				b.transition = nil
+				close(transition)
+				b.mu.Unlock()
+				return ctx.Err()
+			}
+		}
+		b.transition = nil
+		close(transition)
+		b.mu.Unlock()
+		return nil
+	}
+}
+
 type loadedPlugin struct {
 	Module Module
 	Symbol plugin.Symbol
@@ -99,42 +187,50 @@ func (p *PluginManager) Load(path string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if err := validatePluginPathForConfig(path, p.bear.runtime.Config); err != nil {
-		return err
-	}
-	if p.bear.rejectsLateLifecycleRegistration() {
-		return errors.New("plugins cannot be loaded after ApplyAll because Build may add lifecycle resources")
-	}
+	return p.withRegistration(func() error {
+		if err := validatePluginPathForConfig(path, p.bear.runtime.Config); err != nil {
+			return err
+		}
 
-	pluginHandle, err := plugin.Open(path)
-	if err != nil {
-		return fmt.Errorf("failed to open plugin %s: %w", path, err)
-	}
+		pluginHandle, err := plugin.Open(path)
+		if err != nil {
+			return fmt.Errorf("failed to open plugin %s: %w", path, err)
+		}
 
-	sym, err := pluginHandle.Lookup("GetModule")
-	if err != nil {
-		return fmt.Errorf("plugin %s does not export 'GetModule' symbol", path)
-	}
+		sym, err := pluginHandle.Lookup("GetModule")
+		if err != nil {
+			return fmt.Errorf("plugin %s does not export 'GetModule' symbol", path)
+		}
 
-	getModule, ok := sym.(func() Module)
-	if !ok {
-		return errors.New("invalid 'GetModule' function signature in plugin")
-	}
+		getModule, ok := sym.(func() Module)
+		if !ok {
+			return errors.New("invalid 'GetModule' function signature in plugin")
+		}
 
-	mod := getModule()
-	p.bear.runtime.Logger.Info("Loading dynamic module", "name", mod.Name(), "path", path)
-	if err := p.registerModule(mod); err != nil {
-		return err
-	}
-
-	p.plugins[path] = &loadedPlugin{Module: mod, Symbol: sym}
-	return nil
+		mod := getModule()
+		p.bear.runtime.Logger.Info("Loading dynamic module", "name", mod.Name(), "path", path)
+		p.registerModuleInRegistration(mod)
+		p.plugins[path] = &loadedPlugin{Module: mod, Symbol: sym}
+		return nil
+	})
 }
 
 func (p *PluginManager) registerModule(mod Module) error {
-	if p.bear.rejectsLateLifecycleRegistration() {
-		return fmt.Errorf("plugin %s cannot be registered after ApplyAll because Build may add lifecycle resources", mod.Name())
+	return p.withRegistration(func() error {
+		p.registerModuleInRegistration(mod)
+		return nil
+	})
+}
+
+func (p *PluginManager) withRegistration(register func() error) error {
+	if err := p.bear.beginPluginRegistration(); err != nil {
+		return err
 	}
+	defer p.bear.endPluginRegistration()
+	return register()
+}
+
+func (p *PluginManager) registerModuleInRegistration(mod Module) {
 	beans := mod.Beans()
 	// 1. 注册 Beans 到主 IoC 容器
 	for _, bean := range beans {
@@ -148,7 +244,6 @@ func (p *PluginManager) registerModule(mod Module) error {
 	p.bear.pluginMode = true
 	defer func() { p.bear.pluginMode = false }()
 	mod.Build(p.bear)
-	return nil
 }
 
 func validatePluginPathForConfig(path string, config *SysConfig) error {

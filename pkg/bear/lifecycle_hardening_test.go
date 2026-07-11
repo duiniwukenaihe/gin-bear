@@ -174,6 +174,29 @@ func TestApplyAllRollsBackStartedComponentsInLIFOOrder(t *testing.T) {
 	})
 }
 
+func TestApplyAllReportsInitializerRollbackFailureOnce(t *testing.T) {
+	initErr := errors.New("initializer failed once")
+	rollbackErr := errors.New("initializer rollback failed once")
+	failing := &gatedFailingInitializer{
+		name:    "failing-initializer",
+		err:     initErr,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	close(failing.release)
+	app := Ignite(NewSysConfig())
+	app.Runtime().Lifecycle.Add(failingShutdownComponent{name: "rollback-owner", err: rollbackErr})
+	app.Beans(failing)
+
+	err := app.ApplyAll(context.Background())
+	if !errors.Is(err, initErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("ApplyAll() error = %v, want initializer and rollback failures", err)
+	}
+	if got := strings.Count(err.Error(), rollbackErr.Error()); got != 1 {
+		t.Fatalf("rollback failure occurrences = %d, want 1 in %v", got, err)
+	}
+}
+
 func TestLaunchRejectsCachedApplyFailure(t *testing.T) {
 	initErr := errors.New("launch must stay closed")
 	component := &gatedFailingInitializer{

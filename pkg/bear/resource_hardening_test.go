@@ -41,10 +41,35 @@ type buildShutdownPluginModule struct {
 	hookCalls *atomic.Int32
 }
 
+type barrierPluginModule struct {
+	beansEntered chan struct{}
+	releaseBeans chan struct{}
+	bean         Bean
+	buildBean    Bean
+	built        atomic.Bool
+	hookCalls    *atomic.Int32
+}
+
+type buildLifecycleBean struct {
+	*countedLifecycleBean
+}
+
 func (*buildShutdownPluginModule) Name() string  { return "build-shutdown-plugin" }
 func (*buildShutdownPluginModule) Beans() []Bean { return nil }
 func (m *buildShutdownPluginModule) Build(app *Bear) {
 	m.built.Store(true)
+	app.OnShutdown(func() { m.hookCalls.Add(1) })
+}
+
+func (*barrierPluginModule) Name() string { return "barrier-plugin" }
+func (m *barrierPluginModule) Beans() []Bean {
+	close(m.beansEntered)
+	<-m.releaseBeans
+	return []Bean{m.bean}
+}
+func (m *barrierPluginModule) Build(app *Bear) {
+	m.built.Store(true)
+	app.Beans(m.buildBean)
 	app.OnShutdown(func() { m.hookCalls.Add(1) })
 }
 
@@ -188,6 +213,77 @@ func TestPluginRejectsBuildAfterLifecycleWasStartedDirectly(t *testing.T) {
 	}
 	if module.built.Load() {
 		t.Fatal("plugin Build ran after direct lifecycle start")
+	}
+}
+
+func TestPluginLoadAndReloadRejectHotReloadAfterApplyAll(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, load := range map[string]func(string) error{
+		"load":   app.LoadPlugin,
+		"reload": app.ReloadPlugin,
+	} {
+		err := load("/tmp/missing-plugin.so")
+		if !errors.Is(err, ErrPluginHotReloadUnsupported) {
+			t.Fatalf("%s after ApplyAll error = %v, want ErrPluginHotReloadUnsupported", name, err)
+		}
+	}
+}
+
+func TestPluginRegistrationBarrierKeepsApplyAllBeforeModuleBuild(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	beansBean := &countedLifecycleBean{name: "plugin-beans-resource"}
+	buildBean := &buildLifecycleBean{countedLifecycleBean: &countedLifecycleBean{name: "plugin-build-resource"}}
+	var hookCalls atomic.Int32
+	module := &barrierPluginModule{
+		beansEntered: make(chan struct{}),
+		releaseBeans: make(chan struct{}),
+		bean:         beansBean,
+		buildBean:    buildBean,
+		hookCalls:    &hookCalls,
+	}
+	registrationDone := make(chan error, 1)
+	go func() {
+		registrationDone <- app.pluginManager.registerModule(module)
+	}()
+	<-module.beansEntered
+	defer func() {
+		select {
+		case <-module.releaseBeans:
+		default:
+			close(module.releaseBeans)
+		}
+		<-registrationDone
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	if err := app.ApplyAll(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ApplyAll() during plugin registration error = %v, want registration barrier deadline", err)
+	}
+	close(module.releaseBeans)
+	if err := <-registrationDone; err != nil {
+		t.Fatalf("registerModule() error = %v", err)
+	}
+	registrationDone <- nil
+	if !module.built.Load() {
+		t.Fatal("plugin Build did not run after Beans was released")
+	}
+
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll() after plugin registration error = %v", err)
+	}
+	if beansBean.starts != 1 || buildBean.starts != 1 {
+		t.Fatalf("plugin bean starts = %d/%d, want 1/1", beansBean.starts, buildBean.starts)
+	}
+	if err := app.Runtime().Lifecycle.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if beansBean.stops != 1 || buildBean.stops != 1 || hookCalls.Load() != 1 {
+		t.Fatalf("plugin shutdowns = %d/%d hook=%d, want 1/1/1", beansBean.stops, buildBean.stops, hookCalls.Load())
 	}
 }
 
