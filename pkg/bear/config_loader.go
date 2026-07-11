@@ -16,10 +16,11 @@ import (
 // validation failures to the caller.
 func LoadConfig(paths ...string) (*SysConfig, error) {
 	config := NewSysConfig()
+	rawEnvironment := os.Getenv("BEAR_ENV")
 	env := configEnvironment()
 	production := isProductionEnvironment(env)
 	if len(paths) == 0 {
-		paths = existingDefaultConfigPaths(env)
+		paths = existingDefaultConfigPaths(configFilenameEnvironment(rawEnvironment, env))
 	}
 
 	for _, path := range paths {
@@ -57,7 +58,7 @@ func InitConfig() *SysConfig {
 }
 
 func configEnvironment() string {
-	env := strings.ToLower(strings.TrimSpace(os.Getenv("BEAR_ENV")))
+	env := normalizeEnvironment(os.Getenv("BEAR_ENV"))
 	if env != "" {
 		return env
 	}
@@ -68,7 +69,23 @@ func configEnvironment() string {
 }
 
 func isProductionEnvironment(env string) bool {
-	return env == "prod" || env == "production"
+	switch normalizeEnvironment(env) {
+	case "prod", "production":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeEnvironment(env string) string {
+	return strings.ToLower(strings.TrimSpace(env))
+}
+
+func configFilenameEnvironment(rawEnvironment, normalizedEnvironment string) string {
+	if rawEnvironment != "" {
+		return rawEnvironment
+	}
+	return normalizedEnvironment
 }
 
 func existingDefaultConfigPaths(env string) []string {

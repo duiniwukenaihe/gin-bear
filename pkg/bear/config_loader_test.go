@@ -108,6 +108,55 @@ func TestLoadConfigPreservesProductionEnvironmentFilename(t *testing.T) {
 	}
 }
 
+func TestUppercaseProductionEnvironmentUsesRawOverlayAndProductionSafeguards(t *testing.T) {
+	t.Setenv("BEAR_ENV", "PRODUCTION")
+	t.Setenv("GIN_MODE", "")
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(workingDirectory); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "application-PRODUCTION.yaml"), []byte("server:\n  name: uppercase-production-file\nconfig:\n  strict: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(directory); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "config.strict") {
+		t.Fatalf("expected uppercase production strict-policy error, got %v", err)
+	}
+
+	if got := configuredGinMode(NewSysConfig()); got != gin.ReleaseMode {
+		t.Fatalf("gin mode = %q, want %q", got, gin.ReleaseMode)
+	}
+	if !isProductionMode(NewSysConfig()) {
+		t.Fatal("uppercase production environment did not activate production safeguards")
+	}
+	weak := NewSysConfig()
+	weak.Auth.JWTSecret = "bear-secret"
+	if err := validateProductionSecurity(weak); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
+		t.Fatalf("expected uppercase production secret validation error, got %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(directory, "application-PRODUCTION.yaml"), []byte("server:\n  name: uppercase-production-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JWT_SECRET", "test-production-secret-with-32-characters")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if cfg.Server.Name != "uppercase-production-file" {
+		t.Fatalf("server name = %q", cfg.Server.Name)
+	}
+}
+
 func TestStrictPolicyHandlesNilCurrentConfig(t *testing.T) {
 	strict, err := strictPolicy([]byte("server:\n  name: app\n"), "application.yaml", nil, false)
 	if err != nil {
@@ -414,6 +463,83 @@ func TestJWTValidatesConfiguredIssuerAndAudience(t *testing.T) {
 	})
 	if _, err := util.ParseToken(wrongAudience); err == nil {
 		t.Fatal("expected audience validation failure")
+	}
+}
+
+func TestIgniteConfiguresAuthFairingJWTValidationFromSysConfig(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Auth.JWTSecret = "secret-1234567890"
+	cfg.Auth.JWTIssuer = "https://issuer.example"
+	cfg.Auth.JWTAudience = "bear-api"
+	cfg.Auth.JWTClockSkew = "1m"
+	cfg.Auth.PublicPaths = nil
+
+	app := Ignite(cfg)
+	app.Attach(NewAuthFairing())
+	app.Handle(http.MethodGet, "/private", func() string { return "ok" })
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll failed: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		claims     jwt.RegisteredClaims
+		wantStatus int
+	}{
+		{
+			name: "configured claims are accepted",
+			claims: jwt.RegisteredClaims{
+				Issuer:    cfg.Auth.JWTIssuer,
+				Audience:  jwt.ClaimStrings{cfg.Auth.JWTAudience},
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "wrong issuer is rejected",
+			claims: jwt.RegisteredClaims{
+				Issuer:    "https://other.example",
+				Audience:  jwt.ClaimStrings{cfg.Auth.JWTAudience},
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "wrong audience is rejected",
+			claims: jwt.RegisteredClaims{
+				Issuer:    cfg.Auth.JWTIssuer,
+				Audience:  jwt.ClaimStrings{"other-api"},
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "configured clock skew is accepted",
+			claims: jwt.RegisteredClaims{
+				Issuer:    cfg.Auth.JWTIssuer,
+				Audience:  jwt.ClaimStrings{cfg.Auth.JWTAudience},
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(-30 * time.Second)),
+			},
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := signedJWT(t, cfg.Auth.JWTSecret, tt.claims)
+			request := httptest.NewRequest(http.MethodGet, "/private", nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+
+			app.ServeHTTP(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", response.Code, tt.wantStatus, response.Body.String())
+			}
+		})
 	}
 }
 

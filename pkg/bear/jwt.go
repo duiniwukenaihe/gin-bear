@@ -32,6 +32,24 @@ func NewJWTUtil(secret string, expires int) *JWTUtil {
 	return &JWTUtil{Config: &JWTConfig{Secret: secret, Expires: expires}}
 }
 
+func newJWTUtilFromAuthConfig(config *AuthConfig) *JWTUtil {
+	if config == nil {
+		return NewJWTUtil("", 0)
+	}
+
+	clockSkew := time.Duration(0)
+	if config.JWTClockSkew != "" {
+		clockSkew, _ = time.ParseDuration(config.JWTClockSkew)
+	}
+	return &JWTUtil{Config: &JWTConfig{
+		Secret:    config.JWTSecret,
+		Expires:   config.TokenExpireHours,
+		Issuer:    config.JWTIssuer,
+		Audience:  config.JWTAudience,
+		ClockSkew: clockSkew,
+	}}
+}
+
 // GenerateToken 生成 Token
 func (j *JWTUtil) GenerateToken(userID uint, email string) (string, error) {
 	claims := CustomClaims{

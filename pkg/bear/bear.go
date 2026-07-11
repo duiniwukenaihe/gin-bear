@@ -150,6 +150,7 @@ func Ignite(args ...any) *Bear {
 	// 注册核心底座 Bean
 	runtime.Container.Set(b)
 	runtime.Container.Set(config)
+	runtime.Container.Set(newJWTUtilFromAuthConfig(config.Auth))
 	publishDefaultRuntime(runtime)
 	for _, warning := range config.compatibilityWarnings() {
 		runtime.Logger.Warn(warning)
@@ -471,8 +472,7 @@ func configuredGinMode(config *SysConfig) string {
 	if mode := os.Getenv("GIN_MODE"); mode != "" {
 		return mode
 	}
-	env := os.Getenv("BEAR_ENV")
-	if env == "prod" || env == "production" {
+	if isProductionEnvironment(os.Getenv("BEAR_ENV")) {
 		return gin.ReleaseMode
 	}
 	return gin.DebugMode
@@ -483,8 +483,7 @@ func isProductionMode(config *SysConfig) bool {
 	if mode == gin.ReleaseMode {
 		return true
 	}
-	env := os.Getenv("BEAR_ENV")
-	return env == "prod" || env == "production"
+	return isProductionEnvironment(os.Getenv("BEAR_ENV"))
 }
 
 func validateProductionSecurity(config *SysConfig) error {
