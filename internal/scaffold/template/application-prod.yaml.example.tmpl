@@ -1,6 +1,6 @@
 server:
   port: 8080
-  name: "{{.Name}}"
+  name: {{yamlScalar .Name}}
   mode: "release"
   shutdown_timeout: "10s"
   trusted_proxies:
@@ -18,7 +18,7 @@ database:
 
 tracing:
   enabled: false
-  service_name: "{{.Name}}"
+  service_name: {{yamlScalar .Name}}
   exporter: "otlp"
   otlp_endpoint: "http://otel-collector:4318/v1/traces"
   sample_rate: 1.0

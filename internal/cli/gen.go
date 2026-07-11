@@ -12,6 +12,7 @@ import (
 	"text/template"
 	"unicode"
 
+	"github.com/duiniwukenaihe/gin-bear/internal/atomicdir"
 	"github.com/spf13/cobra"
 )
 
@@ -147,7 +148,7 @@ func generateResource(ctx context.Context, opts resourceOptions) (string, error)
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if err := os.Rename(temporary, target); err != nil {
+	if err := atomicdir.Publish(temporary, target); err != nil {
 		return "", fmt.Errorf("publish resource package: %w", err)
 	}
 	published = true

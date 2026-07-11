@@ -14,9 +14,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v2"
 )
 
 func TestGenerateProjectBuildsTestsAndServesHealth(t *testing.T) {
@@ -67,6 +68,8 @@ func TestGenerateRejectsInvalidOptionsWithoutPublishingFiles(t *testing.T) {
 		{name: "unsafe module", opts: Options{Name: "app", Module: "example.com/app\nreplace bad => .", Directory: filepath.Join(t.TempDir(), "app"), FrameworkVersion: "v1.2.3"}},
 		{name: "invalid module segment", opts: Options{Name: "app", Module: "example.com/../app", Directory: filepath.Join(t.TempDir(), "app"), FrameworkVersion: "v1.2.3"}},
 		{name: "invalid semantic version", opts: Options{Name: "app", Module: "example.com/app", Directory: filepath.Join(t.TempDir(), "app"), FrameworkVersion: "vbanana"}},
+		{name: "Go-incompatible semantic version", opts: Options{Name: "app", Module: "example.com/app", Directory: filepath.Join(t.TempDir(), "app"), FrameworkVersion: "v1.2.3-01"}},
+		{name: "Unicode module path", opts: Options{Name: "app", Module: "example.com/应用", Directory: filepath.Join(t.TempDir(), "app"), FrameworkVersion: "v1.2.3"}},
 	}
 
 	for _, tt := range tests {
@@ -80,6 +83,40 @@ func TestGenerateRejectsInvalidOptionsWithoutPublishingFiles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGenerateQuotesNamesInValidYAML(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "app")
+	name := `billing "critical": api`
+	if err := Generate(context.Background(), Options{
+		Name:             name,
+		Module:           "example.com/app",
+		Directory:        destination,
+		FrameworkVersion: "v1.2.3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, filename := range []string{"application.yaml", "application-prod.yaml.example"} {
+		contents, err := os.ReadFile(filepath.Join(destination, filename))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config struct {
+			Server struct {
+				Name string `yaml:"name"`
+			} `yaml:"server"`
+			Tracing struct {
+				ServiceName string `yaml:"service_name"`
+			} `yaml:"tracing"`
+		}
+		if err := yaml.Unmarshal(contents, &config); err != nil {
+			t.Fatalf("parse generated %s: %v\n%s", filename, err, contents)
+		}
+		if config.Server.Name != name || config.Tracing.ServiceName != name {
+			t.Fatalf("%s names = server %q tracing %q, want %q", filename, config.Server.Name, config.Tracing.ServiceName, name)
+		}
 	}
 }
 
@@ -304,12 +341,16 @@ func runGeneratedServerHealthCheck(t *testing.T, dir, path string) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("go", "run", "./cmd/server")
+	serverBinary := filepath.Join(t.TempDir(), "generated-server")
+	if runtime.GOOS == "windows" {
+		serverBinary += ".exe"
+	}
+	runGo(t, dir, "build", "-o", serverBinary, "./cmd/server")
+
+	cmd := exec.Command(serverBinary)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
+	prepareGeneratedProcess(cmd)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -334,7 +375,7 @@ func runGeneratedServerHealthCheck(t *testing.T, dir, path string) {
 	stopped := false
 	t.Cleanup(func() {
 		if !stopped && cmd.Process != nil {
-			killProcessTree(cmd.Process.Pid, os.Kill)
+			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
 		}
 	})
@@ -355,7 +396,7 @@ func runGeneratedServerHealthCheck(t *testing.T, dir, path string) {
 			break
 		}
 		if time.Now().After(deadline) {
-			killProcessTree(cmd.Process.Pid, os.Kill)
+			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
 			stopped = true
 			t.Fatalf("generated server did not become healthy: %v\n%s\n%s", requestErr, <-stdoutDone, <-stderrDone)
@@ -363,18 +404,25 @@ func runGeneratedServerHealthCheck(t *testing.T, dir, path string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	killProcessTree(cmd.Process.Pid, os.Interrupt)
+	if err := cancelGeneratedProcess(cmd.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
+	var waitErr error
 	select {
-	case <-waitDone:
+	case waitErr = <-waitDone:
 		stopped = true
 	case <-time.After(10 * time.Second):
-		killProcessTree(cmd.Process.Pid, os.Kill)
+		_ = cmd.Process.Kill()
+		<-waitDone
 		stopped = true
 		t.Fatalf("generated server did not exit after cancellation\n%s\n%s", <-stdoutDone, <-stderrDone)
 	}
 	serverOutput := string(<-stdoutDone) + string(<-stderrDone)
+	if waitErr != nil {
+		t.Fatalf("generated server exited with an error after cancellation: %v\n%s", waitErr, serverOutput)
+	}
 	if !strings.Contains(serverOutput, "WhiteBear returning to ice") {
 		t.Fatalf("generated server skipped graceful cancellation:\n%s", serverOutput)
 	}
@@ -391,22 +439,6 @@ func runGeneratedServerHealthCheck(t *testing.T, dir, path string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
-
-func killProcessTree(pid int, signal os.Signal) {
-	if runtime.GOOS == "windows" {
-		process, err := os.FindProcess(pid)
-		if err == nil {
-			_ = process.Signal(signal)
-		}
-		return
-	}
-	signalName := "-KILL"
-	if signal == os.Interrupt {
-		signalName = "-INT"
-	}
-	_ = exec.Command("kill", signalName, "--", fmt.Sprintf("-%d", pid)).Run()
-}
-
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)

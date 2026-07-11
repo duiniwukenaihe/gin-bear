@@ -1,6 +1,6 @@
 server:
   port: 8080
-  name: "{{.Name}}"
+  name: {{yamlScalar .Name}}
   shutdown_timeout: "5s"
 
 database:
@@ -8,7 +8,7 @@ database:
 
 tracing:
   enabled: false
-  service_name: "{{.Name}}"
+  service_name: {{yamlScalar .Name}}
   exporter: "stdout"
   sample_rate: 1.0
 

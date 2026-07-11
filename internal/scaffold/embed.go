@@ -9,15 +9,16 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"text/template"
-	"unicode"
+
+	"github.com/duiniwukenaihe/gin-bear/internal/atomicdir"
+	"golang.org/x/mod/module"
+	"gopkg.in/yaml.v2"
 )
 
 const templateRoot = "template"
-
-var semanticVersionPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$`)
+const frameworkModule = "github.com/duiniwukenaihe/gin-bear"
 
 type Options struct {
 	Name             string
@@ -63,7 +64,7 @@ func Generate(ctx context.Context, opts Options) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporary, opts.Directory); err != nil {
+	if err := atomicdir.Publish(temporary, opts.Directory); err != nil {
 		return fmt.Errorf("publish scaffold: %w", err)
 	}
 	published = true
@@ -88,31 +89,13 @@ func validateOptions(opts Options) error {
 			return fmt.Errorf("%s contains invalid characters", value.name)
 		}
 	}
-	if !validModulePath(opts.Module) {
-		return fmt.Errorf("module %q is invalid", opts.Module)
+	if err := module.CheckPath(opts.Module); err != nil {
+		return fmt.Errorf("module %q is invalid: %w", opts.Module, err)
 	}
-	if !semanticVersionPattern.MatchString(opts.FrameworkVersion) {
-		return fmt.Errorf("framework version %q is invalid", opts.FrameworkVersion)
+	if err := module.Check(frameworkModule, opts.FrameworkVersion); err != nil {
+		return fmt.Errorf("framework version %q is invalid: %w", opts.FrameworkVersion, err)
 	}
 	return nil
-}
-
-func validModulePath(module string) bool {
-	if strings.ContainsAny(module, " \t\\") || strings.HasPrefix(module, ".") || strings.HasSuffix(module, "/") {
-		return false
-	}
-	for _, segment := range strings.Split(module, "/") {
-		if segment == "" || segment == "." || segment == ".." {
-			return false
-		}
-		for _, r := range segment {
-			if unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("-._~", r) {
-				continue
-			}
-			return false
-		}
-	}
-	return true
 }
 
 func renderTemplateTree(ctx context.Context, source fs.FS, root, destination string, data Options) error {
@@ -160,7 +143,10 @@ func renderTemplateTree(ctx context.Context, source fs.FS, root, destination str
 }
 
 func renderTemplate(name string, source []byte, data Options) ([]byte, error) {
-	tmpl, err := template.New(name).Option("missingkey=error").Parse(string(source))
+	tmpl, err := template.New(name).
+		Funcs(template.FuncMap{"yamlScalar": yamlScalar}).
+		Option("missingkey=error").
+		Parse(string(source))
 	if err != nil {
 		return nil, fmt.Errorf("parse template %q: %w", name, err)
 	}
@@ -169,4 +155,12 @@ func renderTemplate(name string, source []byte, data Options) ([]byte, error) {
 		return nil, fmt.Errorf("render template %q: %w", name, err)
 	}
 	return []byte(output.String()), nil
+}
+
+func yamlScalar(value string) (string, error) {
+	encoded, err := yaml.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("encode YAML scalar: %w", err)
+	}
+	return strings.TrimSuffix(string(encoded), "\n"), nil
 }

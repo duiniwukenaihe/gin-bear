@@ -12,7 +12,9 @@ var rootCmd = cli.NewRootCommand(os.Stdout, os.Stderr)
 // Execute runs the shared CLI with process arguments.
 // Deprecated: use cli.Execute for in-process execution.
 func Execute() {
-	_ = cli.Execute(os.Args[1:], os.Stdout, os.Stderr)
+	if code := cli.Execute(os.Args[1:], os.Stdout, os.Stderr); code != 0 {
+		os.Exit(code)
+	}
 }
 
 func legacyCommand(name string) *cobra.Command {
