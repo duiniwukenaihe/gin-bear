@@ -144,8 +144,8 @@ func (l *RedisRateLimiter) Allow(ctx context.Context, key string) bool {
 	}
 
 	fullKey := l.Prefix + key
-	// Window 以毫秒为单位传递给 Lua
-	res, err := l.Adapter.Client.Eval(ctx, luaIncr, []string{fullKey}, l.Limit, l.Window.Milliseconds()).Int()
+	// Window 以毫秒为单位传递给 Lua，不能让正数窗口截断为零。
+	res, err := l.Adapter.Client.Eval(ctx, luaIncr, []string{fullKey}, l.Limit, redisWindowMilliseconds(l.Window)).Int()
 	if err != nil {
 		slog.ErrorContext(ctx, "Redis RateLimiter error", "error", err)
 		return !l.failClosed()
@@ -188,6 +188,14 @@ func validateLimiterPolicy(limit int, window time.Duration) error {
 		return fmt.Errorf("rate limiter window must be positive: %s", window)
 	}
 	return nil
+}
+
+func redisWindowMilliseconds(window time.Duration) int64 {
+	milliseconds := window / time.Millisecond
+	if window%time.Millisecond != 0 {
+		milliseconds++
+	}
+	return int64(milliseconds)
 }
 
 func (l *RedisRateLimiter) Name() string {

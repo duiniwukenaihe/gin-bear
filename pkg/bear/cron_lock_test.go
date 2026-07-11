@@ -126,10 +126,31 @@ func TestRedisOpenAdapterReturnsPingErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("OpenRedisAdapter() unexpectedly succeeded")
 	}
-	if adapter == nil || adapter.Client == nil {
-		t.Fatal("OpenRedisAdapter() must return its adapter with the ping error")
+	if adapter != nil {
+		t.Fatal("OpenRedisAdapter() must not return an adapter after a failed ping")
 	}
-	_ = adapter.Shutdown()
+}
+
+func TestRedisRateLimiterRoundsSubMillisecondWindowUpToOneMillisecond(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	limiter := NewRedisRateLimiter(&RedisAdapter{Client: client}, 1, time.Nanosecond)
+	if err := limiter.Validate(); err != nil {
+		t.Fatalf("sub-millisecond window was rejected: %v", err)
+	}
+	if !limiter.Allow(context.Background(), "client") {
+		t.Fatal("Redis rate limiter denied the first request")
+	}
+
+	ttl, err := client.PTTL(context.Background(), "bear_limiter:client").Result()
+	if err != nil {
+		t.Fatalf("read limiter TTL: %v", err)
+	}
+	if ttl <= 0 {
+		t.Fatalf("accepted limiter window produced TTL %s", ttl)
+	}
 }
 
 func TestRedisOpenAdapterPingsBeforeReturningSuccess(t *testing.T) {

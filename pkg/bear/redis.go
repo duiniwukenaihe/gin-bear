@@ -48,6 +48,54 @@ func OpenRedisAdapter(cfg *RedisConfig) (*RedisAdapter, error) {
 	if cfg == nil {
 		return nil, errors.New("redis config is required")
 	}
+	client := redis.NewClient(redisOptions(cfg))
+	adapter := &RedisAdapter{Client: client}
+
+	// 链路追踪集成
+	config := GetByType[*SysConfig]()
+	if config != nil && config.Tracing != nil && config.Tracing.Enabled {
+		if err := redisotel.InstrumentTracing(client); err != nil {
+			slog.Error("Failed to instrument Redis with OTEL", "error", err)
+		}
+	}
+
+	// 测试连接
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("ping Redis at %s: %w", cfg.Addr, err)
+	}
+
+	slog.Info("Redis connected successfully", "addr", cfg.Addr)
+	return adapter, nil
+}
+
+// NewRedisAdapter creates a Redis adapter using the legacy panic/fail-open policy.
+// Deprecated: use OpenRedisAdapter to handle startup errors explicitly.
+func NewRedisAdapter(cfg *RedisConfig) *RedisAdapter {
+	adapter, err := OpenRedisAdapter(cfg)
+	if err == nil {
+		return adapter
+	}
+	addr := ""
+	required := false
+	if cfg != nil {
+		addr = cfg.Addr
+		required = cfg.Required
+	}
+	slog.Error("Failed to connect to Redis", "error", err, "addr", addr)
+	if required {
+		panic("required redis connection failed: " + err.Error())
+	}
+	if adapter == nil && cfg != nil {
+		adapter = &RedisAdapter{Client: redis.NewClient(redisOptions(cfg))}
+	}
+	return adapter
+}
+
+func redisOptions(cfg *RedisConfig) *redis.Options {
 	opts := &redis.Options{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
@@ -70,51 +118,7 @@ func OpenRedisAdapter(cfg *RedisConfig) (*RedisAdapter, error) {
 	if cfg.WriteTimeout > 0 {
 		opts.WriteTimeout = time.Duration(cfg.WriteTimeout) * time.Second
 	}
-
-	client := redis.NewClient(opts)
-	adapter := &RedisAdapter{Client: client}
-
-	// 链路追踪集成
-	config := GetByType[*SysConfig]()
-	if config != nil && config.Tracing != nil && config.Tracing.Enabled {
-		if err := redisotel.InstrumentTracing(client); err != nil {
-			slog.Error("Failed to instrument Redis with OTEL", "error", err)
-		}
-	}
-
-	// 测试连接
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := client.Ping(ctx).Err(); err != nil {
-		return adapter, fmt.Errorf("ping Redis at %s: %w", cfg.Addr, err)
-	}
-
-	slog.Info("Redis connected successfully", "addr", cfg.Addr)
-	return adapter, nil
-}
-
-// NewRedisAdapter creates a Redis adapter using the legacy panic/fail-open policy.
-// Deprecated: use OpenRedisAdapter to handle startup errors explicitly.
-func NewRedisAdapter(cfg *RedisConfig) *RedisAdapter {
-	adapter, err := OpenRedisAdapter(cfg)
-	if err == nil {
-		return adapter
-	}
-	addr := ""
-	required := false
-	if cfg != nil {
-		addr = cfg.Addr
-		required = cfg.Required
-	}
-	slog.Error("Failed to connect to Redis", "error", err, "addr", addr)
-	if required {
-		if adapter != nil && adapter.Client != nil {
-			_ = adapter.Client.Close()
-		}
-		panic("required redis connection failed: " + err.Error())
-	}
-	return adapter
+	return opts
 }
 
 // CacheUtil 缓存操作工具类
