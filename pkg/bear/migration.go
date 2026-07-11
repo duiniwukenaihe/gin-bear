@@ -2,17 +2,60 @@ package bear
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const defaultMigrationTable = "schema_migrations"
 const defaultMigrationLockTable = "schema_migration_locks"
 const defaultMigrationLockName = "global"
+const defaultMigrationReleaseTimeout = 5 * time.Second
+const legacyMigrationLockOwner = "legacy-unowned"
+
+var ErrMigrationLockOwnerMismatch = errors.New("migration lock owner mismatch")
+
+// MigrationDialect controls placeholder rebinding and dialect-specific DDL.
+type MigrationDialect string
+
+const (
+	MigrationDialectSQLite     MigrationDialect = "sqlite"
+	MigrationDialectMySQL      MigrationDialect = "mysql"
+	MigrationDialectPostgreSQL MigrationDialect = "postgresql"
+)
+
+// Rebind converts framework-generated question-mark placeholders for the
+// configured database. Migration SQL itself is always executed verbatim.
+func (d MigrationDialect) Rebind(query string) (string, error) {
+	switch d {
+	case MigrationDialectSQLite, MigrationDialectMySQL:
+		return query, nil
+	case MigrationDialectPostgreSQL:
+		var rebound strings.Builder
+		rebound.Grow(len(query) + 8)
+		parameter := 1
+		for _, char := range query {
+			if char != '?' {
+				rebound.WriteRune(char)
+				continue
+			}
+			rebound.WriteByte('$')
+			rebound.WriteString(strconv.Itoa(parameter))
+			parameter++
+		}
+		return rebound.String(), nil
+	default:
+		return "", fmt.Errorf("unsupported migration dialect %q", d)
+	}
+}
 
 type Migration struct {
 	Version string
@@ -22,16 +65,24 @@ type Migration struct {
 }
 
 type MigrationRunner struct {
-	DB        *sql.DB
-	Table     string
-	LockTable string
+	DB             *sql.DB
+	Table          string
+	LockTable      string
+	Dialect        MigrationDialect
+	ReleaseTimeout time.Duration
 }
 
-func NewMigrationRunner(db *sql.DB) *MigrationRunner {
+func NewMigrationRunner(db *sql.DB, dialect ...MigrationDialect) *MigrationRunner {
+	selectedDialect := MigrationDialectSQLite
+	if len(dialect) > 0 {
+		selectedDialect = dialect[0]
+	}
 	return &MigrationRunner{
-		DB:        db,
-		Table:     defaultMigrationTable,
-		LockTable: defaultMigrationLockTable,
+		DB:             db,
+		Table:          defaultMigrationTable,
+		LockTable:      defaultMigrationLockTable,
+		Dialect:        selectedDialect,
+		ReleaseTimeout: defaultMigrationReleaseTimeout,
 	}
 }
 
@@ -105,9 +156,12 @@ func parseMigrationFileName(name string) (version, migrationName, direction stri
 	return version, migrationName, parts[1], true
 }
 
-func (r *MigrationRunner) Up(ctx context.Context, migrations []Migration) error {
+func (r *MigrationRunner) Up(ctx context.Context, migrations []Migration) (resultErr error) {
 	if r == nil || r.DB == nil {
 		return fmt.Errorf("migration runner requires a database")
+	}
+	if err := r.validateDialect(); err != nil {
+		return err
 	}
 	table := r.Table
 	if table == "" {
@@ -126,10 +180,15 @@ func (r *MigrationRunner) Up(ctx context.Context, migrations []Migration) error 
 	if err := r.ensureLockTable(ctx, lockTable); err != nil {
 		return err
 	}
-	if err := r.acquireLock(ctx, lockTable); err != nil {
+	owner, err := r.acquireLock(ctx, lockTable)
+	if err != nil {
 		return err
 	}
-	defer r.releaseLock(context.Background(), lockTable)
+	defer func() {
+		if err := r.releaseLockBounded(lockTable, owner); resultErr == nil && err != nil {
+			resultErr = err
+		}
+	}()
 
 	for _, migration := range migrations {
 		applied, err := r.isApplied(ctx, table, migration.Version)
@@ -146,9 +205,12 @@ func (r *MigrationRunner) Up(ctx context.Context, migrations []Migration) error 
 	return nil
 }
 
-func (r *MigrationRunner) Down(ctx context.Context, migrations []Migration, steps int) error {
+func (r *MigrationRunner) Down(ctx context.Context, migrations []Migration, steps int) (resultErr error) {
 	if r == nil || r.DB == nil {
 		return fmt.Errorf("migration runner requires a database")
+	}
+	if err := r.validateDialect(); err != nil {
+		return err
 	}
 	if steps <= 0 {
 		return nil
@@ -170,10 +232,15 @@ func (r *MigrationRunner) Down(ctx context.Context, migrations []Migration, step
 	if err := r.ensureLockTable(ctx, lockTable); err != nil {
 		return err
 	}
-	if err := r.acquireLock(ctx, lockTable); err != nil {
+	owner, err := r.acquireLock(ctx, lockTable)
+	if err != nil {
 		return err
 	}
-	defer r.releaseLock(context.Background(), lockTable)
+	defer func() {
+		if err := r.releaseLockBounded(lockTable, owner); resultErr == nil && err != nil {
+			resultErr = err
+		}
+	}()
 
 	latest, err := r.latestApplied(ctx, table, steps)
 	if err != nil {
@@ -198,9 +265,15 @@ func (r *MigrationRunner) Down(ctx context.Context, migrations []Migration, step
 	return nil
 }
 
+// ForceUnlock is an unconditional operator recovery action. It snapshots the
+// current owner and deletes only that owner, so a concurrently replaced lock
+// is preserved. Callers decide whether a lock is stale before invoking it.
 func (r *MigrationRunner) ForceUnlock(ctx context.Context) error {
 	if r == nil || r.DB == nil {
 		return fmt.Errorf("migration runner requires a database")
+	}
+	if err := r.validateDialect(); err != nil {
+		return err
 	}
 	lockTable := r.lockTable()
 	if err := validateMigrationTableName(lockTable); err != nil {
@@ -209,7 +282,21 @@ func (r *MigrationRunner) ForceUnlock(ctx context.Context) error {
 	if err := r.ensureLockTable(ctx, lockTable); err != nil {
 		return err
 	}
-	r.releaseLock(ctx, lockTable)
+
+	query, err := r.rebind(fmt.Sprintf("SELECT owner FROM %s WHERE name = ?", lockTable))
+	if err != nil {
+		return err
+	}
+	var owner string
+	if err := r.DB.QueryRowContext(ctx, query, defaultMigrationLockName).Scan(&owner); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("read migration lock owner: %w", err)
+	}
+	if err := r.releaseLock(ctx, lockTable, owner); err != nil {
+		return fmt.Errorf("force unlock migration lock: %w", err)
+	}
 	return nil
 }
 
@@ -236,42 +323,127 @@ func (r *MigrationRunner) lockTable() string {
 	return defaultMigrationLockTable
 }
 
+func (r *MigrationRunner) validateDialect() error {
+	_, err := r.Dialect.Rebind("")
+	return err
+}
+
+func (r *MigrationRunner) rebind(query string) (string, error) {
+	return r.Dialect.Rebind(query)
+}
+
+func (r *MigrationRunner) releaseTimeout() time.Duration {
+	if r.ReleaseTimeout > 0 {
+		return r.ReleaseTimeout
+	}
+	return defaultMigrationReleaseTimeout
+}
+
 func (r *MigrationRunner) ensureTable(ctx context.Context, table string) error {
+	textType := "TEXT"
+	if r.Dialect == MigrationDialectMySQL {
+		textType = "VARCHAR(255)"
+	}
 	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-version TEXT PRIMARY KEY,
-name TEXT NOT NULL,
+version %s PRIMARY KEY,
+name %s NOT NULL,
 applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-)`, table)
+)`, table, textType, textType)
 	_, err := r.DB.ExecContext(ctx, query)
 	return err
 }
 
 func (r *MigrationRunner) ensureLockTable(ctx context.Context, table string) error {
+	textType := "TEXT"
+	if r.Dialect == MigrationDialectMySQL {
+		textType = "VARCHAR(255)"
+	}
 	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-name TEXT PRIMARY KEY,
+name %s PRIMARY KEY,
+owner %s NOT NULL,
 locked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-)`, table)
-	_, err := r.DB.ExecContext(ctx, query)
-	return err
+)`, table, textType, textType)
+	if _, err := r.DB.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	if r.lockTableHasOwner(ctx, table) {
+		return nil
+	}
+	alter := fmt.Sprintf("ALTER TABLE %s ADD COLUMN owner %s NOT NULL DEFAULT '%s'", table, textType, legacyMigrationLockOwner)
+	_, alterErr := r.DB.ExecContext(ctx, alter)
+	if r.lockTableHasOwner(ctx, table) {
+		return nil
+	}
+	if alterErr != nil {
+		return fmt.Errorf("add migration lock owner column: %w", alterErr)
+	}
+	return fmt.Errorf("add migration lock owner column: owner column is unavailable")
 }
 
-func (r *MigrationRunner) acquireLock(ctx context.Context, table string) error {
-	query := fmt.Sprintf("INSERT INTO %s (name) VALUES (?)", table)
-	if _, err := r.DB.ExecContext(ctx, query, defaultMigrationLockName); err != nil {
-		return fmt.Errorf("migration lock is already held: %w", err)
+func (r *MigrationRunner) lockTableHasOwner(ctx context.Context, table string) bool {
+	rows, err := r.DB.QueryContext(ctx, fmt.Sprintf("SELECT owner FROM %s WHERE 1 = 0", table))
+	if err != nil {
+		return false
+	}
+	_ = rows.Close()
+	return true
+}
+
+func (r *MigrationRunner) acquireLock(ctx context.Context, table string) (string, error) {
+	owner, err := newMigrationLockOwner()
+	if err != nil {
+		return "", err
+	}
+	query, err := r.rebind(fmt.Sprintf("INSERT INTO %s (name, owner) VALUES (?, ?)", table))
+	if err != nil {
+		return "", err
+	}
+	if _, err := r.DB.ExecContext(ctx, query, defaultMigrationLockName, owner); err != nil {
+		return "", fmt.Errorf("migration lock is already held: %w", err)
+	}
+	return owner, nil
+}
+
+func newMigrationLockOwner() (string, error) {
+	var token [32]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("generate migration lock owner: %w", err)
+	}
+	return hex.EncodeToString(token[:]), nil
+}
+
+func (r *MigrationRunner) releaseLockBounded(table, owner string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), r.releaseTimeout())
+	defer cancel()
+	return r.releaseLock(ctx, table, owner)
+}
+
+func (r *MigrationRunner) releaseLock(ctx context.Context, table, owner string) error {
+	query, err := r.rebind(fmt.Sprintf("DELETE FROM %s WHERE name = ? AND owner = ?", table))
+	if err != nil {
+		return err
+	}
+	result, err := r.DB.ExecContext(ctx, query, defaultMigrationLockName, owner)
+	if err != nil {
+		return fmt.Errorf("release migration lock: %w", err)
+	}
+	released, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect migration lock release: %w", err)
+	}
+	if released != 1 {
+		return fmt.Errorf("%w: lock %q is not owned by %q", ErrMigrationLockOwnerMismatch, defaultMigrationLockName, owner)
 	}
 	return nil
 }
 
-func (r *MigrationRunner) releaseLock(ctx context.Context, table string) {
-	query := fmt.Sprintf("DELETE FROM %s WHERE name = ?", table)
-	_, _ = r.DB.ExecContext(ctx, query, defaultMigrationLockName)
-}
-
 func (r *MigrationRunner) isApplied(ctx context.Context, table string, version string) (bool, error) {
 	var existing string
-	query := fmt.Sprintf("SELECT version FROM %s WHERE version = ?", table)
-	err := r.DB.QueryRowContext(ctx, query, version).Scan(&existing)
+	query, err := r.rebind(fmt.Sprintf("SELECT version FROM %s WHERE version = ?", table))
+	if err != nil {
+		return false, err
+	}
+	err = r.DB.QueryRowContext(ctx, query, version).Scan(&existing)
 	if err == nil {
 		return true, nil
 	}
@@ -296,7 +468,10 @@ func (r *MigrationRunner) applyUp(ctx context.Context, table string, migration M
 	if _, err := tx.ExecContext(ctx, migration.UpSQL); err != nil {
 		return fmt.Errorf("apply migration %s_%s: %w", migration.Version, migration.Name, err)
 	}
-	insert := fmt.Sprintf("INSERT INTO %s (version, name) VALUES (?, ?)", table)
+	insert, err := r.rebind(fmt.Sprintf("INSERT INTO %s (version, name) VALUES (?, ?)", table))
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, insert, migration.Version, migration.Name); err != nil {
 		return fmt.Errorf("record migration %s_%s: %w", migration.Version, migration.Name, err)
 	}
@@ -313,7 +488,10 @@ type appliedMigration struct {
 }
 
 func (r *MigrationRunner) latestApplied(ctx context.Context, table string, steps int) ([]appliedMigration, error) {
-	query := fmt.Sprintf("SELECT version, name FROM %s ORDER BY version DESC LIMIT ?", table)
+	query, err := r.rebind(fmt.Sprintf("SELECT version, name FROM %s ORDER BY version DESC LIMIT ?", table))
+	if err != nil {
+		return nil, err
+	}
 	rows, err := r.DB.QueryContext(ctx, query, steps)
 	if err != nil {
 		return nil, err
@@ -349,7 +527,10 @@ func (r *MigrationRunner) applyDown(ctx context.Context, table string, migration
 	if _, err := tx.ExecContext(ctx, migration.DownSQL); err != nil {
 		return fmt.Errorf("rollback migration %s_%s: %w", migration.Version, migration.Name, err)
 	}
-	deleteRecord := fmt.Sprintf("DELETE FROM %s WHERE version = ?", table)
+	deleteRecord, err := r.rebind(fmt.Sprintf("DELETE FROM %s WHERE version = ?", table))
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, deleteRecord, migration.Version); err != nil {
 		return fmt.Errorf("remove migration record %s_%s: %w", migration.Version, migration.Name, err)
 	}

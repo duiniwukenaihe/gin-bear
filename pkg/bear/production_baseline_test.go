@@ -1430,6 +1430,7 @@ func TestGenerateOpenAPIIncludesJWTSecurityScheme(t *testing.T) {
 	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	app := Ignite(cfg)
+	app.Attach(NewAuthFairing())
 	app.Mount("/api", &openAPITestController{})
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("apply all: %v", err)
@@ -1468,6 +1469,7 @@ func TestGenerateOpenAPIMarksPublicPathsWithoutSecurity(t *testing.T) {
 	cfg.Auth.PublicPaths = stringSlicePointer("/api/public/*")
 
 	app := Ignite(cfg)
+	app.Attach(NewAuthFairing())
 	app.Mount("/api", &openAPIPublicTestController{})
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("apply all: %v", err)
@@ -1505,6 +1507,7 @@ func TestGenerateOpenAPIIncludesStandardErrorResponses(t *testing.T) {
 	cfg.Auth.PublicPaths = stringSlicePointer("/api/public/*")
 
 	app := Ignite(cfg)
+	app.Attach(NewAuthFairing())
 	app.Mount("/api", &openAPIPublicTestController{})
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("apply all: %v", err)
@@ -2000,7 +2003,7 @@ func TestMigrationRunnerUsesExecutionLock(t *testing.T) {
 	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks"); err != nil {
 		t.Fatalf("ensure lock table: %v", err)
 	}
-	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name) VALUES (?)", defaultMigrationLockName); err != nil {
+	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name, owner) VALUES (?, ?)", defaultMigrationLockName, "held-owner"); err != nil {
 		t.Fatalf("insert held lock: %v", err)
 	}
 
@@ -2021,7 +2024,7 @@ func TestMigrationRunnerForceUnlockReleasesHeldLock(t *testing.T) {
 	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks"); err != nil {
 		t.Fatalf("ensure lock table: %v", err)
 	}
-	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name) VALUES (?)", defaultMigrationLockName); err != nil {
+	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name, owner) VALUES (?, ?)", defaultMigrationLockName, "held-owner"); err != nil {
 		t.Fatalf("insert held lock: %v", err)
 	}
 

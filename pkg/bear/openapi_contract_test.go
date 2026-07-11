@@ -53,6 +53,7 @@ func TestGenerateOpenAPIProducesStrictContract(t *testing.T) {
 	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 	cfg.Auth.PublicPaths = stringSlicePointer("/api/public/*")
 	app := Ignite(cfg)
+	app.Attach(NewAuthFairing())
 	app.Mount("/api", &contractController{})
 	requireNoError(t, app.ApplyAll(context.Background()))
 
