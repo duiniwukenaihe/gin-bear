@@ -67,6 +67,11 @@ type signalOrderHandler struct {
 	serveBeforeSignal *atomic.Bool
 }
 
+type messageCountHandler struct {
+	message string
+	count   *atomic.Int32
+}
+
 func (*signalOrderHandler) Enabled(context.Context, slog.Level) bool { return true }
 func (h *signalOrderHandler) Handle(_ context.Context, record slog.Record) error {
 	if record.Message == "WhiteBear is emerging from ice" && !h.registered.Load() {
@@ -76,6 +81,16 @@ func (h *signalOrderHandler) Handle(_ context.Context, record slog.Record) error
 }
 func (h *signalOrderHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *signalOrderHandler) WithGroup(string) slog.Handler      { return h }
+
+func (*messageCountHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *messageCountHandler) Handle(_ context.Context, record slog.Record) error {
+	if record.Message == h.message {
+		h.count.Add(1)
+	}
+	return nil
+}
+func (h *messageCountHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *messageCountHandler) WithGroup(string) slog.Handler      { return h }
 
 func (b *countedLifecycleBean) Name() string { return b.name }
 func (b *countedLifecycleBean) Init(context.Context) error {
@@ -122,6 +137,53 @@ func TestDefaultRuntimeFacadeIsPublishedAsOneSnapshot(t *testing.T) {
 	wg.Wait()
 }
 
+func TestGetInjectorBootstrapCannotOverwriteConcurrentIgnite(t *testing.T) {
+	defaultFacade.Store(nil)
+	bootstrapRead := make(chan struct{})
+	releaseBootstrap := make(chan struct{})
+	result := make(chan *BeanFactory, 1)
+
+	go func() {
+		result <- getInjector(func() {
+			close(bootstrapRead)
+			<-releaseBootstrap
+		})
+	}()
+
+	<-bootstrapRead
+	runtime := newRuntime(NewSysConfig())
+	publishDefaultRuntime(runtime)
+	close(releaseBootstrap)
+
+	if got := <-result; got != runtime.Container {
+		t.Fatalf("GetInjector() = %p, want concurrently published runtime container %p", got, runtime.Container)
+	}
+	facade := loadDefaultFacade()
+	if facade == nil || facade.runtime != runtime || facade.injector != runtime.Container || facade.logger != runtime.Logger {
+		t.Fatalf("facade = %#v, want coherent concurrently published runtime", facade)
+	}
+}
+
+func TestGetInjectorPreservesLoggerOnlyLegacyFacade(t *testing.T) {
+	logger := slog.New(&messageCountHandler{message: "unused", count: &atomic.Int32{}})
+	defaultFacade.Store(&legacyFacade{logger: logger})
+	result := make(chan *BeanFactory, 1)
+	go func() { result <- GetInjector() }()
+
+	select {
+	case got := <-result:
+		if got != bootstrapInjector {
+			t.Fatalf("GetInjector() = %p, want bootstrap injector %p", got, bootstrapInjector)
+		}
+		facade := loadDefaultFacade()
+		if facade == nil || facade.injector != bootstrapInjector || facade.logger != logger {
+			t.Fatalf("facade = %#v, want logger preserved with bootstrap injector", facade)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("GetInjector blocked with a logger-only legacy facade")
+	}
+}
+
 func TestResponderFairingsUseOwningRuntime(t *testing.T) {
 	a := Ignite(NewSysConfig())
 	a.Attach(&runtimeResponseFairing{value: "runtime-a"})
@@ -134,6 +196,54 @@ func TestResponderFairingsUseOwningRuntime(t *testing.T) {
 	a.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/value", nil))
 	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != `"runtime-a"` {
 		t.Fatalf("app a response = %d %s, want its own response fairing", response.Code, response.Body.String())
+	}
+}
+
+func TestAuthFairingUsesOwningRuntimePublicPaths(t *testing.T) {
+	aConfig := NewSysConfig()
+	aConfig.Auth.PublicPaths = []string{"/a-only/*"}
+	a := Ignite(aConfig)
+	a.Attach(NewAuthFairing())
+	a.Handle(http.MethodGet, "/a-only/ping", func() (string, error) { return "public-a", nil })
+	a.Handle(http.MethodGet, "/shared", func() (string, error) { return "private-a", nil })
+
+	bConfig := NewSysConfig()
+	bConfig.Auth.PublicPaths = []string{"/shared"}
+	Ignite(bConfig)
+
+	publicResponse := httptest.NewRecorder()
+	a.ServeHTTP(publicResponse, httptest.NewRequest(http.MethodGet, "/a-only/ping", nil))
+	if publicResponse.Code != http.StatusOK {
+		t.Fatalf("app a public status = %d body = %s, want app a public policy", publicResponse.Code, publicResponse.Body.String())
+	}
+
+	response := httptest.NewRecorder()
+	a.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/shared", nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("app a status = %d body = %s, want authentication rejection from app a policy", response.Code, response.Body.String())
+	}
+}
+
+func TestResponderErrorsUseOwningRuntimeLogger(t *testing.T) {
+	var aCount atomic.Int32
+	var bCount atomic.Int32
+	a := Ignite(NewSysConfig())
+	a.runtime.Logger = slog.New(&messageCountHandler{message: "Handler execution failed", count: &aCount})
+	a.Handle(http.MethodGet, "/fails", func() (string, error) {
+		return "", errors.New("failed")
+	})
+
+	b := Ignite(NewSysConfig())
+	b.runtime.Logger = slog.New(&messageCountHandler{message: "Handler execution failed", count: &bCount})
+	publishDefaultRuntime(b.runtime)
+
+	response := httptest.NewRecorder()
+	a.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/fails", nil))
+	if got := aCount.Load(); got != 1 {
+		t.Fatalf("app a handler error logs = %d, want 1", got)
+	}
+	if got := bCount.Load(); got != 0 {
+		t.Fatalf("app b handler error logs = %d, want 0", got)
 	}
 }
 
@@ -287,6 +397,53 @@ func TestLifecycleRemovalAfterStartStillStopsStartedInstance(t *testing.T) {
 	}
 	if component.starts != 1 || component.stops != 1 {
 		t.Fatalf("removed component starts/stops = %d/%d, want 1/1", component.starts, component.stops)
+	}
+}
+
+func TestBeanFactorySerializesMutationWithLifecycleTracking(t *testing.T) {
+	lifecycle := newLifecycle()
+	container := NewBeanFactory()
+	setEntered := make(chan struct{})
+	releaseSet := make(chan struct{})
+	container.onSet = func(beanType reflect.Type, bean any) {
+		close(setEntered)
+		<-releaseSet
+		lifecycle.setBean(beanType, bean)
+	}
+	container.onRemove = lifecycle.removeBean
+	component := &countedLifecycleBean{name: "removed-during-set"}
+
+	setDone := make(chan struct{})
+	go func() {
+		container.Set(component)
+		close(setDone)
+	}()
+	<-setEntered
+
+	removeDone := make(chan struct{})
+	go func() {
+		container.Remove(reflect.TypeOf(component))
+		close(removeDone)
+	}()
+	select {
+	case <-removeDone:
+		close(releaseSet)
+		<-setDone
+		t.Fatal("Remove completed while Set lifecycle tracking was still pending")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(releaseSet)
+	<-setDone
+	<-removeDone
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if component.starts != 0 || component.stops != 0 {
+		t.Fatalf("removed component starts/stops = %d/%d, want 0/0", component.starts, component.stops)
 	}
 }
 

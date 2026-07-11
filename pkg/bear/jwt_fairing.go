@@ -19,7 +19,7 @@ func NewAuthFairing() *AuthFairing {
 
 func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 	path := ctx.Request.URL.Path
-	if isPublicAuthPath(path) {
+	if isPublicAuthPathForContext(ctx, path) {
 		return nil
 	}
 
@@ -55,12 +55,25 @@ func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 	return nil
 }
 
+func isPublicAuthPathForContext(ctx *gin.Context, path string) bool {
+	if runtimeValue, exists := ctx.Get(runtimeContextKey); exists {
+		if runtime, ok := runtimeValue.(*Runtime); ok && runtime != nil {
+			return isPublicAuthPathForConfig(path, runtime.Config)
+		}
+		return false
+	}
+	return isPublicAuthPath(path)
+}
+
 func (f *AuthFairing) Name() string {
 	return "AuthFairing"
 }
 
 func isPublicAuthPath(path string) bool {
-	config := GetByType[*SysConfig]()
+	return isPublicAuthPathForConfig(path, GetByType[*SysConfig]())
+}
+
+func isPublicAuthPathForConfig(path string, config *SysConfig) bool {
 	if config == nil || config.Auth == nil {
 		return false
 	}

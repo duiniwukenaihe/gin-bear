@@ -153,6 +153,7 @@ func Ignite(args ...any) *Bear {
 	configureGinRuntime(b, config)
 
 	// 注入底座中间件
+	b.Use(runtimeOwnershipMiddleware(runtime))
 	b.Use(RequestIDMiddleware())
 	b.Use(runtimePerformanceMiddleware(runtime))
 	b.Use(runtimeRecoveryMiddleware(runtime))

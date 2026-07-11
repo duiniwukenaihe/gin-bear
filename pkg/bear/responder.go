@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -346,7 +345,7 @@ func handleResults(ctx *gin.Context, results []reflect.Value, owner *Bear) {
 	if results[lastIdx].Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
 		if !results[lastIdx].IsNil() {
 			err := results[lastIdx].Interface().(error)
-			handleError(ctx, err)
+			handleError(ctx, err, owner)
 			return
 		}
 		// 如果 error 为 nil，则处理前面的返回值
@@ -406,13 +405,17 @@ func handleSuccess(ctx *gin.Context, result interface{}, owner *Bear) {
 	ctx.JSON(200, finalResult)
 }
 
-func handleError(ctx *gin.Context, err error) {
+func handleError(ctx *gin.Context, err error, owner *Bear) {
 	msg := "Internal server error"
 	status := 500
 	code := 500
 
 	// 记录 handler 执行失败日志
-	slog.ErrorContext(ctx.Request.Context(), "Handler execution failed",
+	logger := legacyLogger()
+	if owner != nil && owner.runtime != nil && owner.runtime.Logger != nil {
+		logger = owner.runtime.Logger
+	}
+	logger.ErrorContext(ctx.Request.Context(), "Handler execution failed",
 		"error", err,
 		"path", ctx.Request.URL.Path,
 		"method", ctx.Request.Method,

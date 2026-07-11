@@ -30,6 +30,8 @@ type legacyFacade struct {
 
 var defaultFacade atomic.Pointer[legacyFacade]
 
+const runtimeContextKey = "bear_runtime"
+
 func newRuntime(config *SysConfig) *Runtime {
 	lifecycle := newLifecycle()
 	container := NewBeanFactory()
@@ -66,6 +68,13 @@ func currentDefaultRuntime() *Runtime {
 		return nil
 	}
 	return facade.runtime
+}
+
+func runtimeOwnershipMiddleware(runtime *Runtime) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		ctx.Set(runtimeContextKey, runtime)
+		ctx.Next()
+	}
 }
 
 func updateDefaultFacade(update func(legacyFacade) legacyFacade) *legacyFacade {

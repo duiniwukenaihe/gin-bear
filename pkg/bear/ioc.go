@@ -32,11 +32,28 @@ func RegisterStaticInjector(name string, injector StaticInjector) {
 
 // GetInjector 获取单例注入器
 func GetInjector() *BeanFactory {
-	if facade := loadDefaultFacade(); facade != nil && facade.injector != nil {
-		return facade.injector
+	return getInjector(nil)
+}
+
+func getInjector(beforeBootstrapPublish func()) *BeanFactory {
+	for {
+		facade := loadDefaultFacade()
+		if facade != nil && facade.injector != nil {
+			return facade.injector
+		}
+		if beforeBootstrapPublish != nil {
+			beforeBootstrapPublish()
+			beforeBootstrapPublish = nil
+		}
+		var bootstrapFacade legacyFacade
+		if facade != nil {
+			bootstrapFacade = *facade
+		}
+		bootstrapFacade.injector = bootstrapInjector
+		if defaultFacade.CompareAndSwap(facade, &bootstrapFacade) {
+			return bootstrapInjector
+		}
 	}
-	setDefaultInjector(bootstrapInjector)
-	return bootstrapInjector
 }
 
 func setDefaultInjector(factory *BeanFactory) {
@@ -71,12 +88,12 @@ func (f *BeanFactory) Set(bean any) {
 	}
 	v := reflect.ValueOf(bean)
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	if _, exists := f.beans[v.Type()]; !exists {
 		f.order = append(f.order, v.Type())
 	}
 	f.beans[v.Type()] = bean
 	onSet := f.onSet
-	f.mu.Unlock()
 	if onSet != nil {
 		onSet(v.Type(), bean)
 	}
@@ -92,12 +109,12 @@ func (f *BeanFactory) SetWithInterface(ifacePtr any, bean any) {
 		return
 	}
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	if _, exists := f.beans[t]; !exists {
 		f.order = append(f.order, t)
 	}
 	f.beans[t] = bean
 	onSet := f.onSet
-	f.mu.Unlock()
 	if onSet != nil {
 		onSet(t, bean)
 	}
@@ -106,6 +123,7 @@ func (f *BeanFactory) SetWithInterface(ifacePtr any, bean any) {
 // Remove 移除一个 Bean
 func (f *BeanFactory) Remove(t reflect.Type) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	delete(f.beans, t)
 	for i, registeredType := range f.order {
 		if registeredType == t {
@@ -114,7 +132,6 @@ func (f *BeanFactory) Remove(t reflect.Type) {
 		}
 	}
 	onRemove := f.onRemove
-	f.mu.Unlock()
 	if onRemove != nil {
 		onRemove(t)
 	}
