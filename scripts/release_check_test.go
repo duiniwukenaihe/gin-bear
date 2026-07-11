@@ -850,6 +850,11 @@ func TestAPICompatibilityGateRejectsWrongControlledAPIDiffIdentity(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			directory, bin := fakeAPICompatibilityDirectory(t)
+			metadata := filepath.Join(directory, "metadata.txt")
+			apidiffPath, err := filepath.EvalSymlinks(filepath.Join(bin, "apidiff"))
+			if err != nil {
+				t.Fatal(err)
+			}
 			command := exec.Command("./check-api-compat.sh")
 			command.Dir = directory
 			command.Env = append(os.Environ(),
@@ -858,6 +863,7 @@ func TestAPICompatibilityGateRejectsWrongControlledAPIDiffIdentity(t *testing.T)
 				"FAKE_APIDIFF_BUILD_INFO="+test.buildInfo,
 				"APIDIFF_BIN="+filepath.Join(bin, "apidiff"),
 				"APIDIFF_EXPECTED_SHA256="+test.checksum(t, bin),
+				"API_COMPAT_METADATA="+metadata,
 			)
 			output, err := command.CombinedOutput()
 			if err == nil {
@@ -865,6 +871,20 @@ func TestAPICompatibilityGateRejectsWrongControlledAPIDiffIdentity(t *testing.T)
 			}
 			if !strings.Contains(string(output), test.match) {
 				t.Fatalf("APIDIFF_BIN rejection missing %q:\n%s", test.match, output)
+			}
+			evidence := readTestFile(t, metadata)
+			for _, want := range []string{
+				"api_compat_network=offline",
+				"apidiff_source=controlled-path",
+				"apidiff_path=" + apidiffPath,
+				"apidiff_sha256=" + fakeAPIDiffSHA256(t, bin),
+				"apidiff_expected_sha256=" + test.checksum(t, bin),
+				"apidiff_build_path=golang.org/x/exp/cmd/apidiff",
+				"api_compat_failure_reason=" + test.match,
+			} {
+				if !strings.Contains(evidence, want) {
+					t.Fatalf("failed APIDIFF_BIN identity metadata missing %q:\n%s", want, evidence)
+				}
 			}
 		})
 	}

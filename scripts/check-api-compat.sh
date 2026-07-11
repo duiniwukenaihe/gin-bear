@@ -49,74 +49,8 @@ apidiff_build_path="not-applicable"
 apidiff_build_module="not-applicable"
 apidiff_build_version="not-applicable"
 apidiff_build_commit="not-applicable"
-if [[ "${APIDIFF_BIN+x}" == "x" ]]; then
-	if [[ -z "${APIDIFF_BIN}" ]]; then
-		printf 'APIDIFF_BIN must not be empty when explicitly set\n' >&2
-		exit 1
-	fi
-	if [[ "${APIDIFF_BIN}" != /* ]]; then
-		printf 'APIDIFF_BIN must be an absolute path: %s\n' "${APIDIFF_BIN}" >&2
-		exit 1
-	fi
-	if [[ -L "${APIDIFF_BIN}" || ! -f "${APIDIFF_BIN}" || ! -x "${APIDIFF_BIN}" ]]; then
-		printf 'APIDIFF_BIN must name an executable file: %s\n' "${APIDIFF_BIN}" >&2
-		exit 1
-	fi
-	if [[ -z "${APIDIFF_EXPECTED_SHA256:-}" ]]; then
-		printf 'APIDIFF_EXPECTED_SHA256 is required with APIDIFF_BIN\n' >&2
-		exit 1
-	fi
-	if [[ ! "${APIDIFF_EXPECTED_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-		printf 'APIDIFF_EXPECTED_SHA256 must be 64 lowercase hexadecimal characters\n' >&2
-		exit 1
-	fi
-	apidiff_path="$(cd "$(dirname "${APIDIFF_BIN}")" && pwd -P)/$(basename "${APIDIFF_BIN}")"
-	apidiff_expected_sha256="${APIDIFF_EXPECTED_SHA256}"
-	if command -v sha256sum >/dev/null 2>&1; then
-		apidiff_sha256="$(sha256sum "${apidiff_path}" | awk '{print $1}')"
-	else
-		apidiff_sha256="$(shasum -a 256 "${apidiff_path}" | awk '{print $1}')"
-	fi
-	if [[ "${apidiff_sha256}" != "${apidiff_expected_sha256}" ]]; then
-		printf 'APIDIFF_BIN SHA256 mismatch: got %s, want %s\n' "${apidiff_sha256}" "${apidiff_expected_sha256}" >&2
-		exit 1
-	fi
-	if ! build_info="$(go version -m "${apidiff_path}" 2>/dev/null)" || [[ -z "${build_info}" ]]; then
-		printf 'APIDIFF_BIN identity unavailable from go version -m: %s\n' "${apidiff_path}" >&2
-		exit 1
-	fi
-	apidiff_go_version_m="${build_info//$'\n'/; }"
-	apidiff_build_path="$(awk -F '\t' '$2 == "path" { print $3; exit }' <<<"${build_info}")"
-	apidiff_build_module="$(awk -F '\t' '$2 == "mod" { print $3; exit }' <<<"${build_info}")"
-	apidiff_build_version="$(awk -F '\t' '$2 == "mod" { print $4; exit }' <<<"${build_info}")"
-	if [[ "${apidiff_build_version}" == *-* ]]; then
-		apidiff_build_commit="${apidiff_build_version##*-}"
-	fi
-	if [[ "${apidiff_build_path}" != "${apidiff_expected_build_path}" ]]; then
-		printf 'APIDIFF_BIN build path mismatch: got %s, want %s\n' "${apidiff_build_path}" "${apidiff_expected_build_path}" >&2
-		exit 1
-	fi
-	if [[ "${apidiff_build_module}" != "${apidiff_expected_build_module}" ]]; then
-		printf 'APIDIFF_BIN build module mismatch: got %s, want %s\n' "${apidiff_build_module}" "${apidiff_expected_build_module}" >&2
-		exit 1
-	fi
-	if [[ "${apidiff_build_version}" != "${apidiff_expected_build_version}" ]]; then
-		printf 'APIDIFF_BIN build version mismatch: got %s, want %s\n' "${apidiff_build_version}" "${apidiff_expected_build_version}" >&2
-		exit 1
-	fi
-	if [[ "${apidiff_build_commit}" != "${apidiff_expected_build_commit}" ]]; then
-		printf 'APIDIFF_BIN build commit mismatch: got %s, want %s\n' "${apidiff_build_commit}" "${apidiff_expected_build_commit}" >&2
-		exit 1
-	fi
-	apidiff_command=("${apidiff_path}")
-	apidiff_source="controlled-path"
-elif [[ "${network_flag}" == "1" ]]; then
-	apidiff_command=(go run "${apidiff}")
-	apidiff_source="pinned-go-run"
-else
-	printf 'APIDIFF_BIN is required for offline API compatibility checks; set API_COMPAT_ALLOW_NETWORK=1 for the pinned fallback\n' >&2
-	exit 1
-fi
+apidiff_source="not-applicable"
+api_compat_failure_reason=""
 
 record_mode() {
 	local line
@@ -143,7 +77,84 @@ record_mode() {
 			printf '%s\n' "${line}" >>"${API_COMPAT_METADATA}"
 		fi
 	done
+	if [[ -n "${api_compat_failure_reason}" ]]; then
+		printf 'api_compat_failure_reason=%s\n' "${api_compat_failure_reason}"
+		if [[ -n "${API_COMPAT_METADATA:-}" ]]; then
+			printf 'api_compat_failure_reason=%s\n' "${api_compat_failure_reason}" >>"${API_COMPAT_METADATA}"
+		fi
+	fi
 }
+
+reject_controlled_apidiff() {
+	api_compat_failure_reason="$1"
+	record_mode
+	printf '%s\n' "${api_compat_failure_reason}" >&2
+	exit 1
+}
+
+if [[ "${APIDIFF_BIN+x}" == "x" ]]; then
+	if [[ -z "${APIDIFF_BIN}" ]]; then
+		printf 'APIDIFF_BIN must not be empty when explicitly set\n' >&2
+		exit 1
+	fi
+	if [[ "${APIDIFF_BIN}" != /* ]]; then
+		printf 'APIDIFF_BIN must be an absolute path: %s\n' "${APIDIFF_BIN}" >&2
+		exit 1
+	fi
+	if [[ -L "${APIDIFF_BIN}" || ! -f "${APIDIFF_BIN}" || ! -x "${APIDIFF_BIN}" ]]; then
+		printf 'APIDIFF_BIN must name an executable file: %s\n' "${APIDIFF_BIN}" >&2
+		exit 1
+	fi
+	if [[ -z "${APIDIFF_EXPECTED_SHA256:-}" ]]; then
+		printf 'APIDIFF_EXPECTED_SHA256 is required with APIDIFF_BIN\n' >&2
+		exit 1
+	fi
+	if [[ ! "${APIDIFF_EXPECTED_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+		printf 'APIDIFF_EXPECTED_SHA256 must be 64 lowercase hexadecimal characters\n' >&2
+		exit 1
+	fi
+	apidiff_path="$(cd "$(dirname "${APIDIFF_BIN}")" && pwd -P)/$(basename "${APIDIFF_BIN}")"
+	apidiff_source="controlled-path"
+	apidiff_expected_sha256="${APIDIFF_EXPECTED_SHA256}"
+	if command -v sha256sum >/dev/null 2>&1; then
+		apidiff_sha256="$(sha256sum "${apidiff_path}" | awk '{print $1}')"
+	else
+		apidiff_sha256="$(shasum -a 256 "${apidiff_path}" | awk '{print $1}')"
+	fi
+	if ! build_info="$(go version -m "${apidiff_path}" 2>/dev/null)" || [[ -z "${build_info}" ]]; then
+		reject_controlled_apidiff "APIDIFF_BIN identity unavailable from go version -m: ${apidiff_path}"
+	fi
+	apidiff_go_version_m="${build_info//$'\n'/; }"
+	apidiff_build_path="$(awk -F '\t' '$2 == "path" { print $3; exit }' <<<"${build_info}")"
+	apidiff_build_module="$(awk -F '\t' '$2 == "mod" { print $3; exit }' <<<"${build_info}")"
+	apidiff_build_version="$(awk -F '\t' '$2 == "mod" { print $4; exit }' <<<"${build_info}")"
+	if [[ "${apidiff_build_version}" == *-* ]]; then
+		apidiff_build_commit="${apidiff_build_version##*-}"
+	fi
+	if [[ "${apidiff_sha256}" != "${apidiff_expected_sha256}" ]]; then
+		reject_controlled_apidiff "APIDIFF_BIN SHA256 mismatch: got ${apidiff_sha256}, want ${apidiff_expected_sha256}"
+	fi
+	if [[ "${apidiff_build_path}" != "${apidiff_expected_build_path}" ]]; then
+		reject_controlled_apidiff "APIDIFF_BIN build path mismatch: got ${apidiff_build_path}, want ${apidiff_expected_build_path}"
+	fi
+	if [[ "${apidiff_build_module}" != "${apidiff_expected_build_module}" ]]; then
+		reject_controlled_apidiff "APIDIFF_BIN build module mismatch: got ${apidiff_build_module}, want ${apidiff_expected_build_module}"
+	fi
+	if [[ "${apidiff_build_version}" != "${apidiff_expected_build_version}" ]]; then
+		reject_controlled_apidiff "APIDIFF_BIN build version mismatch: got ${apidiff_build_version}, want ${apidiff_expected_build_version}"
+	fi
+	if [[ "${apidiff_build_commit}" != "${apidiff_expected_build_commit}" ]]; then
+		reject_controlled_apidiff "APIDIFF_BIN build commit mismatch: got ${apidiff_build_commit}, want ${apidiff_expected_build_commit}"
+	fi
+	apidiff_command=("${apidiff_path}")
+elif [[ "${network_flag}" == "1" ]]; then
+	apidiff_command=(go run "${apidiff}")
+	apidiff_source="pinned-go-run"
+else
+	printf 'APIDIFF_BIN is required for offline API compatibility checks; set API_COMPAT_ALLOW_NETWORK=1 for the pinned fallback\n' >&2
+	exit 1
+fi
+
 record_mode
 
 if [[ ! -f "${baseline}" ]]; then
