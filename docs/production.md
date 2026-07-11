@@ -338,14 +338,18 @@ If `Up` did not complete and is safe to run again, remove the dirty history row:
 return runner.ForceMigrationState(ctx, "002", false)
 ```
 
-For non-transactional `Down`, the recovery direction is the inverse because the
-history row describes the pre-Down applied state:
+For non-transactional `Down`, keep the dirty row until the schema has been
+inspected. A driver may report an error after one or more statements in a
+multi-statement `Down` have already executed, so an SQL error does not prove
+that the migration is still fully applied or fully rolled back. After inspection,
+use `ForceMigrationState(ctx, version, true)` if the schema matches the applied
+state, or `ForceMigrationState(ctx, version, false)` if it matches the rolled-back
+state. Repair a partially rolled-back schema manually before choosing either
+state.
 
-- If `Down` SQL failed, the migration is still applied. Restore the dirty row to
-  a clean applied row with `ForceMigrationState(ctx, version, true)`.
-- If `Down` SQL succeeded but deleting the history row failed, the migration is
-  no longer applied. Remove the dirty row with
-  `ForceMigrationState(ctx, version, false)`.
+If all `Down` SQL succeeds but deleting the history row fails, the migration is
+no longer applied; after confirming the schema, remove the dirty row with
+`ForceMigrationState(ctx, version, false)`.
 
 This force operation never executes migration SQL and never decides which
 state the database reached. That decision belongs to the operator. Legacy

@@ -71,6 +71,62 @@ type groupedOpenAPIController struct {
 	summary string
 }
 
+type mountedAuthIsolationController struct {
+	name    string
+	path    string
+	auth    Fairing
+	summary string
+}
+
+type nestedOpenAPIController struct {
+	name       string
+	path       string
+	summary    string
+	fairings   []Fairing
+	buildInner IClass
+}
+
+func (c *nestedOpenAPIController) Name() string { return c.name }
+
+func (c *nestedOpenAPIController) Build(b *Bear) {
+	if c.buildInner == nil {
+		b.Handle(http.MethodGet, c.path, func() string { return c.name })
+		return
+	}
+	b.Handle(http.MethodGet, "/before", func() string { return "before" })
+	b.Group("/inner", c.buildInner)
+	b.Handle(http.MethodGet, "/after", func() string { return "after" })
+}
+
+func (c *nestedOpenAPIController) Interceptors() []Fairing { return c.fairings }
+
+func (c *nestedOpenAPIController) OpenAPI() map[string]OpenAPIInfo {
+	if c.buildInner == nil {
+		return map[string]OpenAPIInfo{c.path: {Summary: c.summary}}
+	}
+	return map[string]OpenAPIInfo{
+		"/before": {Summary: "outer before"},
+		"/after":  {Summary: "outer after"},
+	}
+}
+
+func (c *mountedAuthIsolationController) Name() string { return c.name }
+
+func (c *mountedAuthIsolationController) Build(b *Bear) {
+	b.Handle(http.MethodGet, c.path, func() string { return c.name })
+}
+
+func (c *mountedAuthIsolationController) Interceptors() []Fairing {
+	if c.auth == nil {
+		return nil
+	}
+	return []Fairing{c.auth}
+}
+
+func (c *mountedAuthIsolationController) OpenAPI() map[string]OpenAPIInfo {
+	return map[string]OpenAPIInfo{c.path: {Summary: c.summary}}
+}
+
 func (c *groupedOpenAPIController) Name() string { return c.name }
 
 func (c *groupedOpenAPIController) Build(b *Bear) {
@@ -155,6 +211,138 @@ func TestGenerateOpenAPISecuritySupportsRouteAuthFairing(t *testing.T) {
 	security, ok := privateOp["security"].([]interface{})
 	if !ok || len(security) != 1 {
 		t.Fatalf("route AuthFairing security = %#v, want BearerAuth requirement", privateOp["security"])
+	}
+}
+
+func TestMountIsolatesControllerFairingsAndOpenAPISecurity(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	app := Ignite(cfg)
+	privateController := &mountedAuthIsolationController{
+		name:    "private-controller",
+		path:    "/private",
+		auth:    NewAuthFairing(),
+		summary: "private",
+	}
+	publicController := &mountedAuthIsolationController{
+		name:    "public-controller",
+		path:    "/public",
+		summary: "public",
+	}
+	app.Mount("/api", privateController, publicController)
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("apply mounted controllers: %v", err)
+	}
+
+	privateResponse := httptest.NewRecorder()
+	app.ServeHTTP(privateResponse, httptest.NewRequest(http.MethodGet, "/api/private", nil))
+	if privateResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("private response status = %d, want %d", privateResponse.Code, http.StatusUnauthorized)
+	}
+	publicResponse := httptest.NewRecorder()
+	app.ServeHTTP(publicResponse, httptest.NewRequest(http.MethodGet, "/api/public", nil))
+	if publicResponse.Code != http.StatusOK {
+		t.Fatalf("public response status = %d, want %d; controller fairing leaked: %s", publicResponse.Code, http.StatusOK, publicResponse.Body.String())
+	}
+
+	spec := decodeOpenAPIDocument(t, app)
+	paths := spec["paths"].(map[string]interface{})
+	privateOp := paths["/api/private"].(map[string]interface{})["get"].(map[string]interface{})
+	if security, ok := privateOp["security"].([]interface{}); !ok || len(security) != 1 {
+		t.Fatalf("private OpenAPI security = %#v, want BearerAuth", privateOp["security"])
+	}
+	publicOp := paths["/api/public"].(map[string]interface{})["get"].(map[string]interface{})
+	if _, ok := publicOp["security"]; ok {
+		t.Fatalf("public OpenAPI operation declared security: %#v", publicOp)
+	}
+}
+
+func TestNestedGroupRestoresOpenAPIRegistrationContext(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	app := Ignite(cfg)
+	outerFairing := &BaseFairing{}
+	innerAuth := NewAuthFairing()
+	inner := &nestedOpenAPIController{
+		name:     "inner-controller",
+		path:     "/item",
+		summary:  "inner item",
+		fairings: []Fairing{innerAuth},
+	}
+	outer := &nestedOpenAPIController{
+		name:       "outer-controller",
+		summary:    "outer",
+		fairings:   []Fairing{outerFairing},
+		buildInner: inner,
+	}
+	app.Mount("/api", outer)
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("apply nested controllers: %v", err)
+	}
+
+	wants := []struct {
+		path       string
+		controller IOpenAPI
+		fairings   []Fairing
+	}{
+		{path: "/api/before", controller: outer, fairings: []Fairing{outerFairing}},
+		{path: "/api/inner/item", controller: inner, fairings: []Fairing{outerFairing, innerAuth}},
+		{path: "/api/after", controller: outer, fairings: []Fairing{outerFairing}},
+	}
+	if len(app.routeRegistry) != len(wants) {
+		t.Fatalf("nested route count = %d, want %d", len(app.routeRegistry), len(wants))
+	}
+	for index, want := range wants {
+		metadata, ok := app.openAPIRouteMetadata(app.routeRegistry[index])
+		if !ok {
+			t.Fatalf("nested route %d has no OpenAPI registration metadata", index)
+		}
+		if metadata.fullPath != want.path {
+			t.Fatalf("nested route %d full path = %q, want %q", index, metadata.fullPath, want.path)
+		}
+		if metadata.controller != want.controller {
+			t.Fatalf("nested route %d controller = %T, want %T", index, metadata.controller, want.controller)
+		}
+		if !reflect.DeepEqual(metadata.fairings, want.fairings) {
+			t.Fatalf("nested route %d fairings = %#v, want %#v", index, metadata.fairings, want.fairings)
+		}
+	}
+	innerResponse := httptest.NewRecorder()
+	app.ServeHTTP(innerResponse, httptest.NewRequest(http.MethodGet, "/api/inner/item", nil))
+	if innerResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("inner response status = %d, want %d", innerResponse.Code, http.StatusUnauthorized)
+	}
+	afterResponse := httptest.NewRecorder()
+	app.ServeHTTP(afterResponse, httptest.NewRequest(http.MethodGet, "/api/after", nil))
+	if afterResponse.Code != http.StatusOK {
+		t.Fatalf("outer response after nested group = %d, want %d; inner fairing leaked: %s", afterResponse.Code, http.StatusOK, afterResponse.Body.String())
+	}
+
+	spec := decodeOpenAPIDocument(t, app)
+	paths := spec["paths"].(map[string]interface{})
+	for path, summary := range map[string]string{
+		"/api/before":     "outer before",
+		"/api/inner/item": "inner item",
+		"/api/after":      "outer after",
+	} {
+		op := paths[path].(map[string]interface{})["get"].(map[string]interface{})
+		if got := op["summary"]; got != summary {
+			t.Fatalf("OpenAPI %s summary = %v, want %q", path, got, summary)
+		}
+	}
+	innerOp := paths["/api/inner/item"].(map[string]interface{})["get"].(map[string]interface{})
+	if security, ok := innerOp["security"].([]interface{}); !ok || len(security) != 1 {
+		t.Fatalf("inner OpenAPI security = %#v, want BearerAuth", innerOp["security"])
+	}
+	for _, path := range []string{"/api/before", "/api/after"} {
+		op := paths[path].(map[string]interface{})["get"].(map[string]interface{})
+		if _, ok := op["security"]; ok {
+			t.Fatalf("outer OpenAPI operation %s declared inner security: %#v", path, op)
+		}
 	}
 }
 

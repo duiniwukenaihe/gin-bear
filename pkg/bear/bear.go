@@ -56,30 +56,36 @@ type MountMetadata struct {
 	Classes []IClass
 }
 
+type routeRegistrationContext struct {
+	parent     *routeRegistrationContext
+	group      *gin.RouterGroup
+	groupName  string
+	controller IOpenAPI
+	fairings   []Fairing
+}
+
 var signalNotifyContext = signal.NotifyContext
 var ginRuntimeMu sync.Mutex
 
 // Bear 是核心框架引擎
 type Bear struct {
 	*gin.Engine
-	g                  *gin.RouterGroup
-	exprData           map[string]interface{}
-	currentGroup       string
-	fairingHandler     *FairingHandler
-	routeTree          *RouteTree // 路由树，用于存储路由级别的 Fairing
-	routeRegistry      []RouteMetadata
-	openAPIController  IOpenAPI
-	controllerFairings []Fairing
-	grpcServices       []GRPCService
-	mounts             []MountMetadata
-	modules            []Module
-	runtime            *Runtime
-	applied            atomic.Bool // 增加应用标记
-	pluginDispatcher   *PluginDispatcher
-	pluginManager      *PluginManager
-	pluginMode         bool // 标记当前是否处于插件加载模式
-	metricsRegistered  atomic.Bool
-	tracingRegistered  atomic.Bool
+	g                 *gin.RouterGroup
+	exprData          map[string]interface{}
+	fairingHandler    *FairingHandler
+	routeTree         *RouteTree // 路由树，用于存储路由级别的 Fairing
+	routeRegistry     []RouteMetadata
+	registration      *routeRegistrationContext
+	grpcServices      []GRPCService
+	mounts            []MountMetadata
+	modules           []Module
+	runtime           *Runtime
+	applied           atomic.Bool // 增加应用标记
+	pluginDispatcher  *PluginDispatcher
+	pluginManager     *PluginManager
+	pluginMode        bool // 标记当前是否处于插件加载模式
+	metricsRegistered atomic.Bool
+	tracingRegistered atomic.Bool
 }
 
 // OnShutdown 注册服务关闭时的清理函数
@@ -678,17 +684,26 @@ func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler 
 	}
 	group := b.activeGroup()
 	group.Handle(httpMethod, relativePath, wrapped)
+	registration := b.registration
+	groupName := ""
+	var controller IOpenAPI
+	var controllerFairings []Fairing
+	if registration != nil {
+		groupName = registration.groupName
+		controller = registration.controller
+		controllerFairings = registration.fairings
+	}
 	route := RouteMetadata{
 		Method:      httpMethod,
 		Path:        relativePath,
-		GroupName:   b.currentGroup,
+		GroupName:   groupName,
 		HandlerType: reflect.TypeOf(handler),
 		HandlerName: runtimeFuncName(handler),
 	}
 	b.routeRegistry = append(b.routeRegistry, route)
-	effectiveFairings := append([]Fairing(nil), b.controllerFairings...)
+	effectiveFairings := append([]Fairing(nil), controllerFairings...)
 	effectiveFairings = append(effectiveFairings, routeFairings...)
-	b.setOpenAPIRouteMetadata(route, joinRoutePath(group.BasePath(), relativePath), b.openAPIController, effectiveFairings...)
+	b.setOpenAPIRouteMetadata(route, joinRoutePath(group.BasePath(), relativePath), controller, effectiveFairings...)
 }
 
 func joinRoutePath(basePath, relativePath string) string {
@@ -761,6 +776,9 @@ func (b *Bear) runRequestFairings(ctx *gin.Context, routeFairings []Fairing) err
 }
 
 func (b *Bear) activeGroup() *gin.RouterGroup {
+	if b.registration != nil {
+		return b.registration.group
+	}
 	if b.g != nil {
 		return b.g
 	}
@@ -819,27 +837,9 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 
 	// 3.2 后处理 mounts (包括模块中添加的控制器)
 	for _, m := range b.mounts {
-		b.g = b.Engine.Group(m.Group)
 		for _, class := range m.Classes {
-			b.currentGroup = m.Group
-			b.openAPIController, _ = class.(IOpenAPI)
-			b.controllerFairings = nil
-			// 检查是否有控制器级别的拦截器
-			if inter, ok := class.(IInterceptors); ok {
-				b.controllerFairings = append([]Fairing(nil), inter.Interceptors()...)
-				for _, f := range b.controllerFairings {
-					b.g.Use(func(ctx *gin.Context) {
-						if err := f.OnRequest(ctx); err != nil {
-							WriteError(ctx, err)
-							return
-						}
-						ctx.Next()
-					})
-				}
-			}
-			class.Build(b)
-			b.openAPIController = nil
-			b.controllerFairings = nil
+			group := b.Engine.Group(m.Group)
+			b.buildController(group, m.Group, class)
 		}
 	}
 
@@ -848,81 +848,91 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 
 // Group 创建路由组 (自动感知当前的挂载点)，支持 IClass 接口的 Handler 自动构建路由
 func (b *Bear) Group(relativePath string, classes ...IClass) *gin.RouterGroup {
-	var group *gin.RouterGroup
-	if b.g != nil {
-		group = b.g.Group(relativePath)
-	} else {
-		group = b.Engine.Group(relativePath)
-	}
+	parent := b.activeGroup()
+	group := parent.Group(relativePath)
 
 	// 自动调用 IClass 的 Build 方法构建路由
 	for _, class := range classes {
-		class.Build(b)
+		classGroup := parent.Group(relativePath)
+		b.buildController(classGroup, classGroup.BasePath(), class)
 	}
 
 	return group
 }
 
+func (b *Bear) buildController(group *gin.RouterGroup, groupName string, class IClass) {
+	parent := b.registration
+	fairings := make([]Fairing, 0)
+	if parent != nil {
+		fairings = append(fairings, parent.fairings...)
+	}
+	var ownFairings []Fairing
+	if inter, ok := class.(IInterceptors); ok {
+		ownFairings = append([]Fairing(nil), inter.Interceptors()...)
+		fairings = append(fairings, ownFairings...)
+	}
+	controller, _ := class.(IOpenAPI)
+	registration := &routeRegistrationContext{
+		parent:     parent,
+		group:      group,
+		groupName:  groupName,
+		controller: controller,
+		fairings:   fairings,
+	}
+	b.registration = registration
+	defer func() {
+		b.registration = registration.parent
+	}()
+
+	for _, fairing := range ownFairings {
+		current := fairing
+		group.Use(func(ctx *gin.Context) {
+			if err := current.OnRequest(ctx); err != nil {
+				WriteError(ctx, err)
+				return
+			}
+			ctx.Next()
+		})
+	}
+	class.Build(b)
+}
+
 // POST 注册 POST 路由 (自动感知当前的挂载点)
 func (b *Bear) POST(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if b.g != nil {
-		return b.g.POST(relativePath, handlers...)
-	}
-	return b.Engine.POST(relativePath, handlers...)
+	return b.activeGroup().POST(relativePath, handlers...)
 }
 
 // GET 注册 GET 路由 (自动感知当前的挂载点)
 func (b *Bear) GET(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if b.g != nil {
-		return b.g.GET(relativePath, handlers...)
-	}
-	return b.Engine.GET(relativePath, handlers...)
+	return b.activeGroup().GET(relativePath, handlers...)
 }
 
 // PUT 注册 PUT 路由 (自动感知当前的挂载点)
 func (b *Bear) PUT(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if b.g != nil {
-		return b.g.PUT(relativePath, handlers...)
-	}
-	return b.Engine.PUT(relativePath, handlers...)
+	return b.activeGroup().PUT(relativePath, handlers...)
 }
 
 // DELETE 注册 DELETE 路由 (自动感知当前的挂载点)
 func (b *Bear) DELETE(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if b.g != nil {
-		return b.g.DELETE(relativePath, handlers...)
-	}
-	return b.Engine.DELETE(relativePath, handlers...)
+	return b.activeGroup().DELETE(relativePath, handlers...)
 }
 
 // PATCH 注册 PATCH 路由 (自动感知当前的挂载点)
 func (b *Bear) PATCH(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if b.g != nil {
-		return b.g.PATCH(relativePath, handlers...)
-	}
-	return b.Engine.PATCH(relativePath, handlers...)
+	return b.activeGroup().PATCH(relativePath, handlers...)
 }
 
 // OPTIONS 注册 OPTIONS 路由 (自动感知当前的挂载点)
 func (b *Bear) OPTIONS(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if b.g != nil {
-		return b.g.OPTIONS(relativePath, handlers...)
-	}
-	return b.Engine.OPTIONS(relativePath, handlers...)
+	return b.activeGroup().OPTIONS(relativePath, handlers...)
 }
 
 // HEAD 注册 HEAD 路由 (自动感知当前的挂载点)
 func (b *Bear) HEAD(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if b.g != nil {
-		return b.g.HEAD(relativePath, handlers...)
-	}
-	return b.Engine.HEAD(relativePath, handlers...)
+	return b.activeGroup().HEAD(relativePath, handlers...)
 }
 
 // Any 注册 Any 路由 (自动感知当前的挂载点)
 func (b *Bear) Any(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	if b.g != nil {
-		return b.g.Any(relativePath, handlers...)
-	}
-	return b.Engine.Any(relativePath, handlers...)
+	return b.activeGroup().Any(relativePath, handlers...)
 }

@@ -111,27 +111,41 @@ func TestMySQLApplyDownPersistsDirtyAroundDDL(t *testing.T) {
 	}
 }
 
-func TestMySQLApplyDownDDLFailureDoesNotDeleteDirty(t *testing.T) {
+func TestMySQLApplyDownSQLFailureKeepsDirtyForOperatorSelectedState(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	if err != nil {
 		t.Fatalf("open sqlmock: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	runner := NewMigrationRunnerWithDialect(db, MigrationDialectMySQL)
-	migration := Migration{Version: "003", Name: "broken_down", DownSQL: "DROP TABLE users"}
-	dllErr := errors.New("mysql rollback ddl failed")
+	migration := Migration{
+		Version: "003",
+		Name:    "partially_executed_down",
+		DownSQL: "DROP TABLE users; DROP TABLE audit_logs",
+	}
+	downErr := errors.New("mysql second rollback statement failed")
 
 	mock.ExpectExec("UPDATE schema_migrations SET dirty = TRUE WHERE version = ? AND dirty = FALSE").
 		WithArgs("003").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(migration.DownSQL).WillReturnError(dllErr)
+	mock.ExpectExec(migration.DownSQL).WillReturnError(downErr)
 
 	err = runner.runner.applyDown(context.Background(), defaultMigrationTable, migration, MigrationDialectMySQL)
-	if !errors.Is(err, dllErr) {
-		t.Fatalf("rollback MySQL broken migration error = %v, want DDL cause", err)
+	if !errors.Is(err, downErr) {
+		t.Fatalf("rollback MySQL broken migration error = %v, want SQL cause", err)
 	}
-	if !strings.Contains(err.Error(), `ForceMigrationState(ctx, "003", true)`) {
-		t.Fatalf("rollback MySQL broken migration error = %v, want applied-state recovery guidance", err)
+	for _, guidance := range []string{"may have partially executed", "inspect the schema", "applied true or false"} {
+		if !strings.Contains(err.Error(), guidance) {
+			t.Fatalf("rollback MySQL broken migration error = %v, want guidance %q", err, guidance)
+		}
+	}
+	for _, fixedDirection := range []string{
+		`ForceMigrationState(ctx, "003", true)`,
+		`ForceMigrationState(ctx, "003", false)`,
+	} {
+		if strings.Contains(err.Error(), fixedDirection) {
+			t.Fatalf("rollback MySQL broken migration error fixed recovery direction %q: %v", fixedDirection, err)
+		}
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("dirty row must remain after rollback DDL failure: %v", err)

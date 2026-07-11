@@ -822,7 +822,7 @@ func (r *MigrationRunner) applyDownNonTransactional(ctx context.Context, table s
 		return fmt.Errorf("mark rollback migration %s_%s dirty: clean history row not found", migration.Version, migration.Name)
 	}
 	if _, err := r.DB.ExecContext(ctx, migration.DownSQL); err != nil {
-		return fmt.Errorf("rollback migration %s_%s: %w; Down did not complete, inspect the schema and call ForceMigrationState(ctx, %q, true) to restore the clean applied record", migration.Version, migration.Name, err, migration.Version)
+		return fmt.Errorf("rollback migration %s_%s: %w; Down SQL may have partially executed, inspect the schema, then call ForceMigrationState(ctx, %q, applied) with applied true or false", migration.Version, migration.Name, err, migration.Version)
 	}
 	remove, err := dialect.Rebind(fmt.Sprintf("DELETE FROM %s WHERE version = ? AND dirty = TRUE", table))
 	if err != nil {
