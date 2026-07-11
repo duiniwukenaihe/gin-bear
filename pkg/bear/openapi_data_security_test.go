@@ -37,16 +37,12 @@ type nilOpenAPIProvider struct {
 	summary string
 }
 
-type groupedOpenAPIControllerA struct{}
-
-func (c *groupedOpenAPIControllerA) OpenAPI() map[string]OpenAPIInfo {
-	return map[string]OpenAPIInfo{"/item": {Summary: "group-a"}}
+type groupedOpenAPIController struct {
+	summary string
 }
 
-type groupedOpenAPIControllerB struct{}
-
-func (c *groupedOpenAPIControllerB) OpenAPI() map[string]OpenAPIInfo {
-	return map[string]OpenAPIInfo{"/item": {Summary: "group-b"}}
+func (c *groupedOpenAPIController) OpenAPI() map[string]OpenAPIInfo {
+	return map[string]OpenAPIInfo{"/item": {Summary: c.summary}}
 }
 
 func (p *nilOpenAPIProvider) OpenAPI() map[string]OpenAPIInfo {
@@ -60,6 +56,14 @@ type recursiveOpenAPINode struct {
 }
 
 func recursiveOpenAPIHandler() *recursiveOpenAPINode { return nil }
+
+func TestRouteMetadataRetainsLegacyFiveFieldShape(t *testing.T) {
+	_ = RouteMetadata{http.MethodGet, "/shape", "api", reflect.TypeOf(func() string { return "ok" }), "shapeHandler"}
+	routeType := reflect.TypeOf(RouteMetadata{})
+	if routeType.NumField() != 5 {
+		t.Fatalf("RouteMetadata field count = %d, want 5", routeType.NumField())
+	}
+}
 
 func TestGenerateOpenAPISecurityRequiresActualAuthFairing(t *testing.T) {
 	resetTestInjector()
@@ -101,7 +105,8 @@ func TestGenerateOpenAPISecuritySupportsRouteAuthFairing(t *testing.T) {
 	app.Handle(http.MethodGet, "/public", func() string { return "public" })
 	auth := NewAuthFairing()
 	app.HandleWithFairing(http.MethodGet, "/private", func() string { return "private" }, auth)
-	app.routeRegistry[len(app.routeRegistry)-1].EffectiveFairings = NewRouteFairingMetadata(auth)
+	privateRoute := app.routeRegistry[len(app.routeRegistry)-1]
+	app.setOpenAPIRouteMetadata(privateRoute, "/private", nil, auth)
 
 	spec := decodeOpenAPIDocument(t, app)
 	if _, ok := spec["security"]; ok {
@@ -122,22 +127,22 @@ func TestGenerateOpenAPISecuritySupportsRouteAuthFairing(t *testing.T) {
 func TestGenerateOpenAPIRouteSecurityUsesEffectiveFairingsMetadata(t *testing.T) {
 	app := &Bear{routeRegistry: []RouteMetadata{
 		{
-			Method:            http.MethodGet,
-			Path:              "/public",
-			FullPath:          "/api/public",
-			HandlerType:       reflect.TypeOf(func() string { return "public" }),
-			HandlerName:       "publicHandler",
-			EffectiveFairings: nil,
+			Method:      http.MethodGet,
+			Path:        "/public",
+			GroupName:   "/api",
+			HandlerType: reflect.TypeOf(func() string { return "public" }),
+			HandlerName: "publicHandler",
 		},
 		{
-			Method:            http.MethodGet,
-			Path:              "/private",
-			FullPath:          "/api/private",
-			HandlerType:       reflect.TypeOf(func() string { return "private" }),
-			HandlerName:       "privateHandler",
-			EffectiveFairings: NewRouteFairingMetadata(NewAuthFairing()),
+			Method:      http.MethodGet,
+			Path:        "/private",
+			GroupName:   "/api",
+			HandlerType: reflect.TypeOf(func() string { return "private" }),
+			HandlerName: "privateHandler",
 		},
 	}}
+	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/api/public", nil)
+	app.setOpenAPIRouteMetadata(app.routeRegistry[1], "/api/private", nil, NewAuthFairing())
 
 	spec := decodeOpenAPIDocument(t, app)
 	paths := spec["paths"].(map[string]interface{})
@@ -181,8 +186,7 @@ func TestGenerateOpenAPIFindsControllerMetadataByControllerBean(t *testing.T) {
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("apply controller: %v", err)
 	}
-	app.routeRegistry[0].FullPath = "/api/metadata"
-	app.routeRegistry[0].ControllerType = reflect.TypeOf(controller)
+	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/api/metadata", controller)
 
 	spec := decodeOpenAPIDocument(t, app)
 	op := spec["paths"].(map[string]interface{})["/api/metadata"].(map[string]interface{})["get"].(map[string]interface{})
@@ -192,31 +196,29 @@ func TestGenerateOpenAPIFindsControllerMetadataByControllerBean(t *testing.T) {
 }
 
 func TestGenerateOpenAPIUsesControllerIdentityForSameRelativePath(t *testing.T) {
-	container := NewBeanFactory()
-	container.Set(&groupedOpenAPIControllerA{})
-	container.Set(&groupedOpenAPIControllerB{})
+	controllerA := &groupedOpenAPIController{summary: "group-a"}
+	controllerB := &groupedOpenAPIController{summary: "group-b"}
 	handlerType := reflect.TypeOf(func() string { return "ok" })
 	app := &Bear{
-		runtime: &Runtime{Container: container},
 		routeRegistry: []RouteMetadata{
 			{
-				Method:         http.MethodGet,
-				Path:           "/item",
-				FullPath:       "/a/item",
-				ControllerType: reflect.TypeOf(&groupedOpenAPIControllerA{}),
-				HandlerType:    handlerType,
-				HandlerName:    "groupAItem",
+				Method:      http.MethodGet,
+				Path:        "/item",
+				GroupName:   "/a",
+				HandlerType: handlerType,
+				HandlerName: "groupAItem",
 			},
 			{
-				Method:         http.MethodGet,
-				Path:           "/item",
-				FullPath:       "/b/item",
-				ControllerType: reflect.TypeOf(&groupedOpenAPIControllerB{}),
-				HandlerType:    handlerType,
-				HandlerName:    "groupBItem",
+				Method:      http.MethodGet,
+				Path:        "/item",
+				GroupName:   "/b",
+				HandlerType: handlerType,
+				HandlerName: "groupBItem",
 			},
 		},
 	}
+	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/a/item", controllerA)
+	app.setOpenAPIRouteMetadata(app.routeRegistry[1], "/b/item", controllerB)
 
 	spec := decodeOpenAPIDocument(t, app)
 	paths := spec["paths"].(map[string]interface{})
@@ -229,18 +231,16 @@ func TestGenerateOpenAPIUsesControllerIdentityForSameRelativePath(t *testing.T) 
 }
 
 func TestGenerateOpenAPIOmitsControllerMetadataWithoutIdentity(t *testing.T) {
-	container := NewBeanFactory()
-	container.Set(&groupedOpenAPIControllerA{})
 	app := &Bear{
-		runtime: &Runtime{Container: container},
 		routeRegistry: []RouteMetadata{{
 			Method:      http.MethodGet,
 			Path:        "/item",
-			FullPath:    "/anonymous/item",
+			GroupName:   "/anonymous",
 			HandlerType: reflect.TypeOf(func() string { return "ok" }),
 			HandlerName: "anonymousItem",
 		}},
 	}
+	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/anonymous/item", nil)
 
 	spec := decodeOpenAPIDocument(t, app)
 	op := spec["paths"].(map[string]interface{})["/anonymous/item"].(map[string]interface{})["get"].(map[string]interface{})
@@ -443,11 +443,8 @@ func TestOpenAPISchemaBuilderKeepsReservedComponentName(t *testing.T) {
 }
 
 func TestGenerateOpenAPISkipsTypedNilMetadataProvider(t *testing.T) {
-	container := NewBeanFactory()
 	var provider *nilOpenAPIProvider
-	container.Set(provider)
 	app := &Bear{
-		runtime: &Runtime{Container: container},
 		routeRegistry: []RouteMetadata{{
 			Method:      http.MethodGet,
 			Path:        "/nil-provider",
@@ -455,6 +452,7 @@ func TestGenerateOpenAPISkipsTypedNilMetadataProvider(t *testing.T) {
 			HandlerName: "nilProviderHandler",
 		}},
 	}
+	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/nil-provider", provider)
 	if _, err := app.GenerateOpenAPI(); err != nil {
 		t.Fatalf("typed nil metadata provider should be ignored: %v", err)
 	}

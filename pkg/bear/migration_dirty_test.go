@@ -26,7 +26,7 @@ func TestMySQLApplyUpPersistsDirtyAroundDDL(t *testing.T) {
 		WithArgs("001").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	if err := runner.applyUp(context.Background(), defaultMigrationTable, migration); err != nil {
+	if err := runner.runner.applyUp(context.Background(), defaultMigrationTable, migration, MigrationDialectMySQL); err != nil {
 		t.Fatalf("apply MySQL migration: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -49,7 +49,7 @@ func TestMySQLApplyUpDDLFailureDoesNotClearDirty(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(migration.UpSQL).WillReturnError(dllErr)
 
-	err = runner.applyUp(context.Background(), defaultMigrationTable, migration)
+	err = runner.runner.applyUp(context.Background(), defaultMigrationTable, migration, MigrationDialectMySQL)
 	if !errors.Is(err, dllErr) {
 		t.Fatalf("apply MySQL broken migration error = %v, want DDL cause", err)
 	}
@@ -76,7 +76,7 @@ func TestMySQLApplyUpFinalizeFailureLeavesDirty(t *testing.T) {
 		WithArgs("002").
 		WillReturnError(finalizeErr)
 
-	err = runner.applyUp(context.Background(), defaultMigrationTable, migration)
+	err = runner.runner.applyUp(context.Background(), defaultMigrationTable, migration, MigrationDialectMySQL)
 	if !errors.Is(err, finalizeErr) {
 		t.Fatalf("MySQL finalize error = %v, want history cause", err)
 	}
@@ -102,7 +102,7 @@ func TestMySQLApplyDownPersistsDirtyAroundDDL(t *testing.T) {
 		WithArgs("003").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	if err := runner.applyDown(context.Background(), defaultMigrationTable, migration); err != nil {
+	if err := runner.runner.applyDown(context.Background(), defaultMigrationTable, migration, MigrationDialectMySQL); err != nil {
 		t.Fatalf("rollback MySQL migration: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -125,7 +125,7 @@ func TestMySQLApplyDownDDLFailureDoesNotDeleteDirty(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(migration.DownSQL).WillReturnError(dllErr)
 
-	err = runner.applyDown(context.Background(), defaultMigrationTable, migration)
+	err = runner.runner.applyDown(context.Background(), defaultMigrationTable, migration, MigrationDialectMySQL)
 	if !errors.Is(err, dllErr) {
 		t.Fatalf("rollback MySQL broken migration error = %v, want DDL cause", err)
 	}
@@ -206,7 +206,7 @@ applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	}
 
 	runner := NewMigrationRunner(db)
-	if err := runner.ensureTable(ctx, defaultMigrationTable); err != nil {
+	if err := runner.ensureTable(ctx, defaultMigrationTable, MigrationDialectSQLite); err != nil {
 		t.Fatalf("upgrade legacy migration table: %v", err)
 	}
 	var dirty bool

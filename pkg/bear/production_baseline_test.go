@@ -2000,7 +2000,7 @@ func TestMigrationRunnerRollsBackLatestMigrations(t *testing.T) {
 func TestMigrationRunnerUsesExecutionLock(t *testing.T) {
 	sqlDB := newMigrationTestDB(t)
 	runner := NewMigrationRunner(sqlDB)
-	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks"); err != nil {
+	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks", MigrationDialectSQLite); err != nil {
 		t.Fatalf("ensure lock table: %v", err)
 	}
 	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name, owner) VALUES (?, ?)", defaultMigrationLockName, "held-owner"); err != nil {
@@ -2021,7 +2021,7 @@ func TestMigrationRunnerUsesExecutionLock(t *testing.T) {
 func TestMigrationRunnerForceUnlockReleasesHeldLock(t *testing.T) {
 	sqlDB := newMigrationTestDB(t)
 	runner := NewMigrationRunner(sqlDB)
-	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks"); err != nil {
+	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks", MigrationDialectSQLite); err != nil {
 		t.Fatalf("ensure lock table: %v", err)
 	}
 	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name, owner) VALUES (?, ?)", defaultMigrationLockName, "held-owner"); err != nil {

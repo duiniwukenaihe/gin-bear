@@ -11,6 +11,7 @@ import (
 )
 
 var migrationRunnerLegacyConstructor func(*sql.DB) *MigrationRunner = NewMigrationRunner
+var migrationRunnerDialectConstructor func(*sql.DB, MigrationDialect) *DialectMigrationRunner = NewMigrationRunnerWithDialect
 
 type migrationDialectTestConnector struct {
 	driver driver.Driver
@@ -34,6 +35,12 @@ func (pgxInferenceDriver) Open(string) (driver.Conn, error) {
 	return nil, errors.New("not implemented")
 }
 
+type unknownInferenceDriver struct{}
+
+func (unknownInferenceDriver) Open(string) (driver.Conn, error) {
+	return nil, errors.New("not implemented")
+}
+
 func TestMigrationRunnerPublicShapeRemainsSourceCompatible(t *testing.T) {
 	_ = MigrationRunner{nil, "schema_migrations", "schema_migration_locks"}
 	runnerType := reflect.TypeOf(MigrationRunner{})
@@ -48,24 +55,50 @@ func TestMigrationRunnerPublicShapeRemainsSourceCompatible(t *testing.T) {
 	if migrationRunnerLegacyConstructor == nil {
 		t.Fatal("legacy constructor is nil")
 	}
+	methods := reflect.TypeOf((*MigrationRunner)(nil))
+	if methods.NumMethod() != 3 {
+		t.Fatalf("MigrationRunner exported method count = %d, want 3", methods.NumMethod())
+	}
+	for _, name := range []string{"Down", "ForceUnlock", "Up"} {
+		if _, ok := methods.MethodByName(name); !ok {
+			t.Fatalf("MigrationRunner missing legacy method %s", name)
+		}
+	}
 }
 
 func TestNewMigrationRunnerWithDialectKeepsDialectOutsidePublicStruct(t *testing.T) {
 	db := newMigrationTestDB(t)
-	runner := NewMigrationRunnerWithDialect(db, MigrationDialectPostgreSQL)
-	query, err := runner.rebind("SELECT ?, ?")
+	sqliteRunner := NewMigrationRunnerWithDialect(db, MigrationDialectSQLite)
+	postgresRunner := NewMigrationRunnerWithDialect(db, MigrationDialectPostgreSQL)
+	query, err := postgresRunner.rebind("SELECT ?, ?")
 	if err != nil {
 		t.Fatalf("rebind explicit dialect: %v", err)
 	}
 	if query != "SELECT $1, $2" {
 		t.Fatalf("explicit PostgreSQL rebind = %q", query)
 	}
+	query, err = sqliteRunner.rebind("SELECT ?, ?")
+	if err != nil {
+		t.Fatalf("rebind isolated SQLite dialect: %v", err)
+	}
+	if query != "SELECT ?, ?" {
+		t.Fatalf("SQLite runner was overwritten by PostgreSQL runner: %q", query)
+	}
+	if migrationRunnerDialectConstructor == nil {
+		t.Fatal("dialect constructor is nil")
+	}
+	wrapperType := reflect.TypeOf(DialectMigrationRunner{})
+	for index := 0; index < wrapperType.NumField(); index++ {
+		if field := wrapperType.Field(index); field.PkgPath == "" {
+			t.Fatalf("DialectMigrationRunner field %s must remain private", field.Name)
+		}
+	}
 }
 
 func TestLegacyRunnerInfersKnownDatabaseDrivers(t *testing.T) {
 	mysqlDB := sql.OpenDB(migrationDialectTestConnector{driver: mysqlInferenceDriver{}})
 	t.Cleanup(func() { _ = mysqlDB.Close() })
-	if dialect := NewMigrationRunner(mysqlDB).dialect(); dialect != MigrationDialectMySQL {
+	if dialect, err := NewMigrationRunner(mysqlDB).inferDialect(); err != nil || dialect != MigrationDialectMySQL {
 		t.Fatalf("legacy MySQL dialect = %q", dialect)
 	}
 
@@ -78,6 +111,16 @@ func TestLegacyRunnerInfersKnownDatabaseDrivers(t *testing.T) {
 	}
 	if query != "SELECT $1" {
 		t.Fatalf("direct literal PostgreSQL rebind = %q", query)
+	}
+}
+
+func TestLegacyRunnerRejectsUnknownDriver(t *testing.T) {
+	db := sql.OpenDB(migrationDialectTestConnector{driver: unknownInferenceDriver{}})
+	t.Cleanup(func() { _ = db.Close() })
+	runner := NewMigrationRunner(db)
+	err := runner.Up(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "NewMigrationRunnerWithDialect") {
+		t.Fatalf("unknown driver Up error = %v, want explicit constructor guidance", err)
 	}
 }
 
@@ -151,11 +194,11 @@ func TestMigrationLockOwnerPreventsStaleReleaseDeletingReplacement(t *testing.T)
 	db := newMigrationTestDB(t)
 	runner := NewMigrationRunnerWithDialect(db, MigrationDialectSQLite)
 	ctx := context.Background()
-	if err := runner.ensureLockTable(ctx, defaultMigrationLockTable); err != nil {
+	if err := runner.runner.ensureLockTable(ctx, defaultMigrationLockTable, MigrationDialectSQLite); err != nil {
 		t.Fatalf("ensure lock table: %v", err)
 	}
 
-	firstOwner, err := runner.acquireLock(ctx, defaultMigrationLockTable)
+	firstOwner, err := runner.runner.acquireLock(ctx, defaultMigrationLockTable, MigrationDialectSQLite)
 	if err != nil {
 		t.Fatalf("acquire first lock: %v", err)
 	}
@@ -165,7 +208,7 @@ func TestMigrationLockOwnerPreventsStaleReleaseDeletingReplacement(t *testing.T)
 	if err := runner.ForceUnlock(ctx); err != nil {
 		t.Fatalf("force unlock first owner: %v", err)
 	}
-	secondOwner, err := runner.acquireLock(ctx, defaultMigrationLockTable)
+	secondOwner, err := runner.runner.acquireLock(ctx, defaultMigrationLockTable, MigrationDialectSQLite)
 	if err != nil {
 		t.Fatalf("acquire replacement lock: %v", err)
 	}
@@ -173,7 +216,7 @@ func TestMigrationLockOwnerPreventsStaleReleaseDeletingReplacement(t *testing.T)
 		t.Fatal("replacement lock reused owner token")
 	}
 
-	err = runner.releaseLock(ctx, defaultMigrationLockTable, firstOwner)
+	err = runner.runner.releaseLock(ctx, defaultMigrationLockTable, firstOwner, MigrationDialectSQLite)
 	if err == nil || !strings.Contains(err.Error(), "owner") {
 		t.Fatalf("stale release error = %v, want owner mismatch", err)
 	}
@@ -210,7 +253,7 @@ locked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	}
 
 	runner := NewMigrationRunnerWithDialect(db, MigrationDialectSQLite)
-	if err := runner.ensureLockTable(ctx, defaultMigrationLockTable); err != nil {
+	if err := runner.runner.ensureLockTable(ctx, defaultMigrationLockTable, MigrationDialectSQLite); err != nil {
 		t.Fatalf("upgrade legacy lock table: %v", err)
 	}
 	var owner string

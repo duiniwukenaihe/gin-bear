@@ -16,33 +16,11 @@ import (
 
 // RouteMetadata 记录路由元数据用于生成文档
 type RouteMetadata struct {
-	Method            string
-	Path              string
-	FullPath          string
-	GroupName         string
-	ControllerType    reflect.Type
-	HandlerType       reflect.Type
-	HandlerName       string
-	EffectiveFairings *RouteFairingMetadata
-}
-
-// RouteFairingMetadata carries the effective route and controller fairings
-// without making RouteMetadata itself non-comparable.
-type RouteFairingMetadata struct {
-	fairings []Fairing
-}
-
-// NewRouteFairingMetadata snapshots the effective fairings for one route.
-func NewRouteFairingMetadata(fairings ...Fairing) *RouteFairingMetadata {
-	return &RouteFairingMetadata{fairings: append([]Fairing(nil), fairings...)}
-}
-
-// Fairings returns a copy of the effective fairing list.
-func (m *RouteFairingMetadata) Fairings() []Fairing {
-	if m == nil {
-		return nil
-	}
-	return append([]Fairing(nil), m.fairings...)
+	Method      string
+	Path        string
+	GroupName   string
+	HandlerType reflect.Type
+	HandlerName string
 }
 
 // OpenAPIInfo 接口描述元数据
@@ -57,6 +35,59 @@ type IOpenAPI interface {
 	OpenAPI() map[string]OpenAPIInfo // path -> info
 }
 
+const openAPIRouteMetadataStoreKey = "gin-bear.internal.openapi-route-metadata"
+
+type openAPIRouteMetadata struct {
+	fullPath   string
+	controller IOpenAPI
+	fairings   []Fairing
+}
+
+type openAPIRouteMetadataStore struct {
+	mu     sync.RWMutex
+	routes map[RouteMetadata]openAPIRouteMetadata
+}
+
+// setOpenAPIRouteMetadata is the package-private integration point for route
+// registration. It snapshots instance identity and effective fairings.
+func (b *Bear) setOpenAPIRouteMetadata(route RouteMetadata, fullPath string, controller IOpenAPI, fairings ...Fairing) {
+	if b == nil {
+		return
+	}
+	if b.exprData == nil {
+		b.exprData = make(map[string]interface{})
+	}
+	store, _ := b.exprData[openAPIRouteMetadataStoreKey].(*openAPIRouteMetadataStore)
+	if store == nil {
+		store = &openAPIRouteMetadataStore{routes: make(map[RouteMetadata]openAPIRouteMetadata)}
+		b.exprData[openAPIRouteMetadataStoreKey] = store
+	}
+	store.mu.Lock()
+	store.routes[route] = openAPIRouteMetadata{
+		fullPath:   fullPath,
+		controller: controller,
+		fairings:   append([]Fairing(nil), fairings...),
+	}
+	store.mu.Unlock()
+}
+
+func (b *Bear) openAPIRouteMetadata(route RouteMetadata) (openAPIRouteMetadata, bool) {
+	if b == nil || b.exprData == nil {
+		return openAPIRouteMetadata{}, false
+	}
+	store, _ := b.exprData[openAPIRouteMetadataStoreKey].(*openAPIRouteMetadataStore)
+	if store == nil {
+		return openAPIRouteMetadata{}, false
+	}
+	store.mu.RLock()
+	metadata, ok := store.routes[route]
+	store.mu.RUnlock()
+	if ok {
+		metadata.fairings = append([]Fairing(nil), metadata.fairings...)
+	}
+	return metadata, ok
+}
+
 // OpenAPISchema 简化的 OpenAPI 3.0 定义结构
 type OpenAPISchema struct {
 	OpenAPI    string                 `json:"openapi"`
@@ -69,11 +100,9 @@ type OpenAPISchema struct {
 // GenerateOpenAPI 生成 OpenAPI 3.0 文档内容
 func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 	var config *SysConfig
-	var container *BeanFactory
 	var routes []RouteMetadata
 	if b != nil && b.runtime != nil {
 		config = b.runtime.Config
-		container = b.runtime.Container
 	}
 	if b != nil {
 		routes = b.routeRegistry
@@ -109,7 +138,8 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 	anyAuth := globalAuth
 	if !anyAuth {
 		for _, route := range routes {
-			if openAPIHasAuthFairing(openAPIEffectiveFairings(route)) {
+			metadata, _ := b.openAPIRouteMetadata(route)
+			if openAPIHasAuthFairing(metadata.fairings) {
 				anyAuth = true
 				break
 			}
@@ -149,7 +179,8 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 			return nil, fmt.Errorf("openapi route %s %s missing operationId", route.Method, route.Path)
 		}
 
-		path := strings.TrimSpace(route.FullPath)
+		metadata, _ := b.openAPIRouteMetadata(route)
+		path := strings.TrimSpace(metadata.fullPath)
 		if path == "" {
 			path = route.Path
 			if route.GroupName != "" && !strings.HasPrefix(path, "/"+route.GroupName) {
@@ -158,7 +189,7 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 		}
 		// 统一路径格式
 		path = strings.ReplaceAll(path, "//", "/")
-		routeAuth := globalAuth || openAPIHasAuthFairing(openAPIEffectiveFairings(route))
+		routeAuth := globalAuth || openAPIHasAuthFairing(metadata.fairings)
 		publicRoute := routeAuth && openAPIRouteIsPublic(path, config)
 		path = toOpenAPIPath(path)
 		routeKey := method + " " + path
@@ -195,7 +226,7 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 		}
 		addStandardOpenAPIErrorResponses(op, routeAuth && !publicRoute)
 
-		if info, ok := openAPIControllerInfo(container, route, path); ok {
+		if info, ok := openAPIControllerInfo(metadata, route, path); ok {
 			op["summary"] = info.Summary
 			op["description"] = info.Description
 			op["tags"] = info.Tags
@@ -235,29 +266,18 @@ func openAPIHasAuthFairing(fairings []Fairing) bool {
 	return false
 }
 
-func openAPIEffectiveFairings(route RouteMetadata) []Fairing {
-	if route.EffectiveFairings == nil {
-		return nil
-	}
-	return route.EffectiveFairings.Fairings()
-}
-
-func openAPIControllerInfo(container *BeanFactory, route RouteMetadata, openAPIPath string) (OpenAPIInfo, bool) {
-	if container == nil || route.ControllerType == nil {
+func openAPIControllerInfo(metadata openAPIRouteMetadata, route RouteMetadata, openAPIPath string) (OpenAPIInfo, bool) {
+	provider := metadata.controller
+	if provider == nil || openAPIReflectValueIsNil(provider) {
 		return OpenAPIInfo{}, false
 	}
-	bean := container.Get(route.ControllerType)
-	provider, ok := bean.(IOpenAPI)
-	if !ok || provider == nil || openAPIReflectValueIsNil(provider) {
-		return OpenAPIInfo{}, false
-	}
-	candidates := []string{route.FullPath, openAPIPath, route.Path}
-	metadata := provider.OpenAPI()
+	candidates := []string{metadata.fullPath, openAPIPath, route.Path}
+	infoByPath := provider.OpenAPI()
 	for _, candidate := range candidates {
 		if candidate == "" {
 			continue
 		}
-		if info, exists := metadata[candidate]; exists {
+		if info, exists := infoByPath[candidate]; exists {
 			return info, true
 		}
 	}

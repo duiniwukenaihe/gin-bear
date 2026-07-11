@@ -238,14 +238,15 @@ authentication requirement with an empty requirement. Generated operations
 include standard JSON error responses for `400`, `403`, `404`, and `500`;
 authenticated private routes also include `401`.
 
-Accurate controller metadata and route-level authentication require route
-registration to provide `RouteMetadata.FullPath`, `ControllerType`, and
-`EffectiveFairings`. Missing controller identity is handled conservatively:
-the generator does not search unrelated controller beans by relative path and
-does not guess controller metadata or interceptor authentication. Projects
-with custom route registration should populate all three values after
-combining route and controller fairings. Build the comparable fairing metadata
-value with `NewRouteFairingMetadata(effectiveFairings...)`.
+Accurate controller metadata and route-level authentication require framework
+route registration to write private per-`Bear` metadata containing the full
+path, concrete controller instance, and combined route/controller fairings.
+`RouteMetadata` retains its original five-field public shape. Missing private
+identity is handled conservatively: the generator does not search unrelated
+controller beans by relative path and does not guess controller metadata or
+interceptor authentication. Custom registration cannot inject this internal
+metadata through the public struct; framework integrations must use the
+package-private registration helper.
 
 Generation fails on invalid route metadata, duplicate method/path entries, and
 duplicate explicit operation IDs. For externally consumed APIs, review the
@@ -290,11 +291,13 @@ return runner.Up(context.Background(), migrations)
 ```
 
 Use `MigrationDialectSQLite`, `MigrationDialectMySQL`, or
-`MigrationDialectPostgreSQL` for an explicit deployment contract. The legacy
-`NewMigrationRunner(sqlDB)` constructor and direct `MigrationRunner` literals
-remain source-compatible; known database drivers are inferred, and unknown
-drivers conservatively retain `?` placeholders. Explicit construction is
-recommended for production migration commands.
+`MigrationDialectPostgreSQL` for an explicit deployment contract. The explicit
+constructor returns an independent dialect runner; creating another runner for
+the same `*sql.DB` cannot overwrite it. The legacy `NewMigrationRunner(sqlDB)`
+constructor and direct `MigrationRunner` literals remain source-compatible and
+infer SQLite, MySQL, and PostgreSQL from known driver types on each operation.
+Unknown or wrapped drivers fail closed with guidance to use
+`NewMigrationRunnerWithDialect`; they are never silently treated as SQLite.
 
 Applied versions are recorded in `schema_migrations`, and rerunning `Up` skips
 versions that have already been applied. SQLite and PostgreSQL execute each
@@ -304,6 +307,7 @@ SQL, and clears the dirty flag only after the final history update succeeds.
 `Up` and `Down` refuse to continue while any dirty version exists.
 
 After a MySQL failure, inspect the actual schema before resolving the state.
+Recovery is intentionally available only on the explicit dialect runner.
 If the migration completed, keep the history row and mark it applied:
 
 ```go
