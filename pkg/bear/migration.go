@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +24,8 @@ const defaultMigrationReleaseTimeout = 5 * time.Second
 const legacyMigrationLockOwner = "legacy-unowned"
 
 var ErrMigrationLockOwnerMismatch = errors.New("migration lock owner mismatch")
+var ErrDirtyMigration = errors.New("dirty migration state")
+var migrationDialectRegistry sync.Map
 
 // MigrationDialect controls placeholder rebinding and dialect-specific DDL.
 type MigrationDialect string
@@ -65,25 +69,27 @@ type Migration struct {
 }
 
 type MigrationRunner struct {
-	DB             *sql.DB
-	Table          string
-	LockTable      string
-	Dialect        MigrationDialect
-	ReleaseTimeout time.Duration
+	DB        *sql.DB
+	Table     string
+	LockTable string
 }
 
-func NewMigrationRunner(db *sql.DB, dialect ...MigrationDialect) *MigrationRunner {
-	selectedDialect := MigrationDialectSQLite
-	if len(dialect) > 0 {
-		selectedDialect = dialect[0]
-	}
+func NewMigrationRunner(db *sql.DB) *MigrationRunner {
 	return &MigrationRunner{
-		DB:             db,
-		Table:          defaultMigrationTable,
-		LockTable:      defaultMigrationLockTable,
-		Dialect:        selectedDialect,
-		ReleaseTimeout: defaultMigrationReleaseTimeout,
+		DB:        db,
+		Table:     defaultMigrationTable,
+		LockTable: defaultMigrationLockTable,
 	}
+}
+
+// NewMigrationRunnerWithDialect creates a runner with an explicit SQL
+// dialect without changing MigrationRunner's source-compatible public shape.
+func NewMigrationRunnerWithDialect(db *sql.DB, dialect MigrationDialect) *MigrationRunner {
+	runner := NewMigrationRunner(db)
+	if db != nil {
+		migrationDialectRegistry.Store(db, dialect)
+	}
+	return runner
 }
 
 func LoadSQLMigrations(dir string) ([]Migration, error) {
@@ -189,6 +195,9 @@ func (r *MigrationRunner) Up(ctx context.Context, migrations []Migration) (resul
 			resultErr = err
 		}
 	}()
+	if err := r.rejectDirtyMigration(ctx, table); err != nil {
+		return err
+	}
 
 	for _, migration := range migrations {
 		applied, err := r.isApplied(ctx, table, migration.Version)
@@ -241,6 +250,9 @@ func (r *MigrationRunner) Down(ctx context.Context, migrations []Migration, step
 			resultErr = err
 		}
 	}()
+	if err := r.rejectDirtyMigration(ctx, table); err != nil {
+		return err
+	}
 
 	latest, err := r.latestApplied(ctx, table, steps)
 	if err != nil {
@@ -300,6 +312,69 @@ func (r *MigrationRunner) ForceUnlock(ctx context.Context) error {
 	return nil
 }
 
+// ForceMigrationState resolves one dirty migration after an operator has
+// inspected the database. applied=true keeps the history row and marks the
+// migration complete; applied=false removes it so the migration can run again.
+// It never executes migration SQL or infers which state the schema reached.
+func (r *MigrationRunner) ForceMigrationState(ctx context.Context, version string, applied bool) (resultErr error) {
+	if r == nil || r.DB == nil {
+		return fmt.Errorf("migration runner requires a database")
+	}
+	if strings.TrimSpace(version) == "" {
+		return fmt.Errorf("force migration state requires a version")
+	}
+	if err := r.validateDialect(); err != nil {
+		return err
+	}
+	table := r.Table
+	if table == "" {
+		table = defaultMigrationTable
+	}
+	if err := validateMigrationTableName(table); err != nil {
+		return err
+	}
+	if err := r.ensureTable(ctx, table); err != nil {
+		return err
+	}
+	lockTable := r.lockTable()
+	if err := validateMigrationTableName(lockTable); err != nil {
+		return err
+	}
+	if err := r.ensureLockTable(ctx, lockTable); err != nil {
+		return err
+	}
+	owner, err := r.acquireLock(ctx, lockTable)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := r.releaseLockBounded(lockTable, owner); resultErr == nil && err != nil {
+			resultErr = err
+		}
+	}()
+
+	statement := fmt.Sprintf("DELETE FROM %s WHERE version = ? AND dirty = TRUE", table)
+	if applied {
+		statement = fmt.Sprintf("UPDATE %s SET dirty = FALSE, applied_at = CURRENT_TIMESTAMP WHERE version = ? AND dirty = TRUE", table)
+	}
+	statement, err = r.rebind(statement)
+	if err != nil {
+		return err
+	}
+	result, err := r.DB.ExecContext(ctx, statement, version)
+	if err != nil {
+		return fmt.Errorf("force migration %s state: %w", version, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect forced migration %s state: %w", version, err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("force migration %s state: dirty migration not found", version)
+	}
+	return nil
+}
+
 func validateMigrationTableName(name string) error {
 	if name == "" {
 		return fmt.Errorf("invalid migration table name %q", name)
@@ -324,38 +399,80 @@ func (r *MigrationRunner) lockTable() string {
 }
 
 func (r *MigrationRunner) validateDialect() error {
-	_, err := r.Dialect.Rebind("")
+	_, err := r.dialect().Rebind("")
 	return err
 }
 
 func (r *MigrationRunner) rebind(query string) (string, error) {
-	return r.Dialect.Rebind(query)
+	return r.dialect().Rebind(query)
 }
 
-func (r *MigrationRunner) releaseTimeout() time.Duration {
-	if r.ReleaseTimeout > 0 {
-		return r.ReleaseTimeout
+func (r *MigrationRunner) dialect() MigrationDialect {
+	if r != nil && r.DB != nil {
+		if dialect, ok := migrationDialectRegistry.Load(r.DB); ok {
+			return dialect.(MigrationDialect)
+		}
+		return inferMigrationDialect(r.DB)
 	}
-	return defaultMigrationReleaseTimeout
+	return MigrationDialectSQLite
+}
+
+func inferMigrationDialect(db *sql.DB) MigrationDialect {
+	driverType := reflect.TypeOf(db.Driver())
+	if driverType.Kind() == reflect.Ptr {
+		driverType = driverType.Elem()
+	}
+	identity := strings.ToLower(driverType.PkgPath() + " " + driverType.String())
+	switch {
+	case strings.Contains(identity, "mysql"):
+		return MigrationDialectMySQL
+	case strings.Contains(identity, "postgres"), strings.Contains(identity, "pgx"), strings.Contains(identity, "lib/pq"):
+		return MigrationDialectPostgreSQL
+	default:
+		return MigrationDialectSQLite
+	}
 }
 
 func (r *MigrationRunner) ensureTable(ctx context.Context, table string) error {
 	textType := "TEXT"
-	if r.Dialect == MigrationDialectMySQL {
+	if r.dialect() == MigrationDialectMySQL {
 		textType = "VARCHAR(255)"
 	}
 	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 version %s PRIMARY KEY,
 name %s NOT NULL,
-applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+dirty BOOLEAN NOT NULL DEFAULT FALSE
 )`, table, textType, textType)
-	_, err := r.DB.ExecContext(ctx, query)
-	return err
+	if _, err := r.DB.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	if r.migrationTableHasDirty(ctx, table) {
+		return nil
+	}
+	alter := fmt.Sprintf("ALTER TABLE %s ADD COLUMN dirty BOOLEAN NOT NULL DEFAULT FALSE", table)
+	_, alterErr := r.DB.ExecContext(ctx, alter)
+	if r.migrationTableHasDirty(ctx, table) {
+		return nil
+	}
+	if alterErr != nil {
+		return fmt.Errorf("add migration dirty column: %w", alterErr)
+	}
+	return fmt.Errorf("add migration dirty column: dirty column is unavailable")
+}
+
+func (r *MigrationRunner) migrationTableHasDirty(ctx context.Context, table string) bool {
+	rows, err := r.DB.QueryContext(ctx, fmt.Sprintf("SELECT dirty FROM %s WHERE 1 = 0", table))
+	if err != nil {
+		return false
+	}
+	_ = rows.Close()
+	return true
 }
 
 func (r *MigrationRunner) ensureLockTable(ctx context.Context, table string) error {
 	textType := "TEXT"
-	if r.Dialect == MigrationDialectMySQL {
+	if r.dialect() == MigrationDialectMySQL {
 		textType = "VARCHAR(255)"
 	}
 	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
@@ -413,7 +530,7 @@ func newMigrationLockOwner() (string, error) {
 }
 
 func (r *MigrationRunner) releaseLockBounded(table, owner string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), r.releaseTimeout())
+	ctx, cancel := context.WithTimeout(context.Background(), defaultMigrationReleaseTimeout)
 	defer cancel()
 	return r.releaseLock(ctx, table, owner)
 }
@@ -438,13 +555,16 @@ func (r *MigrationRunner) releaseLock(ctx context.Context, table, owner string) 
 }
 
 func (r *MigrationRunner) isApplied(ctx context.Context, table string, version string) (bool, error) {
-	var existing string
-	query, err := r.rebind(fmt.Sprintf("SELECT version FROM %s WHERE version = ?", table))
+	var dirty bool
+	query, err := r.rebind(fmt.Sprintf("SELECT dirty FROM %s WHERE version = ?", table))
 	if err != nil {
 		return false, err
 	}
-	err = r.DB.QueryRowContext(ctx, query, version).Scan(&existing)
+	err = r.DB.QueryRowContext(ctx, query, version).Scan(&dirty)
 	if err == nil {
+		if dirty {
+			return false, fmt.Errorf("%w: version %s", ErrDirtyMigration, version)
+		}
 		return true, nil
 	}
 	if err == sql.ErrNoRows {
@@ -453,7 +573,24 @@ func (r *MigrationRunner) isApplied(ctx context.Context, table string, version s
 	return false, err
 }
 
+func (r *MigrationRunner) rejectDirtyMigration(ctx context.Context, table string) error {
+	query := fmt.Sprintf("SELECT version, name FROM %s WHERE dirty = TRUE ORDER BY version LIMIT 1", table)
+	var version string
+	var name string
+	err := r.DB.QueryRowContext(ctx, query).Scan(&version, &name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check dirty migration state: %w", err)
+	}
+	return fmt.Errorf("%w: dirty migration %s_%s blocks Up/Down; inspect the schema, then call ForceMigrationState", ErrDirtyMigration, version, name)
+}
+
 func (r *MigrationRunner) applyUp(ctx context.Context, table string, migration Migration) error {
+	if r.dialect() == MigrationDialectMySQL {
+		return r.applyUpNonTransactional(ctx, table, migration)
+	}
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -468,7 +605,7 @@ func (r *MigrationRunner) applyUp(ctx context.Context, table string, migration M
 	if _, err := tx.ExecContext(ctx, migration.UpSQL); err != nil {
 		return fmt.Errorf("apply migration %s_%s: %w", migration.Version, migration.Name, err)
 	}
-	insert, err := r.rebind(fmt.Sprintf("INSERT INTO %s (version, name) VALUES (?, ?)", table))
+	insert, err := r.rebind(fmt.Sprintf("INSERT INTO %s (version, name, dirty) VALUES (?, ?, FALSE)", table))
 	if err != nil {
 		return err
 	}
@@ -482,13 +619,42 @@ func (r *MigrationRunner) applyUp(ctx context.Context, table string, migration M
 	return nil
 }
 
+func (r *MigrationRunner) applyUpNonTransactional(ctx context.Context, table string, migration Migration) error {
+	insert, err := r.rebind(fmt.Sprintf("INSERT INTO %s (version, name, dirty) VALUES (?, ?, TRUE)", table))
+	if err != nil {
+		return err
+	}
+	if _, err := r.DB.ExecContext(ctx, insert, migration.Version, migration.Name); err != nil {
+		return fmt.Errorf("mark migration %s_%s dirty: %w", migration.Version, migration.Name, err)
+	}
+	if _, err := r.DB.ExecContext(ctx, migration.UpSQL); err != nil {
+		return fmt.Errorf("apply migration %s_%s: %w", migration.Version, migration.Name, err)
+	}
+	clear, err := r.rebind(fmt.Sprintf("UPDATE %s SET dirty = FALSE, applied_at = CURRENT_TIMESTAMP WHERE version = ? AND dirty = TRUE", table))
+	if err != nil {
+		return err
+	}
+	result, err := r.DB.ExecContext(ctx, clear, migration.Version)
+	if err != nil {
+		return fmt.Errorf("clear migration %s_%s dirty state: %w", migration.Version, migration.Name, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect migration %s_%s dirty state: %w", migration.Version, migration.Name, err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("clear migration %s_%s dirty state: history row changed concurrently", migration.Version, migration.Name)
+	}
+	return nil
+}
+
 type appliedMigration struct {
 	Version string
 	Name    string
 }
 
 func (r *MigrationRunner) latestApplied(ctx context.Context, table string, steps int) ([]appliedMigration, error) {
-	query, err := r.rebind(fmt.Sprintf("SELECT version, name FROM %s ORDER BY version DESC LIMIT ?", table))
+	query, err := r.rebind(fmt.Sprintf("SELECT version, name FROM %s WHERE dirty = FALSE ORDER BY version DESC LIMIT ?", table))
 	if err != nil {
 		return nil, err
 	}
@@ -513,6 +679,9 @@ func (r *MigrationRunner) latestApplied(ctx context.Context, table string, steps
 }
 
 func (r *MigrationRunner) applyDown(ctx context.Context, table string, migration Migration) error {
+	if r.dialect() == MigrationDialectMySQL {
+		return r.applyDownNonTransactional(ctx, table, migration)
+	}
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -527,7 +696,7 @@ func (r *MigrationRunner) applyDown(ctx context.Context, table string, migration
 	if _, err := tx.ExecContext(ctx, migration.DownSQL); err != nil {
 		return fmt.Errorf("rollback migration %s_%s: %w", migration.Version, migration.Name, err)
 	}
-	deleteRecord, err := r.rebind(fmt.Sprintf("DELETE FROM %s WHERE version = ?", table))
+	deleteRecord, err := r.rebind(fmt.Sprintf("DELETE FROM %s WHERE version = ? AND dirty = FALSE", table))
 	if err != nil {
 		return err
 	}
@@ -538,5 +707,42 @@ func (r *MigrationRunner) applyDown(ctx context.Context, table string, migration
 		return err
 	}
 	committed = true
+	return nil
+}
+
+func (r *MigrationRunner) applyDownNonTransactional(ctx context.Context, table string, migration Migration) error {
+	mark, err := r.rebind(fmt.Sprintf("UPDATE %s SET dirty = TRUE WHERE version = ? AND dirty = FALSE", table))
+	if err != nil {
+		return err
+	}
+	result, err := r.DB.ExecContext(ctx, mark, migration.Version)
+	if err != nil {
+		return fmt.Errorf("mark rollback migration %s_%s dirty: %w", migration.Version, migration.Name, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect rollback migration %s_%s dirty state: %w", migration.Version, migration.Name, err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("mark rollback migration %s_%s dirty: clean history row not found", migration.Version, migration.Name)
+	}
+	if _, err := r.DB.ExecContext(ctx, migration.DownSQL); err != nil {
+		return fmt.Errorf("rollback migration %s_%s: %w", migration.Version, migration.Name, err)
+	}
+	remove, err := r.rebind(fmt.Sprintf("DELETE FROM %s WHERE version = ? AND dirty = TRUE", table))
+	if err != nil {
+		return err
+	}
+	result, err = r.DB.ExecContext(ctx, remove, migration.Version)
+	if err != nil {
+		return fmt.Errorf("remove rollback migration %s_%s dirty record: %w", migration.Version, migration.Name, err)
+	}
+	changed, err = result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect rollback migration %s_%s removal: %w", migration.Version, migration.Name, err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("remove rollback migration %s_%s dirty record: history row changed concurrently", migration.Version, migration.Name)
+	}
 	return nil
 }

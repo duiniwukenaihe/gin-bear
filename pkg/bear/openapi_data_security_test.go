@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -34,6 +35,18 @@ func (c *openAPIMetadataController) OpenAPI() map[string]OpenAPIInfo {
 
 type nilOpenAPIProvider struct {
 	summary string
+}
+
+type groupedOpenAPIControllerA struct{}
+
+func (c *groupedOpenAPIControllerA) OpenAPI() map[string]OpenAPIInfo {
+	return map[string]OpenAPIInfo{"/item": {Summary: "group-a"}}
+}
+
+type groupedOpenAPIControllerB struct{}
+
+func (c *groupedOpenAPIControllerB) OpenAPI() map[string]OpenAPIInfo {
+	return map[string]OpenAPIInfo{"/item": {Summary: "group-b"}}
 }
 
 func (p *nilOpenAPIProvider) OpenAPI() map[string]OpenAPIInfo {
@@ -86,7 +99,9 @@ func TestGenerateOpenAPISecuritySupportsRouteAuthFairing(t *testing.T) {
 	cfg.DB.Enabled = false
 	app := Ignite(cfg)
 	app.Handle(http.MethodGet, "/public", func() string { return "public" })
-	app.HandleWithFairing(http.MethodGet, "/private", func() string { return "private" }, NewAuthFairing())
+	auth := NewAuthFairing()
+	app.HandleWithFairing(http.MethodGet, "/private", func() string { return "private" }, auth)
+	app.routeRegistry[len(app.routeRegistry)-1].EffectiveFairings = NewRouteFairingMetadata(auth)
 
 	spec := decodeOpenAPIDocument(t, app)
 	if _, ok := spec["security"]; ok {
@@ -104,21 +119,133 @@ func TestGenerateOpenAPISecuritySupportsRouteAuthFairing(t *testing.T) {
 	}
 }
 
+func TestGenerateOpenAPIRouteSecurityUsesEffectiveFairingsMetadata(t *testing.T) {
+	app := &Bear{routeRegistry: []RouteMetadata{
+		{
+			Method:            http.MethodGet,
+			Path:              "/public",
+			FullPath:          "/api/public",
+			HandlerType:       reflect.TypeOf(func() string { return "public" }),
+			HandlerName:       "publicHandler",
+			EffectiveFairings: nil,
+		},
+		{
+			Method:            http.MethodGet,
+			Path:              "/private",
+			FullPath:          "/api/private",
+			HandlerType:       reflect.TypeOf(func() string { return "private" }),
+			HandlerName:       "privateHandler",
+			EffectiveFairings: NewRouteFairingMetadata(NewAuthFairing()),
+		},
+	}}
+
+	spec := decodeOpenAPIDocument(t, app)
+	paths := spec["paths"].(map[string]interface{})
+	if _, ok := paths["/api/public"].(map[string]interface{})["get"].(map[string]interface{})["security"]; ok {
+		t.Fatal("route without effective AuthFairing declared security")
+	}
+	private := paths["/api/private"].(map[string]interface{})["get"].(map[string]interface{})
+	if security, ok := private["security"].([]interface{}); !ok || len(security) != 1 {
+		t.Fatalf("effective AuthFairing security = %#v", private["security"])
+	}
+}
+
+func TestGenerateOpenAPIDoesNotInferEffectiveFairingsFromRouteTree(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	app := newOpenAPITestApp()
+	app.HandleWithFairing(http.MethodGet, "/missing-effective-metadata", func() string { return "private" }, NewAuthFairing())
+
+	spec := decodeOpenAPIDocument(t, app)
+	if _, ok := spec["security"]; ok {
+		t.Fatalf("routeTree fairing was guessed as global security: %#v", spec["security"])
+	}
+	components := spec["components"].(map[string]interface{})
+	if _, ok := components["securitySchemes"]; ok {
+		t.Fatalf("routeTree fairing was guessed without effective metadata: %#v", components)
+	}
+	op := spec["paths"].(map[string]interface{})["/missing-effective-metadata"].(map[string]interface{})["get"].(map[string]interface{})
+	if _, ok := op["security"]; ok {
+		t.Fatalf("routeTree fairing was guessed on operation: %#v", op)
+	}
+}
+
 func TestGenerateOpenAPIFindsControllerMetadataByControllerBean(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	app := Ignite(cfg)
-	app.Mount("/api", &openAPIMetadataController{})
+	controller := &openAPIMetadataController{}
+	app.Mount("/api", controller)
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("apply controller: %v", err)
 	}
+	app.routeRegistry[0].FullPath = "/api/metadata"
+	app.routeRegistry[0].ControllerType = reflect.TypeOf(controller)
 
 	spec := decodeOpenAPIDocument(t, app)
 	op := spec["paths"].(map[string]interface{})["/api/metadata"].(map[string]interface{})["get"].(map[string]interface{})
 	if op["summary"] != "metadata summary" || op["description"] != "metadata description" {
 		t.Fatalf("controller OpenAPI metadata missing: %#v", op)
+	}
+}
+
+func TestGenerateOpenAPIUsesControllerIdentityForSameRelativePath(t *testing.T) {
+	container := NewBeanFactory()
+	container.Set(&groupedOpenAPIControllerA{})
+	container.Set(&groupedOpenAPIControllerB{})
+	handlerType := reflect.TypeOf(func() string { return "ok" })
+	app := &Bear{
+		runtime: &Runtime{Container: container},
+		routeRegistry: []RouteMetadata{
+			{
+				Method:         http.MethodGet,
+				Path:           "/item",
+				FullPath:       "/a/item",
+				ControllerType: reflect.TypeOf(&groupedOpenAPIControllerA{}),
+				HandlerType:    handlerType,
+				HandlerName:    "groupAItem",
+			},
+			{
+				Method:         http.MethodGet,
+				Path:           "/item",
+				FullPath:       "/b/item",
+				ControllerType: reflect.TypeOf(&groupedOpenAPIControllerB{}),
+				HandlerType:    handlerType,
+				HandlerName:    "groupBItem",
+			},
+		},
+	}
+
+	spec := decodeOpenAPIDocument(t, app)
+	paths := spec["paths"].(map[string]interface{})
+	if summary := paths["/a/item"].(map[string]interface{})["get"].(map[string]interface{})["summary"]; summary != "group-a" {
+		t.Fatalf("group A summary = %v", summary)
+	}
+	if summary := paths["/b/item"].(map[string]interface{})["get"].(map[string]interface{})["summary"]; summary != "group-b" {
+		t.Fatalf("group B summary = %v", summary)
+	}
+}
+
+func TestGenerateOpenAPIOmitsControllerMetadataWithoutIdentity(t *testing.T) {
+	container := NewBeanFactory()
+	container.Set(&groupedOpenAPIControllerA{})
+	app := &Bear{
+		runtime: &Runtime{Container: container},
+		routeRegistry: []RouteMetadata{{
+			Method:      http.MethodGet,
+			Path:        "/item",
+			FullPath:    "/anonymous/item",
+			HandlerType: reflect.TypeOf(func() string { return "ok" }),
+			HandlerName: "anonymousItem",
+		}},
+	}
+
+	spec := decodeOpenAPIDocument(t, app)
+	op := spec["paths"].(map[string]interface{})["/anonymous/item"].(map[string]interface{})["get"].(map[string]interface{})
+	if _, ok := op["summary"]; ok {
+		t.Fatalf("route without controller identity guessed metadata: %#v", op)
 	}
 }
 
@@ -178,6 +305,60 @@ func TestEnableSwaggerCachesPerBearInstance(t *testing.T) {
 	secondDoc := serveOpenAPIPath(t, second, "/swagger/doc.json")
 	if strings.Contains(firstDoc, "/second") || !strings.Contains(secondDoc, "/second") {
 		t.Fatalf("Swagger cache leaked across Bear instances\nfirst=%s\nsecond=%s", firstDoc, secondDoc)
+	}
+}
+
+func TestEnableSwaggerConcurrentFirstRequestCachesPerInstance(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	first := newOpenAPITestApp()
+	first.Handle(http.MethodGet, "/first-concurrent", func() string { return "first" })
+	first.EnableSwagger()
+	second := newOpenAPITestApp()
+	second.Handle(http.MethodGet, "/second-concurrent", func() string { return "second" })
+	second.EnableSwagger()
+
+	const requestsPerInstance = 32
+	type response struct {
+		status int
+		body   string
+	}
+	results := make(chan response, requestsPerInstance*2)
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for _, app := range []*Bear{first, second} {
+		for range requestsPerInstance {
+			workers.Add(1)
+			go func(app *Bear) {
+				defer workers.Done()
+				<-start
+				recorder := httptest.NewRecorder()
+				app.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/swagger/doc.json", nil))
+				results <- response{status: recorder.Code, body: recorder.Body.String()}
+			}(app)
+		}
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+
+	firstCount := 0
+	secondCount := 0
+	for result := range results {
+		if result.status != http.StatusOK {
+			t.Fatalf("concurrent Swagger status = %d body=%s", result.status, result.body)
+		}
+		switch {
+		case strings.Contains(result.body, "/first-concurrent") && !strings.Contains(result.body, "/second-concurrent"):
+			firstCount++
+		case strings.Contains(result.body, "/second-concurrent") && !strings.Contains(result.body, "/first-concurrent"):
+			secondCount++
+		default:
+			t.Fatalf("concurrent Swagger cache leaked or returned invalid document: %s", result.body)
+		}
+	}
+	if firstCount != requestsPerInstance || secondCount != requestsPerInstance {
+		t.Fatalf("concurrent result counts = first:%d second:%d", firstCount, secondCount)
 	}
 }
 

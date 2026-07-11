@@ -16,11 +16,33 @@ import (
 
 // RouteMetadata 记录路由元数据用于生成文档
 type RouteMetadata struct {
-	Method      string
-	Path        string
-	GroupName   string
-	HandlerType reflect.Type
-	HandlerName string
+	Method            string
+	Path              string
+	FullPath          string
+	GroupName         string
+	ControllerType    reflect.Type
+	HandlerType       reflect.Type
+	HandlerName       string
+	EffectiveFairings *RouteFairingMetadata
+}
+
+// RouteFairingMetadata carries the effective route and controller fairings
+// without making RouteMetadata itself non-comparable.
+type RouteFairingMetadata struct {
+	fairings []Fairing
+}
+
+// NewRouteFairingMetadata snapshots the effective fairings for one route.
+func NewRouteFairingMetadata(fairings ...Fairing) *RouteFairingMetadata {
+	return &RouteFairingMetadata{fairings: append([]Fairing(nil), fairings...)}
+}
+
+// Fairings returns a copy of the effective fairing list.
+func (m *RouteFairingMetadata) Fairings() []Fairing {
+	if m == nil {
+		return nil
+	}
+	return append([]Fairing(nil), m.fairings...)
 }
 
 // OpenAPIInfo 接口描述元数据
@@ -87,7 +109,7 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 	anyAuth := globalAuth
 	if !anyAuth {
 		for _, route := range routes {
-			if openAPIRouteHasAuthFairing(b, route) {
+			if openAPIHasAuthFairing(openAPIEffectiveFairings(route)) {
 				anyAuth = true
 				break
 			}
@@ -127,13 +149,16 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 			return nil, fmt.Errorf("openapi route %s %s missing operationId", route.Method, route.Path)
 		}
 
-		path := route.Path
-		if route.GroupName != "" && !strings.HasPrefix(path, "/"+route.GroupName) {
-			path = "/" + route.GroupName + path
+		path := strings.TrimSpace(route.FullPath)
+		if path == "" {
+			path = route.Path
+			if route.GroupName != "" && !strings.HasPrefix(path, "/"+route.GroupName) {
+				path = "/" + route.GroupName + path
+			}
 		}
 		// 统一路径格式
 		path = strings.ReplaceAll(path, "//", "/")
-		routeAuth := globalAuth || openAPIRouteHasAuthFairing(b, route)
+		routeAuth := globalAuth || openAPIHasAuthFairing(openAPIEffectiveFairings(route))
 		publicRoute := routeAuth && openAPIRouteIsPublic(path, config)
 		path = toOpenAPIPath(path)
 		routeKey := method + " " + path
@@ -210,39 +235,30 @@ func openAPIHasAuthFairing(fairings []Fairing) bool {
 	return false
 }
 
-func openAPIRouteHasAuthFairing(b *Bear, route RouteMetadata) bool {
-	if b == nil || b.routeTree == nil {
-		return false
+func openAPIEffectiveFairings(route RouteMetadata) []Fairing {
+	if route.EffectiveFairings == nil {
+		return nil
 	}
-	methods := []string{route.Method, strings.ToUpper(route.Method), strings.ToLower(route.Method)}
-	for _, method := range methods {
-		if openAPIHasAuthFairing(b.routeTree.getRoute(method, route.Path)) {
-			return true
-		}
-	}
-	return false
+	return route.EffectiveFairings.Fairings()
 }
 
 func openAPIControllerInfo(container *BeanFactory, route RouteMetadata, openAPIPath string) (OpenAPIInfo, bool) {
-	if container == nil {
+	if container == nil || route.ControllerType == nil {
 		return OpenAPIInfo{}, false
 	}
-	candidates := []string{route.Path, openAPIPath}
-	if route.GroupName != "" {
-		fullPath := "/" + strings.Trim(route.GroupName, "/") + "/" + strings.TrimPrefix(route.Path, "/")
-		fullPath = strings.ReplaceAll(fullPath, "//", "/")
-		candidates = append(candidates, fullPath, toOpenAPIPath(fullPath))
+	bean := container.Get(route.ControllerType)
+	provider, ok := bean.(IOpenAPI)
+	if !ok || provider == nil || openAPIReflectValueIsNil(provider) {
+		return OpenAPIInfo{}, false
 	}
-	for _, bean := range container.orderedBeans() {
-		provider, ok := bean.(IOpenAPI)
-		if !ok || provider == nil || openAPIReflectValueIsNil(provider) {
+	candidates := []string{route.FullPath, openAPIPath, route.Path}
+	metadata := provider.OpenAPI()
+	for _, candidate := range candidates {
+		if candidate == "" {
 			continue
 		}
-		metadata := provider.OpenAPI()
-		for _, candidate := range candidates {
-			if info, exists := metadata[candidate]; exists {
-				return info, true
-			}
+		if info, exists := metadata[candidate]; exists {
+			return info, true
 		}
 	}
 	return OpenAPIInfo{}, false

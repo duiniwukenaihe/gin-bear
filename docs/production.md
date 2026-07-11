@@ -217,7 +217,10 @@ Enable Swagger/OpenAPI with:
 app.EnableSwagger()
 ```
 
-The JSON document is served at `/swagger/doc.json`, and the built-in Swagger UI entry is `/swagger`.
+The JSON document is served at `/swagger/doc.json`, and the built-in Swagger
+UI entry is `/swagger`. Swagger is not registered in production mode. The
+development UI uses an immutable Swagger UI version with SRI and a restrictive
+Content Security Policy.
 
 The generator uses route metadata and handler function signatures to infer:
 
@@ -227,11 +230,22 @@ The generator uses route metadata and handler function signatures to infer:
 - `json` tags as request body fields.
 - the first non-error handler return value as the `200` response schema.
 
-When auth config is present, the document includes a JWT bearer `BearerAuth`
-security scheme and top-level security requirement. Public routes explicitly
-override security with an empty requirement, and generated operations include
-standard JSON error responses for `400`, `403`, `404`, and `500`; authenticated
-private routes also include `401`.
+Auth configuration alone never declares OpenAPI security. A globally attached
+`AuthFairing` adds the JWT bearer `BearerAuth` scheme and top-level security
+requirement. Route or controller authentication is declared only from that
+route's effective fairing metadata. Public paths explicitly override an actual
+authentication requirement with an empty requirement. Generated operations
+include standard JSON error responses for `400`, `403`, `404`, and `500`;
+authenticated private routes also include `401`.
+
+Accurate controller metadata and route-level authentication require route
+registration to provide `RouteMetadata.FullPath`, `ControllerType`, and
+`EffectiveFairings`. Missing controller identity is handled conservatively:
+the generator does not search unrelated controller beans by relative path and
+does not guess controller metadata or interceptor authentication. Projects
+with custom route registration should populate all three values after
+combining route and controller fairings. Build the comparable fairing metadata
+value with `NewRouteFairingMetadata(effectiveFairings...)`.
 
 Generation fails on invalid route metadata, duplicate method/path entries, and
 duplicate explicit operation IDs. For externally consumed APIs, review the
@@ -271,11 +285,41 @@ migrations, err := bear.LoadSQLMigrations("migrations")
 if err != nil {
     return err
 }
-runner := bear.NewMigrationRunner(sqlDB)
+runner := bear.NewMigrationRunnerWithDialect(sqlDB, bear.MigrationDialectPostgreSQL)
 return runner.Up(context.Background(), migrations)
 ```
 
-Applied versions are recorded in `schema_migrations`, and rerunning `Up` skips versions that have already been applied.
+Use `MigrationDialectSQLite`, `MigrationDialectMySQL`, or
+`MigrationDialectPostgreSQL` for an explicit deployment contract. The legacy
+`NewMigrationRunner(sqlDB)` constructor and direct `MigrationRunner` literals
+remain source-compatible; known database drivers are inferred, and unknown
+drivers conservatively retain `?` placeholders. Explicit construction is
+recommended for production migration commands.
+
+Applied versions are recorded in `schema_migrations`, and rerunning `Up` skips
+versions that have already been applied. SQLite and PostgreSQL execute each
+migration and its history update in one transaction. MySQL DDL is not
+transactional, so the runner first persists a `dirty` history row, executes the
+SQL, and clears the dirty flag only after the final history update succeeds.
+`Up` and `Down` refuse to continue while any dirty version exists.
+
+After a MySQL failure, inspect the actual schema before resolving the state.
+If the migration completed, keep the history row and mark it applied:
+
+```go
+return runner.ForceMigrationState(ctx, "002", true)
+```
+
+If it did not complete and is safe to run again, remove the dirty history row:
+
+```go
+return runner.ForceMigrationState(ctx, "002", false)
+```
+
+This force operation never executes migration SQL and never decides which
+state the database reached. That decision belongs to the operator. Legacy
+history tables are upgraded with `dirty = false`; legacy lock tables receive
+an owner column.
 
 `Up` and `Down` acquire a portable migration lock so concurrent runners do not apply or roll back schema changes at the same time. Roll back the latest applied migration steps with:
 

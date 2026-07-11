@@ -3,6 +3,7 @@ module github.com/duiniwukenaihe/gin-bear
 go 1.25.12
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/bytedance/sonic v1.15.0
 	github.com/casbin/casbin/v2 v2.110.0
