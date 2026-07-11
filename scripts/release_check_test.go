@@ -22,6 +22,8 @@ func TestReleaseCheckScriptCoversProductionGates(t *testing.T) {
 	for _, want := range []string{
 		"go build ./cmd ./cmd/bear ./cmd/bear-cli",
 		"go test ./... -count=1",
+		`go test ./... -count=1 -coverprofile="${coverage_profile}"`,
+		`BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1`,
 		"go test -race ./... -count=1",
 		"go vet ./...",
 		"govulncheck",
@@ -30,6 +32,9 @@ func TestReleaseCheckScriptCoversProductionGates(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("release-check.sh missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "coverage_packages") {
+		t.Fatalf("release-check.sh must measure total repository coverage, not a package subset:\n%s", text)
 	}
 	for _, unwanted := range []string{
 		"syft",

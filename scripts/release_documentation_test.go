@@ -166,6 +166,28 @@ func TestRunbookUsesPinnedVerificationAndChecksReleaseChecksums(t *testing.T) {
 	}
 }
 
+func TestReleaseCandidateResultIsAuditableAndStillUnpublished(t *testing.T) {
+	runbook := readDocumentationFile(t, "../docs/runbook.md")
+	for _, phrase := range []string{
+		"v0.10.0-rc.1",
+		"73.5%",
+		"critical coverage binding 87.9%",
+		"BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e",
+		"not tagged or published",
+	} {
+		if !strings.Contains(runbook, phrase) {
+			t.Fatalf("runbook missing RC audit evidence %q", phrase)
+		}
+	}
+
+	changelog := readDocumentationFile(t, "../CHANGELOG.md")
+	for _, phrase := range []string{"local release-candidate verification", "awaits human review", "not published"} {
+		if !strings.Contains(strings.ToLower(changelog), phrase) {
+			t.Fatalf("changelog missing RC publication state %q", phrase)
+		}
+	}
+}
+
 func readDocumentationFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)

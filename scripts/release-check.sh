@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export GOSUMDB=sum.golang.org
+export GOTOOLCHAIN=go1.25.12
 export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
 coverage_profile="${COVERAGE_PROFILE:-coverage.out}"
-coverage_packages=(
-	./cmd/bear-cli/cmd
-	./pkg/bear
-)
 
 echo "==> Checking module tidiness"
 go mod tidy
@@ -31,9 +29,12 @@ go build \
 echo "==> Running tests"
 go test ./... -count=1
 
-echo "==> Measuring core package coverage"
-go test "${coverage_packages[@]}" -count=1 -coverprofile="${coverage_profile}"
+echo "==> Measuring repository and critical-chain coverage"
+go test ./... -count=1 -coverprofile="${coverage_profile}"
 scripts/check-coverage.sh "${coverage_profile}"
+
+echo "==> Running legacy and generated application E2E checks"
+BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1
 
 echo "==> Running race tests"
 go test -race ./... -count=1

@@ -34,6 +34,94 @@
 The release workflow runs only for `v*` tags. It runs `make verify` before
 GoReleaser with Go 1.25.12 and grants `contents: write` only to the release job.
 
+## v0.10.0-rc.1 Candidate Audit
+
+The `v0.10.0-rc.1` candidate is under local verification. It is not tagged or published.
+All commands use `GOSUMDB=sum.golang.org` and `GOTOOLCHAIN=go1.25.12`, run in
+the foreground, and complete before the next command starts.
+
+The reproducible coverage sequence is:
+
+```bash
+rm -f coverage.out
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test ./... -coverprofile=coverage.out -count=1
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/check-coverage.sh coverage.out
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go tool cover -func=coverage.out
+```
+
+The 2026-07-11 local profile reports 73.5% total statement coverage. The
+critical-chain gate reports:
+
+```text
+critical coverage handler 82.0%
+critical coverage binding 87.9%
+critical coverage errors 94.5%
+critical coverage config-loader 91.8%
+critical coverage lifecycle 85.0%
+critical coverage auth 92.2%
+critical coverage migration-lock 80.3%
+critical coverage cron-lock 88.9%
+critical coverage cli 93.1%
+critical coverage scaffold 82.9%
+```
+
+Run the release-only compatibility test once with:
+
+```bash
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1 -v
+```
+
+It builds a v0.9-style application and a newly generated application in
+temporary directories. Each fixture must start, answer `/live`, `/ready`, a
+successful route, a validation failure, and an unauthorized request, then exit
+cleanly after `SIGTERM`. Captured logs and stdout traces are rejected if they
+contain the request secret.
+
+After coverage and compatibility pass, run the final gate strictly in this
+order and record every exit code:
+
+```bash
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go clean -testcache
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test ./... -count=1
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test ./... -shuffle=on -count=20
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test -race ./... -count=3
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go vet ./...
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/release-check.sh
+git diff --check
+```
+
+Before review, inspect local branches, remote heads, and container assets. The
+active local `codex/production-framework-v010` development branch is allowed;
+remote heads are limited to `main` and `codex/production-baseline`. Docker,
+Compose, Kubernetes, and Helm files must remain absent. Remove `coverage.out`
+and generated snapshot artifacts before committing. Tagging and pushing remain
+manual post-review steps.
+
+### Recorded Result: 2026-07-11
+
+The final local sequence completed with exit code 0 for clean, the single test
+run, `-shuffle=on -count=20`, `-race -count=3`, vet, pinned staticcheck, pinned
+govulncheck, the explicit 70% release check, and the default release check.
+`govulncheck` reported zero reachable vulnerabilities. The macOS race linker
+printed the known `malformed LC_DYSYMTAB` warning, but the race command exited 0.
+
+During verification, the first shuffle run hit the package's 10-minute timeout
+because generated-resource compilation was repeated 20 times. That compile
+check now runs once in the release-only E2E while normal scaffold tests retain
+generation, formatting, and atomicity checks. A later diagnostic full shuffle
+run exited 1 under concurrent package load; its recorded seed passed a focused
+`pkg/bear -count=20` reproduction, and the subsequent full required command
+completed with exit 0. Treat the remaining timing headroom in scaffold shuffle
+tests as an RC risk and keep the final command in pre-release verification.
+
+Repository hygiene also passed: local branches were `main`,
+`codex/production-baseline`, and the active allowed development branch;
+remote heads were only `main` and `codex/production-baseline`; the container and
+Kubernetes file search returned no results. Human review is still required
+before creating any tag, push, merge, or release.
+
 ## Rollback
 
 1. Stop routing new traffic to the unhealthy version.

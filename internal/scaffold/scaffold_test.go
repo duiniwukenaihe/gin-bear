@@ -315,10 +315,6 @@ func TestResourceGenerationUsesInternalPackagesDecimalAndAtomicWrites(t *testing
 		t.Fatalf("resource was generated under pkg: %v", err)
 	}
 
-	runGo(t, project, "mod", "edit", "-replace", "github.com/duiniwukenaihe/gin-bear="+repoRoot(t))
-	runGo(t, project, "mod", "tidy")
-	runGo(t, project, "test", "./...", "-count=1")
-
 	failedDir := filepath.Join(project, "internal", "broken")
 	_, _, code = runCommand(t, project, bearBinary, "gen", "api", "broken", "--fields", "missing-type")
 	if code == 0 {
