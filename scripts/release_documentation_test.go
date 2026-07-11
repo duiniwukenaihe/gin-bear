@@ -136,9 +136,11 @@ func TestReleaseWorkflowIsTagScopedAndUsesImmutableActions(t *testing.T) {
 		"contents: write",
 		"actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1",
 		"actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0",
+		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2",
 		"goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3",
 		"go-version: \"1.25.12\"",
-		"run: make verify",
+		"run: make verify-rc",
+		"name: rc-verification",
 		"version: v2.17.0",
 		"release --clean",
 	} {
@@ -157,6 +159,7 @@ func TestRunbookUsesPinnedVerificationAndChecksReleaseChecksums(t *testing.T) {
 	runbook := readDocumentationFile(t, "../docs/runbook.md")
 	for _, phrase := range []string{
 		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify",
+		"SHUFFLE_SEED=20260711 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify-rc",
 		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run github.com/goreleaser/goreleaser/v2@v2.17.0 release --snapshot --clean",
 		"(cd dist && shasum -a 256 -c checksums.txt)",
 	} {
@@ -170,8 +173,12 @@ func TestReleaseCandidateResultIsAuditableAndStillUnpublished(t *testing.T) {
 	runbook := readDocumentationFile(t, "../docs/runbook.md")
 	for _, phrase := range []string{
 		"v0.10.0-rc.1",
-		"73.5%",
-		"critical coverage binding 87.9%",
+		"75.8%",
+		"critical coverage handler 82.9%",
+		"critical coverage binding 88.5%",
+		"critical coverage lifecycle 84.9%",
+		"scripts/check-api-compat.sh",
+		"SHUFFLE_SEED=20260711",
 		"BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e",
 		"not tagged or published",
 	} {

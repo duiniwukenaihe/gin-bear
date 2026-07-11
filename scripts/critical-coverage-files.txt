@@ -1,0 +1,21 @@
+# Each row is: critical-group repository-relative-production-file.
+# Lists are intentionally explicit so additions require a reviewed gate update.
+handler pkg/bear/bear.go
+handler pkg/bear/fairing.go
+handler pkg/bear/handler.go
+handler pkg/bear/responder.go
+binding pkg/bear/binding.go
+errors pkg/bear/error.go
+errors pkg/bear/http_error.go
+config-loader pkg/bear/config_loader.go
+lifecycle pkg/bear/bear.go
+lifecycle pkg/bear/lifecycle.go
+auth pkg/bear/auth_token.go
+auth pkg/bear/jwt.go
+auth pkg/bear/jwt_fairing.go
+migration-lock pkg/bear/migration.go
+cron-lock pkg/bear/cron_lock.go
+cli internal/cli/gen.go
+cli internal/cli/new.go
+cli internal/cli/root.go
+scaffold internal/scaffold/embed.go

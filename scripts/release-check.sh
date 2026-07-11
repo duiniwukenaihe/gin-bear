@@ -4,11 +4,32 @@ set -euo pipefail
 export GOSUMDB=sum.golang.org
 export GOTOOLCHAIN=go1.25.12
 export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
-coverage_profile="${COVERAGE_PROFILE:-coverage.out}"
+if [[ "${COVERAGE_PROFILE+x}" == "x" ]]; then
+	if [[ -z "${COVERAGE_PROFILE}" ]]; then
+		printf 'COVERAGE_PROFILE must not be empty when explicitly set\n' >&2
+		exit 1
+	fi
+	coverage_profile="${COVERAGE_PROFILE}"
+	coverage_profile_owned=false
+	printf '==> Using caller-owned coverage profile %s\n' "${coverage_profile}"
+else
+	coverage_profile="$(mktemp "${TMPDIR:-/tmp}/gin-bear-coverage.XXXXXX")"
+	coverage_profile_owned=true
+	printf '==> Using release-owned temporary coverage profile %s\n' "${coverage_profile}"
+fi
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gin-bear-build.XXXXXX")"
+cleanup() {
+	rm -rf "${BUILD_DIR}"
+	if [[ "${coverage_profile_owned}" == "true" ]]; then
+		rm -f "${coverage_profile}"
+	fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "==> Checking module tidiness"
-go mod tidy
-git diff --exit-code -- go.mod go.sum
+go mod tidy -diff
 git diff --check
 
 echo "==> Building command packages"
@@ -19,8 +40,6 @@ MODULE_PATH="$(go list -m)"
 VERSION="${VERSION:-dev}"
 COMMIT="${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-BUILD_DIR="$(mktemp -d)"
-trap 'rm -rf "${BUILD_DIR}"' EXIT
 go build \
 	-ldflags="-X ${MODULE_PATH}/pkg/bear.Version=${VERSION} -X ${MODULE_PATH}/pkg/bear.Commit=${COMMIT} -X ${MODULE_PATH}/pkg/bear.BuildTime=${BUILD_TIME}" \
 	-o "${BUILD_DIR}/gin-bear" \
@@ -32,6 +51,9 @@ go test ./... -count=1
 echo "==> Measuring repository and critical-chain coverage"
 go test ./... -count=1 -coverprofile="${coverage_profile}"
 scripts/check-coverage.sh "${coverage_profile}"
+
+echo "==> Checking v0.9.1 public API compatibility"
+scripts/check-api-compat.sh
 
 echo "==> Running legacy and generated application E2E checks"
 BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1

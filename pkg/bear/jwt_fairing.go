@@ -79,7 +79,7 @@ func isPublicAuthPathForConfig(path string, config *SysConfig) bool {
 	if config == nil || config.Auth == nil {
 		return false
 	}
-	for _, pattern := range config.Auth.PublicPaths {
+	for _, pattern := range stringSliceValue(config.Auth.PublicPaths) {
 		if publicPathMatch(path, pattern) {
 			return true
 		}

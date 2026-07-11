@@ -162,9 +162,9 @@ func TestSetDefaultLoggerUsesConfiguredLevel(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.Log.Level = "debug"
 
-	SetDefaultLogger(cfg)
+	setDefaultLoggerForConfig(cfg)
 	t.Cleanup(func() {
-		SetDefaultLogger(NewSysConfig())
+		setDefaultLoggerForConfig(NewSysConfig())
 	})
 
 	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
@@ -744,7 +744,7 @@ func TestContextHandlerAndLogWrappersDoNotPanic(t *testing.T) {
 		t.Fatalf("Handle(ctx) failed: %v", err)
 	}
 
-	SetDefaultLogger(NewSysConfig())
+	setDefaultLoggerForConfig(NewSysConfig())
 	Info("info")
 	ErrorLog("error")
 	Warn("warn")
@@ -1433,7 +1433,7 @@ func TestGenerateOpenAPIMarksPublicPathsWithoutSecurity(t *testing.T) {
 	resetGinModeForTest(t)
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.PublicPaths = []string{"/api/public/*"}
+	cfg.Auth.PublicPaths = stringSlicePointer("/api/public/*")
 
 	app := Ignite(cfg)
 	app.Mount("/api", &openAPIPublicTestController{})
@@ -1470,7 +1470,7 @@ func TestGenerateOpenAPIIncludesStandardErrorResponses(t *testing.T) {
 	resetGinModeForTest(t)
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.PublicPaths = []string{"/api/public/*"}
+	cfg.Auth.PublicPaths = stringSlicePointer("/api/public/*")
 
 	app := Ignite(cfg)
 	app.Mount("/api", &openAPIPublicTestController{})
@@ -1590,7 +1590,7 @@ func TestAuthFairingUsesConfiguredPublicPaths(t *testing.T) {
 	resetGinModeForTest(t)
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.PublicPaths = []string{"/public/*"}
+	cfg.Auth.PublicPaths = stringSlicePointer("/public/*")
 
 	app := Ignite(cfg)
 	app.Attach(NewAuthFairing())
@@ -1752,7 +1752,7 @@ func TestNewRedisAdapterPanicsWhenRequiredRedisUnavailable(t *testing.T) {
 
 func TestWebSocketOriginPolicyUsesAllowlist(t *testing.T) {
 	cfg := NewSysConfig()
-	cfg.WS.AllowedOrigins = []string{"https://app.example.com"}
+	cfg.WS.AllowedOrigins = stringSlicePointer("https://app.example.com")
 
 	allowed := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	allowed.Header.Set("Origin", "https://app.example.com")

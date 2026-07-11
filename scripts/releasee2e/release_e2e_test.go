@@ -4,7 +4,6 @@ package releasee2e
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net"
@@ -19,18 +18,17 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/duiniwukenaihe/gin-bear/internal/cli"
-	"github.com/duiniwukenaihe/gin-bear/internal/scaffold"
 )
 
 const releaseSecret = "task10-release-secret-7Yp3mQ9"
+const maxApplicationLogBytes = 1 << 20
 
 func TestReleaseCandidateApplications(t *testing.T) {
 	if os.Getenv("BEAR_RELEASE_E2E") != "1" {
 		t.Skip("release-only application E2E")
 	}
 	repository := repositoryRoot(t)
+	bearCLI := buildFixture(t, repository, "./cmd/bear")
 
 	t.Run("legacy-v0.9-style", func(t *testing.T) {
 		directory := createLegacyFixture(t, repository)
@@ -39,7 +37,7 @@ func TestReleaseCandidateApplications(t *testing.T) {
 	})
 
 	t.Run("newly-generated", func(t *testing.T) {
-		directory := createGeneratedFixture(t, repository)
+		directory := createGeneratedFixture(t, repository, bearCLI)
 		binary := buildFixture(t, directory, "./cmd/server")
 		exerciseApplication(t, binary, directory)
 	})
@@ -61,44 +59,42 @@ replace github.com/duiniwukenaihe/gin-bear => %s
 	return directory
 }
 
-func createGeneratedFixture(t *testing.T, repository string) string {
+func createGeneratedFixture(t *testing.T, repository, bearCLI string) string {
 	t.Helper()
 	directory := filepath.Join(t.TempDir(), "generated-release-check")
-	if err := scaffold.Generate(context.Background(), scaffold.Options{
-		Name:             "generated-release-check",
-		Module:           "example.com/generated-release-check",
-		Directory:        directory,
-		FrameworkVersion: "v0.10.0-rc.1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(directory, "internal", "app", "app.go"), generatedFixtureAppSource)
+	runCLI(t, filepath.Dir(directory), bearCLI,
+		"new", "generated-release-check",
+		"--module", "example.com/generated-release-check",
+		"--directory", directory,
+		"--framework-version", "v0.10.0-rc.1",
+	)
+	appPath := filepath.Join(directory, "internal", "app", "app.go")
+	generatedApp := readFile(t, appPath)
+	writeFile(t, filepath.Join(directory, "internal", "app", "routes.go"), generatedFixtureRoutesSource)
+	writeFile(t, filepath.Join(directory, "application.yaml"), generatedFixtureConfig)
 	runGo(t, directory, "mod", "edit", "-replace", "github.com/duiniwukenaihe/gin-bear="+repository)
 	runGo(t, directory, "mod", "tidy")
-	generateFixtureResource(t, directory)
+	generateFixtureResource(t, directory, bearCLI)
 	runGo(t, directory, "mod", "tidy")
 	runGo(t, directory, "test", "./...", "-count=1")
+	if current := readFile(t, appPath); current != generatedApp {
+		t.Fatalf("release E2E modified generated internal/app/app.go:\nbefore:\n%s\nafter:\n%s", generatedApp, current)
+	}
 	return directory
 }
 
-func generateFixtureResource(t *testing.T, directory string) {
+func generateFixtureResource(t *testing.T, directory, bearCLI string) {
 	t.Helper()
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(directory); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.Chdir(workingDirectory); err != nil {
-			t.Errorf("restore working directory: %v", err)
-		}
-	}()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	if code := cli.Execute([]string{"gen", "api", "invoice", "--fields", "amount:decimal,published_at:datetime"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("generate resource exit code = %d\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	runCLI(t, directory, bearCLI, "gen", "api", "invoice", "--fields", "amount:decimal,published_at:datetime")
+}
+
+func runCLI(t *testing.T, directory, binary string, args ...string) {
+	t.Helper()
+	command := exec.Command(binary, args...)
+	command.Dir = directory
+	command.Env = commandEnvironment(nil)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("%s %s: %v\n%s", binary, strings.Join(args, " "), err, output)
 	}
 }
 
@@ -111,60 +107,36 @@ func buildFixture(t *testing.T, directory, packagePath string) string {
 
 func exerciseApplication(t *testing.T, binary, directory string) {
 	t.Helper()
-	port := reservePort(t)
-	var stdout lockedBuffer
-	var stderr lockedBuffer
-	command := exec.Command(binary)
-	command.Dir = directory
-	command.Env = commandEnvironment(map[string]string{
-		"BEAR_E2E_PORT": strconv.Itoa(port),
-		"BEAR_ENV":      "test",
-		"GIN_MODE":      "release",
-	})
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- command.Wait() }()
+	running, baseURL, client := startApplication(t, binary, directory)
 	stopped := false
 	defer func() {
 		if stopped {
 			return
 		}
-		_ = command.Process.Kill()
-		select {
-		case <-waitDone:
-		case <-time.After(5 * time.Second):
-		}
+		running.killAndWait()
 	}()
 
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	client := &http.Client{Timeout: 2 * time.Second}
-	if err := waitForLive(client, baseURL+"/live", 20*time.Second); err != nil {
-		t.Fatalf("startup: %v", err)
-	}
 	assertResponse(t, client, http.MethodGet, baseURL+"/live", "", nil, http.StatusOK, `"status":"ok"`)
 	assertResponse(t, client, http.MethodGet, baseURL+"/ready", "", nil, http.StatusOK, `"status":"ready"`)
 	assertResponse(t, client, http.MethodGet, baseURL+"/success?access_token="+releaseSecret, "", nil, http.StatusOK, "release-ok")
 	assertResponse(t, client, http.MethodPost, baseURL+"/validate", `{"secret":"`+releaseSecret+`"}`, map[string]string{"Content-Type": "application/json"}, http.StatusBadRequest, "Invalid request")
 	assertResponse(t, client, http.MethodGet, baseURL+"/private", "", map[string]string{"Authorization": "Bearer " + releaseSecret}, http.StatusUnauthorized, "invalid or expired token")
 
-	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := running.command.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("send SIGTERM: %v", err)
 	}
 	select {
-	case err := <-waitDone:
+	case err := <-running.waitDone:
 		stopped = true
+		running.waited = true
 		if err != nil {
-			t.Fatalf("application exited after SIGTERM: %v\n%s", err, stdout.String()+stderr.String())
+			t.Fatalf("application exited after SIGTERM: %v\n%s", err, running.output())
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("application did not exit within 15s after SIGTERM")
 	}
 
-	output := stdout.String() + stderr.String()
+	output := running.output()
 	if strings.Contains(output, releaseSecret) {
 		t.Fatalf("logs or traces leaked request secret:\n%s", output)
 	}
@@ -175,9 +147,63 @@ func exerciseApplication(t *testing.T, binary, directory string) {
 	}
 }
 
-func waitForLive(client *http.Client, url string, timeout time.Duration) error {
+type runningApplication struct {
+	command  *exec.Cmd
+	waitDone chan error
+	stdout   *boundedBuffer
+	stderr   *boundedBuffer
+	waited   bool
+}
+
+func startApplication(t *testing.T, binary, directory string) (*runningApplication, string, *http.Client) {
+	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second}
+	var failures []string
+	for attempt := 1; attempt <= 3; attempt++ {
+		port := reservePort(t)
+		running := &runningApplication{
+			command: exec.Command(binary),
+			stdout:  newBoundedBuffer(maxApplicationLogBytes),
+			stderr:  newBoundedBuffer(maxApplicationLogBytes),
+		}
+		running.command.Dir = directory
+		running.command.Env = commandEnvironment(map[string]string{
+			"BEAR_SERVER_PORT": strconv.Itoa(port),
+			"BEAR_E2E_PORT":    strconv.Itoa(port),
+			"BEAR_ENV":         "test",
+			"GIN_MODE":         "release",
+		})
+		running.command.Stdout = running.stdout
+		running.command.Stderr = running.stderr
+		if err := running.command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		running.waitDone = make(chan error, 1)
+		go func() { running.waitDone <- running.command.Wait() }()
+		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+		if err := waitForLive(client, baseURL+"/live", running.waitDone, 20*time.Second); err == nil {
+			return running, baseURL, client
+		} else {
+			failures = append(failures, fmt.Sprintf("attempt %d: %v\n%s", attempt, err, running.output()))
+		}
+		running.killAndWait()
+	}
+	t.Fatalf("application failed to start after 3 complete attempts:\n%s", strings.Join(failures, "\n"))
+	return nil, "", nil
+}
+
+func waitForLive(client *http.Client, url string, waitDone chan error, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		select {
+		case err := <-waitDone:
+			waitDone <- err
+			if err != nil {
+				return fmt.Errorf("process exited before live: %w", err)
+			}
+			return fmt.Errorf("process exited before live")
+		default:
+		}
 		response, err := client.Get(url)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
@@ -280,18 +306,56 @@ func writeFile(t *testing.T, path, contents string) {
 	}
 }
 
-type lockedBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(contents)
 }
 
-func (buffer *lockedBuffer) Write(contents []byte) (int, error) {
+func (application *runningApplication) killAndWait() {
+	if application == nil || application.waited {
+		return
+	}
+	if application.command.Process != nil {
+		_ = application.command.Process.Kill()
+	}
+	<-application.waitDone
+	application.waited = true
+}
+
+func (application *runningApplication) output() string {
+	return application.stdout.String() + application.stderr.String()
+}
+
+type boundedBuffer struct {
+	mu        sync.Mutex
+	buffer    bytes.Buffer
+	remaining int64
+}
+
+func newBoundedBuffer(limit int64) *boundedBuffer {
+	return &boundedBuffer{remaining: limit}
+}
+
+func (buffer *boundedBuffer) Write(contents []byte) (int, error) {
+	written := len(contents)
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
-	return buffer.buffer.Write(contents)
+	if buffer.remaining <= 0 {
+		return written, nil
+	}
+	if int64(len(contents)) > buffer.remaining {
+		contents = contents[:buffer.remaining]
+	}
+	_, _ = buffer.buffer.Write(contents)
+	buffer.remaining -= int64(len(contents))
+	return written, nil
 }
 
-func (buffer *lockedBuffer) String() string {
+func (buffer *boundedBuffer) String() string {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	return buffer.buffer.String()
@@ -337,7 +401,8 @@ func main() {
 	config.Server.Port = int32(port)
 	config.DB.Enabled = false
 	config.Auth.JWTSecret = "release-e2e-jwt-secret-1234567890"
-	config.Auth.PublicPaths = []string{"/live", "/ready", "/success", "/validate"}
+	publicPaths := []string{"/live", "/ready", "/success", "/validate"}
+	config.Auth.PublicPaths = &publicPaths
 	config.Tracing.Enabled = true
 	config.Tracing.Exporter = "stdout"
 	config.Tracing.ServiceName = "legacy-release-check"
@@ -350,14 +415,9 @@ func main() {
 }
 `
 
-const generatedFixtureAppSource = `package app
+const generatedFixtureRoutesSource = `package app
 
 import (
-	"context"
-	"fmt"
-	"os"
-	"strconv"
-
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
@@ -365,31 +425,40 @@ type validationRequest struct {
 	Name string ` + "`json:\"name\" binding:\"required\"`" + `
 }
 
-func Run(ctx context.Context) error {
-	port, err := strconv.Atoi(os.Getenv("BEAR_E2E_PORT"))
-	if err != nil { return err }
-	config := bear.NewSysConfig()
-	config.Server.Port = int32(port)
-	config.DB.Enabled = false
-	config.Auth.JWTSecret = "release-e2e-jwt-secret-1234567890"
-	config.Auth.PublicPaths = []string{"/live", "/ready", "/success", "/validate"}
-	config.Tracing.Enabled = true
-	config.Tracing.Exporter = "stdout"
-	config.Tracing.ServiceName = "generated-release-check"
-	config.Tracing.SampleRate = 1
-	application := bear.Ignite(config).EnableTracing(ctx).EnableHealth()
+func configure(application *bear.Bear) {
 	application.Handle("GET", "/success", func() map[string]string { return map[string]string{"result": "release-ok"} })
 	application.Handle("POST", "/validate", func(request *validationRequest) map[string]string {
 		return map[string]string{"name": request.Name}
 	})
 	application.Handle("GET", "/private", func() string { return "private" })
 	application.Attach(bear.NewAuthFairing())
-	if err := application.ApplyAll(ctx); err != nil {
-		return fmt.Errorf("initialize application: %w", err)
-	}
-	if err := application.Launch(ctx); err != nil {
-		return fmt.Errorf("launch application: %w", err)
-	}
-	return nil
 }
+`
+
+const generatedFixtureConfig = `server:
+  port: 8080
+  name: "generated-release-check"
+  shutdown_timeout: "5s"
+
+database:
+  enabled: false
+
+tracing:
+  enabled: true
+  service_name: "generated-release-check"
+  exporter: "stdout"
+  sample_rate: 1.0
+
+auth:
+  jwt_secret: "release-e2e-jwt-secret-1234567890"
+  token_expire_hours: 24
+  public_paths:
+    - "/live"
+    - "/ready"
+    - "/success"
+    - "/validate"
+
+metrics:
+  enabled: true
+  path: "/metrics"
 `

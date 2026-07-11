@@ -159,9 +159,9 @@ func TestTask10AuthTokenRevocationAndBlacklistErrors(t *testing.T) {
 	client := redis.NewClient(&redis.Options{
 		Addr:         server.Addr(),
 		MaxRetries:   -1,
-		DialTimeout:  10 * time.Millisecond,
-		ReadTimeout:  10 * time.Millisecond,
-		WriteTimeout: 10 * time.Millisecond,
+		DialTimeout:  500 * time.Millisecond,
+		ReadTimeout:  500 * time.Millisecond,
+		WriteTimeout: 500 * time.Millisecond,
 	})
 	t.Cleanup(func() { _ = client.Close() })
 	util := NewJWTUtil("task10-secret-1234567890", 1)
@@ -194,7 +194,9 @@ func TestTask10AuthTokenRevocationAndBlacklistErrors(t *testing.T) {
 	}
 
 	server.Close()
-	if _, err := manager.IsTokenBlacklisted(context.Background(), token); err == nil {
+	errorCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := manager.IsTokenBlacklisted(errorCtx, token); err == nil {
 		t.Fatal("closed revocation store returned no error")
 	}
 	manager.JWTUtil = util

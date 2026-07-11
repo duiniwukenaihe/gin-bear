@@ -628,7 +628,7 @@ func TestLoadConfigRejectsWhitespaceProductionSecret(t *testing.T) {
 }
 
 func TestDefaultAuthPathsDoNotExposeMetrics(t *testing.T) {
-	if slices.Contains(NewSysConfig().Auth.PublicPaths, "/metrics") {
+	if slices.Contains(stringSliceValue(NewSysConfig().Auth.PublicPaths), "/metrics") {
 		t.Fatal("default auth public paths expose /metrics")
 	}
 }
@@ -652,7 +652,7 @@ func TestProductionExampleUsesHardenedDefaults(t *testing.T) {
 	if cfg.DB.Password != "" {
 		t.Fatal("production example must leave database password empty for POSTGRES_PASSWORD")
 	}
-	if slices.Contains(cfg.Auth.PublicPaths, "/metrics") {
+	if slices.Contains(stringSliceValue(cfg.Auth.PublicPaths), "/metrics") {
 		t.Fatal("production example exposes /metrics as an auth public path")
 	}
 	if len(cfg.Auth.JWTSecret) < 32 {

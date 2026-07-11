@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -308,18 +309,55 @@ func TestCronWarnsWhenExecutionReachesEightyPercentOfTTL(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	var logs bytes.Buffer
+	var logs lockedLogBuffer
 	manager := NewCronManager(&RedisAdapter{Client: client})
 	manager.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	started := make(chan struct{})
+	release := make(chan struct{})
 	id, err := manager.AddDistributedFunc("* * * * * *", "slow", 100*time.Millisecond, func() {
-		time.Sleep(90 * time.Millisecond)
+		close(started)
+		<-release
 	})
 	requireNoError(t, err)
 
-	runCronEntry(t, manager, id)
+	done := make(chan struct{})
+	go func() {
+		manager.scheduler.Entry(id).Job.Run()
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		<-done
+		t.Fatal("distributed job did not start")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(logs.String(), "Distributed job lock TTL nearing expiration") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(release)
+	<-done
 	if got := logs.String(); !strings.Contains(got, "Distributed job lock TTL nearing expiration") {
 		t.Fatalf("missing 80%% TTL warning in logs: %s", got)
 	}
+}
+
+type lockedLogBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (buffer *lockedLogBuffer) Write(contents []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.Write(contents)
+}
+
+func (buffer *lockedLogBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.String()
 }
 
 func TestCronLockWarningDelayAvoidsDurationOverflow(t *testing.T) {

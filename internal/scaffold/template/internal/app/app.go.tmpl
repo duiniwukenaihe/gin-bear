@@ -10,6 +10,8 @@ import (
 func Run(ctx context.Context) error {
 	application := bear.Ignite()
 	application.EnableHealth()
+	application.EnableTracing(ctx)
+	configure(application)
 	if err := application.ApplyAll(ctx); err != nil {
 		return fmt.Errorf("initialize application: %w", err)
 	}

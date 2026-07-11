@@ -9,13 +9,19 @@
    ```bash
    GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
    ```
-3. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
-4. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
-5. Confirm `server.shutdown_timeout`, `health.readiness_timeout`, `log.level`, and `redis.required` match the service's dependency profile.
-6. For a tag release, confirm `.goreleaser.yml` still builds only `cmd/bear`
+3. Before an RC or tag, run the complete audited gate with an explicit shuffle
+   seed:
+
+   ```bash
+   SHUFFLE_SEED=20260711 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify-rc
+   ```
+4. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
+5. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
+6. Confirm `server.shutdown_timeout`, `health.readiness_timeout`, `log.level`, and `redis.required` match the service's dependency profile.
+7. For a tag release, confirm `.goreleaser.yml` still builds only `cmd/bear`
    archives for Linux, macOS, and Windows, plus SHA-256 checksums, source
    archive, changelog text, and release metadata.
-7. Before publishing, run the pinned local snapshot check:
+8. Before publishing, run the pinned local snapshot check:
 
    ```bash
    GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run github.com/goreleaser/goreleaser/v2@v2.17.0 release --snapshot --clean
@@ -31,8 +37,9 @@
    Inspect `dist/checksums.txt`, the CLI archives, and `dist/artifacts.json`.
    Remove `dist/` after the check; snapshot artifacts are not committed.
 
-The release workflow runs only for `v*` tags. It runs `make verify` before
-GoReleaser with Go 1.25.12 and grants `contents: write` only to the release job.
+The release workflow runs only for `v*` tags. It runs `make verify-rc` before
+GoReleaser with Go 1.25.12, uploads the `rc-verification` logs even on failure,
+and grants `contents: write` only to the release job.
 
 ## v0.10.0-rc.1 Candidate Audit
 
@@ -40,30 +47,46 @@ The `v0.10.0-rc.1` candidate is under local verification. It is not tagged or pu
 All commands use `GOSUMDB=sum.golang.org` and `GOTOOLCHAIN=go1.25.12`, run in
 the foreground, and complete before the next command starts.
 
-The reproducible coverage sequence is:
+The reproducible coverage sequence keeps its profile outside the worktree:
 
 ```bash
-rm -f coverage.out
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test ./... -coverprofile=coverage.out -count=1
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/check-coverage.sh coverage.out
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go tool cover -func=coverage.out
+profile=$(mktemp /tmp/gin-bear-coverage.XXXXXX)
+trap 'rm -f "$profile"' EXIT
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test ./... -coverprofile="$profile" -count=1
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/check-coverage.sh "$profile"
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go tool cover -func="$profile"
 ```
 
-The 2026-07-11 local profile reports 73.5% total statement coverage. The
-critical-chain gate reports:
+The profile regenerated on 2026-07-11 contains 2,822 covered statements out of
+3,723, or 75.799087% before display formatting (75.8%). The checked-in manifest
+lists every production file in each critical group; handler includes all of
+`bear.go`, `handler.go`, `responder.go`, and `fairing.go`, lifecycle includes all
+of `bear.go` and `lifecycle.go`, and scaffold is checked against the current
+platform's complete `internal/scaffold` production `GoFiles`. The gate reports:
 
 ```text
-critical coverage handler 82.0%
-critical coverage binding 87.9%
+critical coverage handler 82.9%
+critical coverage binding 88.5%
 critical coverage errors 94.5%
 critical coverage config-loader 91.8%
-critical coverage lifecycle 85.0%
+critical coverage lifecycle 84.9%
 critical coverage auth 92.2%
 critical coverage migration-lock 80.3%
 critical coverage cron-lock 88.9%
 critical coverage cli 93.1%
 critical coverage scaffold 82.9%
 ```
+
+Public API compatibility is checked without repository history or local tags:
+
+```bash
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/check-api-compat.sh
+```
+
+The committed `scripts/api/v0.9.1.txt` module manifest covers every public Go
+package from v0.9.1. The pinned official `apidiff` gate permits additions and
+rejects removals or incompatible changes; the separate v0.9 consumer fixture is
+also compiled by `go test ./...`.
 
 Run the release-only compatibility test once with:
 
@@ -77,50 +100,42 @@ successful route, a validation failure, and an unauthorized request, then exit
 cleanly after `SIGTERM`. Captured logs and stdout traces are rejected if they
 contain the request secret.
 
-After coverage and compatibility pass, run the final gate strictly in this
-order and record every exit code:
+After coverage and compatibility pass, run the final gate through its tracked
+entry point. It records commit `1db2743e3b1146ecc6592e0ea46cfa4e5ad311c1` as
+the base HEAD for this review worktree, Go and pinned tool versions, shuffle
+seed `20260711`, each command and exit code, and before/after worktree status:
 
 ```bash
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go clean -testcache
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test ./... -count=1
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test ./... -shuffle=on -count=20
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test -race ./... -count=3
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go vet ./...
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/release-check.sh
-git diff --check
+SHUFFLE_SEED=20260711 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify-rc
 ```
 
-Before review, inspect local branches, remote heads, and container assets. The
-active local `codex/production-framework-v010` development branch is allowed;
-remote heads are limited to `main` and `codex/production-baseline`. Docker,
-Compose, Kubernetes, and Helm files must remain absent. Remove `coverage.out`
-and generated snapshot artifacts before committing. Tagging and pushing remain
-manual post-review steps.
+By default logs are retained in a `mktemp` directory outside the repository;
+CI sets `RC_ARTIFACT_DIR` under `runner.temp` and uploads it. The final hygiene
+step permits the active local `codex/production-framework-v010` development
+branch, limits remote heads to `main` and `codex/production-baseline`, rejects
+container/Kubernetes/Helm files and `coverage.out`, and requires final worktree
+status to equal its initial snapshot.
 
 ### Recorded Result: 2026-07-11
 
-The final local sequence completed with exit code 0 for clean, the single test
-run, `-shuffle=on -count=20`, `-race -count=3`, vet, pinned staticcheck, pinned
-govulncheck, the explicit 70% release check, and the default release check.
-`govulncheck` reported zero reachable vulnerabilities. The macOS race linker
-printed the known `malformed LC_DYSYMTAB` warning, but the race command exited 0.
+The final fresh run used base HEAD
+`1db2743e3b1146ecc6592e0ea46cfa4e5ad311c1`, shuffle seed `20260711`, Go
+1.25.12, staticcheck 2026.1 (`v0.7.0`), and govulncheck `v1.6.0`. Its audit
+directory was
+`/var/folders/n0/1dxtrxzn305_fjv9vgth7pf40000gn/T/gin-bear-rc.H44w3t`.
+`results.tsv` recorded exit code 0 for `clean`, `count1`, `shuffle20`, `race3`,
+`vet`, `staticcheck`, `govulncheck`, `release-check`, `diff-check`, `hygiene`,
+and `final`.
 
-During verification, the first shuffle run hit the package's 10-minute timeout
-because generated-resource compilation was repeated 20 times. That compile
-check now runs once in the release-only E2E while normal scaffold tests retain
-generation, formatting, and atomicity checks. A later diagnostic full shuffle
-run exited 1 under concurrent package load; its recorded seed passed a focused
-`pkg/bear -count=20` reproduction, and the subsequent full required command
-completed with exit 0. Treat the remaining timing headroom in scaffold shuffle
-tests as an RC risk and keep the final command in pre-release verification.
-
-Repository hygiene also passed: local branches were `main`,
-`codex/production-baseline`, and the active allowed development branch;
-remote heads were only `main` and `codex/production-baseline`; the container and
-Kubernetes file search returned no results. Human review is still required
-before creating any tag, push, merge, or release.
+Govulncheck reported zero reachable vulnerabilities. It also reported two
+vulnerabilities in imported packages and twenty in required modules that this
+code does not call. The macOS race link printed `malformed LC_DYSYMTAB`
+warnings, but every affected command exited 0. The before/after status snapshots
+were byte-identical, the release-owned coverage profile was removed, and no
+worktree `coverage.out` remained. Remote heads were only `main` and
+`codex/production-baseline`; the active local development branch remained
+allowed. Human review is still required: this candidate is Unreleased, and no
+tag, push, merge, or release was performed.
 
 ## Rollback
 

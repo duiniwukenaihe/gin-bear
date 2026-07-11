@@ -11,6 +11,18 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+func stringSlicePointer(values ...string) *[]string {
+	copyOfValues := append([]string(nil), values...)
+	return &copyOfValues
+}
+
+func stringSliceValue(values *[]string) []string {
+	if values == nil {
+		return nil
+	}
+	return *values
+}
+
 // Validator 接口允许结构体执行自定义校验逻辑 (如跨字段校验)
 type Validator interface {
 	Validate(ctx *gin.Context) error

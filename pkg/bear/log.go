@@ -78,13 +78,13 @@ func (h *ContextHandler) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
-// SetDefaultLogger 初始化全局上下文感知日志
-func SetDefaultLogger(config ...*SysConfig) {
-	var cfg *SysConfig
-	if len(config) > 0 {
-		cfg = config[0]
-	}
-	logger := newLogger(cfg)
+// SetDefaultLogger initializes the legacy global logger with default settings.
+func SetDefaultLogger() {
+	setDefaultLoggerForConfig(nil)
+}
+
+func setDefaultLoggerForConfig(config *SysConfig) {
+	logger := newLogger(config)
 	setDefaultLogger(logger)
 }
 

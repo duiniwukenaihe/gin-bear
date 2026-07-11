@@ -54,6 +54,28 @@ func TestGenerateProjectBuildsTestsAndServesHealth(t *testing.T) {
 	runGeneratedServerHealthCheck(t, dir, "/live")
 }
 
+func TestGeneratedProjectProvidesConfigureExtensionPoint(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "extension-api")
+	if err := Generate(context.Background(), Options{
+		Name:             "extension-api",
+		Module:           "example.com/extension-api",
+		Directory:        dir,
+		FrameworkVersion: "v0.10.0-rc.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appSource := readFile(t, filepath.Join(dir, "internal", "app", "app.go"))
+	if !strings.Contains(appSource, "configure(application)") {
+		t.Fatalf("generated app.go does not invoke its extension point:\n%s", appSource)
+	}
+	routesSource := readFile(t, filepath.Join(dir, "internal", "app", "routes.go"))
+	for _, want := range []string{"func configure(application *bear.Bear)", "package app"} {
+		if !strings.Contains(routesSource, want) {
+			t.Fatalf("generated routes.go missing %q:\n%s", want, routesSource)
+		}
+	}
+}
+
 func TestGeneratedServerHealthCheckTimesOutAndReapsUnresponsiveChild(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

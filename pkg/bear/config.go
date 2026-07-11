@@ -158,13 +158,13 @@ type I18nConfig struct {
 }
 
 type AuthConfig struct {
-	StorageType      string   `yaml:"storage_type" json:"storage_type"`
-	JWTSecret        string   `yaml:"jwt_secret" json:"jwt_secret" validate:"required_with=JWT"`
-	JWTIssuer        string   `yaml:"jwt_issuer" json:"jwt_issuer"`
-	JWTAudience      string   `yaml:"jwt_audience" json:"jwt_audience"`
-	JWTClockSkew     string   `yaml:"jwt_clock_skew" json:"jwt_clock_skew"`
-	TokenExpireHours int      `yaml:"token_expire_hours" json:"token_expire_hours"`
-	PublicPaths      []string `yaml:"public_paths" json:"public_paths"`
+	StorageType      string    `yaml:"storage_type" json:"storage_type"`
+	JWTSecret        string    `yaml:"jwt_secret" json:"jwt_secret" validate:"required_with=JWT"`
+	JWTIssuer        string    `yaml:"jwt_issuer" json:"jwt_issuer"`
+	JWTAudience      string    `yaml:"jwt_audience" json:"jwt_audience"`
+	JWTClockSkew     string    `yaml:"jwt_clock_skew" json:"jwt_clock_skew"`
+	TokenExpireHours int       `yaml:"token_expire_hours" json:"token_expire_hours"`
+	PublicPaths      *[]string `yaml:"public_paths" json:"public_paths"`
 }
 
 type DBConfig struct {
@@ -192,11 +192,11 @@ type MetricsConfig struct {
 }
 
 type WebSocketConfig struct {
-	HandshakeTimeout int      `yaml:"handshake_timeout_ms" json:"handshake_timeout_ms"`
-	ReadBufferSize   int      `yaml:"read_buffer_size" json:"read_buffer_size"`
-	WriteBufferSize  int      `yaml:"write_buffer_size" json:"write_buffer_size"`
-	CheckOrigin      bool     `yaml:"check_origin" json:"check_origin"`
-	AllowedOrigins   []string `yaml:"allowed_origins" json:"allowed_origins"`
+	HandshakeTimeout int       `yaml:"handshake_timeout_ms" json:"handshake_timeout_ms"`
+	ReadBufferSize   int       `yaml:"read_buffer_size" json:"read_buffer_size"`
+	WriteBufferSize  int       `yaml:"write_buffer_size" json:"write_buffer_size"`
+	CheckOrigin      bool      `yaml:"check_origin" json:"check_origin"`
+	AllowedOrigins   *[]string `yaml:"allowed_origins" json:"allowed_origins"`
 }
 
 // Deprecated: GRPCConfig is compatibility-only. Prefer the supported HTTP lifecycle.
@@ -463,7 +463,7 @@ func NewSysConfig() *SysConfig {
 			StorageType:      "file",
 			JWTSecret:        "bear-secret",
 			TokenExpireHours: 24,
-			PublicPaths:      []string{"/health", "/live", "/ready", "/version", "/swagger/*", "/login"},
+			PublicPaths:      stringSlicePointer("/health", "/live", "/ready", "/version", "/swagger/*", "/login"),
 		},
 		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root"},
 		Redis:  &RedisConfig{Addr: "localhost:6379", Password: "", DB: 0},

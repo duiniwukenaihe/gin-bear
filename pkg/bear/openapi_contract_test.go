@@ -51,7 +51,7 @@ func TestGenerateOpenAPIProducesStrictContract(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
-	cfg.Auth.PublicPaths = []string{"/api/public/*"}
+	cfg.Auth.PublicPaths = stringSlicePointer("/api/public/*")
 	app := Ignite(cfg)
 	app.Mount("/api", &contractController{})
 	requireNoError(t, app.ApplyAll(context.Background()))

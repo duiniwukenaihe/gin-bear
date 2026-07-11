@@ -201,14 +201,14 @@ func TestResponderFairingsUseOwningRuntime(t *testing.T) {
 
 func TestAuthFairingUsesOwningRuntimePublicPaths(t *testing.T) {
 	aConfig := NewSysConfig()
-	aConfig.Auth.PublicPaths = []string{"/a-only/*"}
+	aConfig.Auth.PublicPaths = stringSlicePointer("/a-only/*")
 	a := Ignite(aConfig)
 	a.Attach(NewAuthFairing())
 	a.Handle(http.MethodGet, "/a-only/ping", func() (string, error) { return "public-a", nil })
 	a.Handle(http.MethodGet, "/shared", func() (string, error) { return "private-a", nil })
 
 	bConfig := NewSysConfig()
-	bConfig.Auth.PublicPaths = []string{"/shared"}
+	bConfig.Auth.PublicPaths = stringSlicePointer("/shared")
 	Ignite(bConfig)
 
 	publicResponse := httptest.NewRecorder()
