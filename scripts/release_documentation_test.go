@@ -57,6 +57,40 @@ func TestReadmeUsesTestedExamplesAndCanonicalCLInstallPath(t *testing.T) {
 	}
 }
 
+func TestReleaseDocumentationSeparatesPublishedAndUpcomingVersions(t *testing.T) {
+	readme := readDocumentationFile(t, "../README.md")
+	security := readDocumentationFile(t, "../SECURITY.md")
+	normalizedReadme := strings.ToLower(readme)
+	for _, phrase := range []string{
+		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.1",
+		"v0.10.0-rc.1",
+		"after publication",
+	} {
+		if !strings.Contains(normalizedReadme, strings.ToLower(phrase)) {
+			t.Fatalf("README missing publication-state guidance %q", phrase)
+		}
+	}
+	if strings.Contains(readme, "go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.10.0\n") {
+		t.Fatal("README must not present the unpublished release candidate as currently installable")
+	}
+	for _, phrase := range []string{"v0.9.1", "current", "v0.10", "upcoming", "unreleased"} {
+		if !strings.Contains(strings.ToLower(security), strings.ToLower(phrase)) {
+			t.Fatalf("SECURITY.md missing publication-state guidance %q", phrase)
+		}
+	}
+}
+
+func TestProductionDocumentationUsesPinnedVerifyCommand(t *testing.T) {
+	text := readDocumentationFile(t, "../docs/production.md")
+	const command = "GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify"
+	if !strings.Contains(text, command) {
+		t.Fatalf("production documentation missing %q", command)
+	}
+	if strings.Contains(text, "GOPROXY=https://goproxy.cn,direct make verify") {
+		t.Fatal("production documentation must use the project-pinned verify command")
+	}
+}
+
 func TestCLIReleaseConfigurationStaysArchiveOnly(t *testing.T) {
 	config := readDocumentationFile(t, "../.goreleaser.yml")
 	for _, phrase := range []string{

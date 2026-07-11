@@ -5,11 +5,17 @@ configuration, authentication, health, metrics, tracing, and OpenAPI support.
 
 ## Install The CLI
 
-Install the supported generator CLI from its canonical package path:
+Install the currently published generator CLI from its canonical package path:
 
 ```bash
-go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.10.0
+go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.1
 bear new my-service
+```
+
+The `v0.10.0-rc.1` command is usable only after publication:
+
+```bash
+go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.10.0-rc.1
 ```
 
 ## Runnable Examples

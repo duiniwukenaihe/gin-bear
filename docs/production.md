@@ -359,10 +359,10 @@ Plugin paths are resolved to absolute paths and must live inside one of the conf
 
 ## Delivery Checks
 
-Run the same core checks locally before cutting a release:
+Run the project verification gate locally before cutting a release:
 
 ```bash
-GOPROXY=https://goproxy.cn,direct scripts/release-check.sh
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
 ```
 
-`scripts/release-check.sh` installs `govulncheck` when needed and keeps local verification aligned with CI.
+This is the same pinned verification command used by the release workflow.
