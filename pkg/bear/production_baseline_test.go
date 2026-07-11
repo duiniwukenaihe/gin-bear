@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -32,9 +31,7 @@ import (
 )
 
 func resetTestInjector() {
-	injector = &BeanFactory{
-		beans: make(map[reflect.Type]any),
-	}
+	setDefaultInjector(NewBeanFactory())
 	handlerCache = sync.Map{}
 }
 

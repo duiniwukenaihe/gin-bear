@@ -18,11 +18,17 @@ type PluginDispatcher struct {
 	// handlers[method][path] = HandlerFunc
 	handlers map[string]map[string]gin.HandlerFunc
 	mu       sync.RWMutex
+	logger   *slog.Logger
 }
 
 func NewPluginDispatcher() *PluginDispatcher {
+	return newPluginDispatcher(nil)
+}
+
+func newPluginDispatcher(logger *slog.Logger) *PluginDispatcher {
 	return &PluginDispatcher{
 		handlers: make(map[string]map[string]gin.HandlerFunc),
+		logger:   logger,
 	}
 }
 
@@ -33,7 +39,11 @@ func (p *PluginDispatcher) Register(method, path string, handler gin.HandlerFunc
 		p.handlers[method] = make(map[string]gin.HandlerFunc)
 	}
 	p.handlers[method][path] = handler
-	slog.Info("Dynamic route registered", "method", method, "path", path)
+	logger := p.logger
+	if logger == nil {
+		logger = legacyLogger()
+	}
+	logger.Info("Dynamic route registered", "method", method, "path", path)
 }
 
 func (p *PluginDispatcher) Unregister(method, path string) {
@@ -89,7 +99,7 @@ func (p *PluginManager) Load(path string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if err := validatePluginPath(path); err != nil {
+	if err := validatePluginPathForConfig(path, p.bear.runtime.Config); err != nil {
 		return err
 	}
 
@@ -109,27 +119,29 @@ func (p *PluginManager) Load(path string) error {
 	}
 
 	mod := getModule()
-	slog.Info("Loading dynamic module", "name", mod.Name(), "path", path)
-
-	// 1. 注册 Beans 到主 IoC 容器
-	for _, bean := range mod.Beans() {
-		GetInjector().Set(bean)
-		// 自动执行依赖注入
-		GetInjector().Apply(bean)
-	}
-
-	// 2. 构建模块路由
-	// 我们需要将 Bear 切换到“插件模式”，使其路由注册到 PluginDispatcher
-	p.bear.pluginMode = true
-	mod.Build(p.bear)
-	p.bear.pluginMode = false
+	p.bear.runtime.Logger.Info("Loading dynamic module", "name", mod.Name(), "path", path)
+	p.registerModule(mod)
 
 	p.plugins[path] = &loadedPlugin{Module: mod, Symbol: sym}
 	return nil
 }
 
-func validatePluginPath(path string) error {
-	config := GetByType[*SysConfig]()
+func (p *PluginManager) registerModule(mod Module) {
+	// 1. 注册 Beans 到主 IoC 容器
+	for _, bean := range mod.Beans() {
+		p.bear.runtime.Container.Set(bean)
+		// 自动执行依赖注入
+		p.bear.runtime.Container.Apply(bean)
+	}
+
+	// 2. 构建模块路由
+	// 我们需要将 Bear 切换到“插件模式”，使其路由注册到 PluginDispatcher
+	p.bear.pluginMode = true
+	defer func() { p.bear.pluginMode = false }()
+	mod.Build(p.bear)
+}
+
+func validatePluginPathForConfig(path string, config *SysConfig) error {
 	if config == nil || config.Plugins == nil || !config.Plugins.Enabled {
 		return errors.New("dynamic plugin loading is disabled")
 	}

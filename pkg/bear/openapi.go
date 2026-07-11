@@ -42,7 +42,12 @@ type OpenAPISchema struct {
 
 // GenerateOpenAPI 生成 OpenAPI 3.0 文档内容
 func (b *Bear) GenerateOpenAPI() ([]byte, error) {
-	config := GetByType[*SysConfig]()
+	var config *SysConfig
+	var container *BeanFactory
+	if b != nil && b.runtime != nil {
+		config = b.runtime.Config
+		container = b.runtime.Container
+	}
 	title := "gin-bear"
 	if config != nil && config.Server != nil && config.Server.Name != "" {
 		title = config.Server.Name
@@ -111,7 +116,8 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 		addStandardOpenAPIErrorResponses(op, config != nil && config.Auth != nil && !publicRoute)
 
 		// 检查控制器是否提供了额外元数据
-		if bean := GetInjector().Get(route.HandlerType); bean != nil {
+		if container != nil {
+			bean := container.Get(route.HandlerType)
 			if ctrl, ok := bean.(IOpenAPI); ok {
 				if info, exists := ctrl.OpenAPI()[route.Path]; exists {
 					op["summary"] = info.Summary

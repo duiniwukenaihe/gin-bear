@@ -132,6 +132,7 @@ func TestLifecycleJoinsShutdownErrors(t *testing.T) {
 	l := newLifecycle()
 	l.Add(failingShutdownComponent{name: "first", err: firstErr})
 	l.Add(failingShutdownComponent{name: "second", err: secondErr})
+	requireNoError(t, l.Start(context.Background()))
 
 	err := l.Stop(context.Background())
 	if !errors.Is(err, firstErr) || !errors.Is(err, secondErr) {

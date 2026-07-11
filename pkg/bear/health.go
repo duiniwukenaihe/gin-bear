@@ -39,7 +39,7 @@ func (h *HealthController) live(ctx *gin.Context) {
 func (h *HealthController) ready(ctx *gin.Context) {
 	runtime := h.runtime
 	if runtime == nil {
-		runtime = defaultRuntime.Load()
+		runtime = currentDefaultRuntime()
 	}
 	var config *SysConfig
 	var container *BeanFactory

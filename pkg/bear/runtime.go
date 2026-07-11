@@ -22,7 +22,13 @@ type Runtime struct {
 	Metrics   *HTTPMetrics
 }
 
-var defaultRuntime atomic.Pointer[Runtime]
+type legacyFacade struct {
+	runtime  *Runtime
+	injector *BeanFactory
+	logger   *slog.Logger
+}
+
+var defaultFacade atomic.Pointer[legacyFacade]
 
 func newRuntime(config *SysConfig) *Runtime {
 	lifecycle := newLifecycle()
@@ -39,9 +45,42 @@ func newRuntime(config *SysConfig) *Runtime {
 }
 
 func publishDefaultRuntime(runtime *Runtime) {
-	defaultRuntime.Store(runtime)
-	setDefaultInjector(runtime.Container)
-	setDefaultLogger(runtime.Logger)
+	if runtime == nil {
+		return
+	}
+	defaultFacade.Store(&legacyFacade{
+		runtime:  runtime,
+		injector: runtime.Container,
+		logger:   runtime.Logger,
+	})
+	slog.SetDefault(Log)
+}
+
+func loadDefaultFacade() *legacyFacade {
+	return defaultFacade.Load()
+}
+
+func currentDefaultRuntime() *Runtime {
+	facade := loadDefaultFacade()
+	if facade == nil {
+		return nil
+	}
+	return facade.runtime
+}
+
+func updateDefaultFacade(update func(legacyFacade) legacyFacade) *legacyFacade {
+	for {
+		current := defaultFacade.Load()
+		var next legacyFacade
+		if current != nil {
+			next = *current
+		}
+		next = update(next)
+		nextPointer := &next
+		if defaultFacade.CompareAndSwap(current, nextPointer) {
+			return nextPointer
+		}
+	}
 }
 
 func runtimePerformanceMiddleware(runtime *Runtime) gin.HandlerFunc {

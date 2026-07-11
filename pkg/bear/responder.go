@@ -53,6 +53,10 @@ func WarmupHandlers(routes []RouteMetadata) {
 // 3. 全能 Handler: func(*gin.Context, *Req) (*Res, error)
 // 4. 只有返回值的 Handler: func() (*Res, error)
 func Convert(handler interface{}) gin.HandlerFunc {
+	return convertHandler(handler, nil)
+}
+
+func convertHandler(handler interface{}, owner *Bear) gin.HandlerFunc {
 	// 1. 快速检查标准 Gin Handler
 	if h, ok := handler.(gin.HandlerFunc); ok {
 		return h
@@ -63,7 +67,7 @@ func Convert(handler interface{}) gin.HandlerFunc {
 
 	// 2. 尝试从缓存获取
 	h_ref := reflect.ValueOf(handler)
-	if h_ref.IsValid() {
+	if owner == nil && h_ref.IsValid() {
 		if cached, ok := handlerCache.Load(h_ref.Pointer()); ok {
 			return cached.(gin.HandlerFunc)
 		}
@@ -91,7 +95,7 @@ func Convert(handler interface{}) gin.HandlerFunc {
 			if argType.Kind() == reflect.Ptr && argType.Elem().Kind() == reflect.Struct {
 				req := reflect.New(argType.Elem()).Interface()
 				if err := bindRequest(ctx, req); err != nil {
-					logBindingError(ctx, err)
+					logBindingError(ctx, err, owner)
 					ctx.AbortWithStatusJSON(400, Response{
 						Code:    400,
 						Message: "Invalid request",
@@ -106,7 +110,7 @@ func Convert(handler interface{}) gin.HandlerFunc {
 			if argType.Kind() == reflect.Struct {
 				req := reflect.New(argType).Interface()
 				if err := bindRequest(ctx, req); err != nil {
-					logBindingError(ctx, err)
+					logBindingError(ctx, err, owner)
 					ctx.AbortWithStatusJSON(400, Response{
 						Code:    400,
 						Message: "Invalid request",
@@ -158,11 +162,11 @@ func Convert(handler interface{}) gin.HandlerFunc {
 		results := h_ref.Call(args)
 
 		// 处理返回值
-		handleResults(ctx, results)
+		handleResults(ctx, results, owner)
 	})
 
 	// 存入缓存
-	if h_ref.IsValid() {
+	if owner == nil && h_ref.IsValid() {
 		handlerCache.Store(h_ref.Pointer(), result)
 	}
 
@@ -196,8 +200,12 @@ func bindRequest(ctx *gin.Context, req interface{}) error {
 	return nil
 }
 
-func logBindingError(ctx *gin.Context, err error) {
-	slog.ErrorContext(ctx.Request.Context(), "Request binding failed",
+func logBindingError(ctx *gin.Context, err error, owner *Bear) {
+	logger := legacyLogger()
+	if owner != nil && owner.runtime != nil && owner.runtime.Logger != nil {
+		logger = owner.runtime.Logger
+	}
+	logger.ErrorContext(ctx.Request.Context(), "Request binding failed",
 		"error", err,
 		"path", ctx.Request.URL.Path,
 		"method", ctx.Request.Method,
@@ -327,7 +335,7 @@ func setFieldValue(field reflect.Value, raw string) error {
 	return nil
 }
 
-func handleResults(ctx *gin.Context, results []reflect.Value) {
+func handleResults(ctx *gin.Context, results []reflect.Value, owner *Bear) {
 	numOut := len(results)
 	if numOut == 0 {
 		return
@@ -346,7 +354,7 @@ func handleResults(ctx *gin.Context, results []reflect.Value) {
 			result := results[0].Interface()
 			// 将结果存入上下文，供路由级别 Fairing 使用
 			ctx.Set("bear_handler_result", result)
-			handleSuccess(ctx, result)
+			handleSuccess(ctx, result, owner)
 		} else {
 			ctx.JSON(200, Response{Code: 200, Message: "success"})
 		}
@@ -357,11 +365,13 @@ func handleResults(ctx *gin.Context, results []reflect.Value) {
 	result := results[0].Interface()
 	// 将结果存入上下文，供路由级别 Fairing 使用
 	ctx.Set("bear_handler_result", result)
-	handleSuccess(ctx, result)
+	handleSuccess(ctx, result, owner)
 }
 
-func handleSuccess(ctx *gin.Context, result interface{}) {
-	bear := GetByType[*Bear]()
+func handleSuccess(ctx *gin.Context, result interface{}, owner *Bear) {
+	if owner == nil {
+		owner = GetByType[*Bear]()
+	}
 
 	// 1. 首先检查是否有路由级别的 Fairing 处理过结果
 	if routeResult, ok := ctx.Get("bear_route_fairing_result"); ok {
@@ -370,7 +380,10 @@ func handleSuccess(ctx *gin.Context, result interface{}) {
 	}
 
 	// 2. 执行全局 Fairing 后置处理
-	finalResult := bear.fairingHandler.OnResponse(result)
+	finalResult := result
+	if owner != nil && owner.fairingHandler != nil {
+		finalResult = owner.fairingHandler.OnResponse(result)
+	}
 
 	// 处理 I18n (如果结果是 Response 结构体)
 	if res, ok := finalResult.(Response); ok {

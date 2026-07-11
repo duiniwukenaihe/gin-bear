@@ -15,8 +15,7 @@ type BeanFactory struct {
 	onRemove func(reflect.Type)
 }
 
-var injector = NewBeanFactory()
-var injectorMu sync.RWMutex
+var bootstrapInjector = NewBeanFactory()
 
 // StaticInjector 静态注入函数定义
 type StaticInjector func(interface{})
@@ -33,21 +32,21 @@ func RegisterStaticInjector(name string, injector StaticInjector) {
 
 // GetInjector 获取单例注入器
 func GetInjector() *BeanFactory {
-	injectorMu.RLock()
-	factory := injector
-	injectorMu.RUnlock()
-	if factory != nil {
-		return factory
+	if facade := loadDefaultFacade(); facade != nil && facade.injector != nil {
+		return facade.injector
 	}
-	factory = NewBeanFactory()
-	setDefaultInjector(factory)
-	return factory
+	setDefaultInjector(bootstrapInjector)
+	return bootstrapInjector
 }
 
 func setDefaultInjector(factory *BeanFactory) {
-	injectorMu.Lock()
-	injector = factory
-	injectorMu.Unlock()
+	if factory == nil {
+		factory = NewBeanFactory()
+	}
+	updateDefaultFacade(func(facade legacyFacade) legacyFacade {
+		facade.injector = factory
+		return facade
+	})
 }
 
 // NewBeanFactory creates an isolated bean container.

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"reflect"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -54,6 +55,9 @@ type MountMetadata struct {
 	Group   string
 	Classes []IClass
 }
+
+var signalNotifyContext = signal.NotifyContext
+var ginRuntimeMu sync.Mutex
 
 // Bear 是核心框架引擎
 type Bear struct {
@@ -130,11 +134,11 @@ func Ignite(args ...any) *Bear {
 
 	runtime := newRuntime(config)
 	b := &Bear{
-		Engine:           gin.New(),
+		Engine:           newGinEngine(config),
 		exprData:         map[string]interface{}{},
 		fairingHandler:   NewFairingHandler(),
 		routeTree:        NewRouteTree(),
-		pluginDispatcher: NewPluginDispatcher(),
+		pluginDispatcher: newPluginDispatcher(runtime.Logger),
 		runtime:          runtime,
 	}
 	b.pluginManager = NewPluginManager(b)
@@ -147,10 +151,6 @@ func Ignite(args ...any) *Bear {
 		runtime.Logger.Warn(warning)
 	}
 	configureGinRuntime(b, config)
-
-	// 禁用 Gin 默认日志，由核心性能中间件接管结构化日志
-	gin.DefaultWriter = io.Discard
-	gin.DefaultErrorWriter = os.Stderr
 
 	// 注入底座中间件
 	b.Use(RequestIDMiddleware())
@@ -259,6 +259,8 @@ func (b *Bear) Launch(ctx context.Context) error {
 		serverCount++
 	}
 	serveResults := make(chan serveResult, serverCount)
+	signalCtx, stopSignals := signalNotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 	go func() {
 		logger.Info("WhiteBear is emerging from ice", "addr", httpListener.Addr().String(), "name", config.Server.Name)
 		err := server.Serve(httpListener)
@@ -278,8 +280,6 @@ func (b *Bear) Launch(ctx context.Context) error {
 		}()
 	}
 
-	signalCtx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
 	var launchErrors []error
 	received := 0
 	select {
@@ -292,31 +292,39 @@ func (b *Bear) Launch(ctx context.Context) error {
 		logger.Info("Context cancelled, shutting down...")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout(config))
-	defer cancel()
-	if err := shutdownHTTPServer(shutdownCtx, server); err != nil {
+	shutdownBudget := shutdownTimeout(config)
+	if err := runShutdownPhase(shutdownBudget, func(ctx context.Context) error {
+		return shutdownHTTPServer(ctx, server)
+	}); err != nil {
 		launchErrors = append(launchErrors, err)
 	}
 	if grpcServer != nil {
-		if err := shutdownGRPCServer(shutdownCtx, grpcServer); err != nil {
+		if err := runShutdownPhase(shutdownBudget, func(ctx context.Context) error {
+			return shutdownGRPCServer(ctx, grpcServer)
+		}); err != nil {
 			launchErrors = append(launchErrors, err)
 		}
 	}
-	if err := b.runtime.Lifecycle.Stop(shutdownCtx); err != nil {
+	if err := runShutdownPhase(shutdownBudget, b.runtime.Lifecycle.Stop); err != nil {
 		launchErrors = append(launchErrors, err)
 	}
 
-	for received < serverCount {
-		select {
-		case result := <-serveResults:
-			received++
-			if result.err != nil {
-				launchErrors = append(launchErrors, fmt.Errorf("%s serve failed: %w", result.name, result.err))
+	if err := runShutdownPhase(shutdownBudget, func(ctx context.Context) error {
+		var waitErrors []error
+		for received < serverCount {
+			select {
+			case result := <-serveResults:
+				received++
+				if result.err != nil {
+					waitErrors = append(waitErrors, fmt.Errorf("%s serve failed: %w", result.name, result.err))
+				}
+			case <-ctx.Done():
+				return errors.Join(errors.Join(waitErrors...), fmt.Errorf("waiting for servers to stop: %w", ctx.Err()))
 			}
-		case <-shutdownCtx.Done():
-			launchErrors = append(launchErrors, fmt.Errorf("waiting for servers to stop: %w", shutdownCtx.Err()))
-			received = serverCount
 		}
+		return errors.Join(waitErrors...)
+	}); err != nil {
+		launchErrors = append(launchErrors, err)
 	}
 
 	logger.Info("WhiteBear returning to ice")
@@ -328,10 +336,14 @@ func (b *Bear) cleanupLaunchFailure(config *SysConfig, cause error, listeners ..
 	for _, listener := range listeners {
 		errorsToJoin = append(errorsToJoin, closeListener("pre-bound", listener))
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout(config))
-	defer cancel()
-	errorsToJoin = append(errorsToJoin, b.runtime.Lifecycle.Stop(shutdownCtx))
+	errorsToJoin = append(errorsToJoin, runShutdownPhase(shutdownTimeout(config), b.runtime.Lifecycle.Stop))
 	return errors.Join(errorsToJoin...)
+}
+
+func runShutdownPhase(timeout time.Duration, phase func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return phase(ctx)
 }
 
 func closeListener(name string, listener net.Listener) error {
@@ -428,13 +440,20 @@ func shutdownTimeout(config *SysConfig) time.Duration {
 }
 
 func configureGinRuntime(b *Bear, config *SysConfig) {
-	mode := configuredGinMode(config)
-	gin.SetMode(mode)
 	if config != nil && config.Server != nil && len(config.Server.TrustedProxies) > 0 {
 		if err := b.Engine.SetTrustedProxies(config.Server.TrustedProxies); err != nil {
 			panic(fmt.Sprintf("invalid trusted proxies: %v", err))
 		}
 	}
+}
+
+func newGinEngine(config *SysConfig) *gin.Engine {
+	ginRuntimeMu.Lock()
+	defer ginRuntimeMu.Unlock()
+	gin.SetMode(configuredGinMode(config))
+	gin.DefaultWriter = io.Discard
+	gin.DefaultErrorWriter = os.Stderr
+	return gin.New()
 }
 
 func configuredGinMode(config *SysConfig) string {
@@ -606,13 +625,13 @@ func (b *Bear) Handle(httpMethod, relativePath string, handler interface{}) *Bea
 		// 如果处于插件模式，注册到动态分发器
 		if h, ok := handler.(func(*gin.Context)); ok {
 			b.pluginDispatcher.Register(httpMethod, relativePath, h)
-		} else if h := Convert(handler); h != nil {
+		} else if h := convertHandler(handler, b); h != nil {
 			b.pluginDispatcher.Register(httpMethod, relativePath, h)
 		}
 		return b
 	}
 
-	if h := Convert(handler); h != nil {
+	if h := convertHandler(handler, b); h != nil {
 		// 包装 handler 以支持全局 Fairing
 		wrappedHandler := b.wrapWithFairing(h)
 		b.activeGroup().Handle(httpMethod, relativePath, wrappedHandler)
@@ -701,7 +720,7 @@ func (b *Bear) wrapWithRouteFairing(handler interface{}, fairings []Fairing) gin
 
 		// 2. 执行原始 handler 并捕获结果
 		var result interface{}
-		if h := Convert(handler); h != nil {
+		if h := convertHandler(handler, b); h != nil {
 			h(ctx)
 			// 从上下文获取处理后的结果（如果有）
 			if r, ok := ctx.Get("bear_handler_result"); ok {

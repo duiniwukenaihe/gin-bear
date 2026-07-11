@@ -5,11 +5,62 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"sync"
 )
 
-var Log *slog.Logger
-var logMu sync.RWMutex
+var bootstrapLogger = newLogger(nil)
+
+// Log remains the process-wide compatibility logger while delegating each call
+// to the logger in the current atomic legacy facade.
+var Log = slog.New(legacyLogHandler{})
+
+func init() {
+	slog.SetDefault(Log)
+}
+
+type legacyLogHandler struct {
+	operations []legacyLogOperation
+}
+
+type legacyLogOperation struct {
+	attrs []slog.Attr
+	group string
+}
+
+func (h legacyLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.current().Enabled(ctx, level)
+}
+
+func (h legacyLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	return h.current().Handle(ctx, record)
+}
+
+func (h legacyLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	cloned := h.clone()
+	cloned.operations = append(cloned.operations, legacyLogOperation{attrs: append([]slog.Attr(nil), attrs...)})
+	return cloned
+}
+
+func (h legacyLogHandler) WithGroup(name string) slog.Handler {
+	cloned := h.clone()
+	cloned.operations = append(cloned.operations, legacyLogOperation{group: name})
+	return cloned
+}
+
+func (h legacyLogHandler) clone() legacyLogHandler {
+	return legacyLogHandler{operations: append([]legacyLogOperation(nil), h.operations...)}
+}
+
+func (h legacyLogHandler) current() slog.Handler {
+	handler := legacyLoggerTarget().Handler()
+	for _, operation := range h.operations {
+		if operation.group != "" {
+			handler = handler.WithGroup(operation.group)
+		} else {
+			handler = handler.WithAttrs(operation.attrs)
+		}
+	}
+	return handler
+}
 
 // ContextHandler 自动从 context 中提取 request_id 并注入日志
 type ContextHandler struct {
@@ -59,22 +110,24 @@ func newLogger(config *SysConfig) *slog.Logger {
 
 func setDefaultLogger(logger *slog.Logger) {
 	if logger == nil {
-		logger = slog.Default()
+		logger = bootstrapLogger
 	}
-	logMu.Lock()
-	Log = logger
-	logMu.Unlock()
-	slog.SetDefault(logger)
+	updateDefaultFacade(func(facade legacyFacade) legacyFacade {
+		facade.logger = logger
+		return facade
+	})
+	slog.SetDefault(Log)
 }
 
 func legacyLogger() *slog.Logger {
-	logMu.RLock()
-	logger := Log
-	logMu.RUnlock()
-	if logger != nil {
-		return logger
+	return Log
+}
+
+func legacyLoggerTarget() *slog.Logger {
+	if facade := loadDefaultFacade(); facade != nil && facade.logger != nil {
+		return facade.logger
 	}
-	return slog.Default()
+	return bootstrapLogger
 }
 
 func parseLogLevel(raw string) slog.Level {
