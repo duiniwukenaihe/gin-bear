@@ -61,6 +61,39 @@ Redis client exists, but `RevokeToken` and `IsTokenBlacklisted` return
 `errors.Is(err, bear.ErrTokenRevocationUnavailable)` and treat it as a failed
 logout/revocation operation rather than assuming the token was revoked.
 
+### Comparable Configuration Collection Fields
+
+During the v0.10 prerelease, `AuthConfig.PublicPaths` and
+`WebSocketConfig.AllowedOrigins` changed from `[]string` to `*[]string`. This
+preserves v0.9 struct comparability: a struct containing a slice cannot be
+compared with `==`, while a struct containing a pointer to a slice can.
+
+Source assignments must be migrated. Prefer the copy-safe accessors:
+
+```go
+config.Auth.SetPublicPaths([]string{"/health", "/login"})
+paths := config.Auth.GetPublicPaths()
+
+config.WS.SetAllowedOrigins([]string{"https://app.example.com"})
+origins := config.WS.GetAllowedOrigins()
+```
+
+`SetPublicPaths` and `GetPublicPaths`, and `SetAllowedOrigins` and
+`GetAllowedOrigins`, make defensive copies. Existing direct assignments can
+instead take the address of a local slice, but then the caller owns aliasing:
+
+```go
+paths := []string{"/health", "/login"}
+config.Auth.PublicPaths = &paths
+```
+
+The YAML and JSON keys are unchanged. An omitted or `null` value remains nil;
+an explicit `[]` remains a non-nil empty list; `NewSysConfig()` keeps its
+default public paths and nil allowed origins. Because `==` now compares these
+fields by pointer identity, two separately allocated pointers with equal slice
+contents do not compare equal. This compatibility change intentionally does
+not provide value-equality semantics.
+
 ## Upgrade Procedure
 
 1. Start from `application-prod.yaml.example` and set `BEAR_ENV=prod`.
@@ -70,7 +103,8 @@ logout/revocation operation rather than assuming the token was revoked.
    JWT secret.
 4. Decide whether metrics should be enabled and protect the metrics endpoint.
 5. Update logout flows to detect `ErrTokenRevocationUnavailable`.
-6. Run `GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify` and deploy
+6. Migrate direct collection assignments to the new setter/getter APIs.
+7. Run `GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify` and deploy
    through a readiness-checked rollout.
 
 ## Rollback

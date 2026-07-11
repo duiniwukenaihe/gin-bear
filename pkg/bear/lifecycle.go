@@ -265,9 +265,13 @@ func stopLifecycleComponent(ctx context.Context, component any) error {
 func runLegacyShutdown(ctx context.Context, shutdown func() error) error {
 	select {
 	case legacyShutdownSlot <- struct{}{}:
+		return runAcquiredLegacyShutdown(ctx, shutdown)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func runAcquiredLegacyShutdown(ctx context.Context, shutdown func() error) error {
 	done := make(chan error, 1)
 	go func() {
 		defer func() { <-legacyShutdownSlot }()

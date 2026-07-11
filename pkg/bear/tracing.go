@@ -118,8 +118,9 @@ func newTracerProvider(ctx context.Context, cfg *TracingConfig) (*sdktrace.Trace
 		)),
 	}
 
-	switch strings.ToLower(strings.TrimSpace(cfg.Exporter)) {
+	switch exporterName := strings.ToLower(strings.TrimSpace(cfg.Exporter)); exporterName {
 	case "", "none", "noop":
+		return sdktrace.NewTracerProvider(options...), nil
 	case "stdout", "console":
 		exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 		if err != nil {

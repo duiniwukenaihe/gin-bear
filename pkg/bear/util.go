@@ -12,15 +12,15 @@ import (
 )
 
 func stringSlicePointer(values ...string) *[]string {
-	copyOfValues := append([]string(nil), values...)
+	copyOfValues := cloneStringSlice(values)
 	return &copyOfValues
 }
 
-func stringSliceValue(values *[]string) []string {
+func cloneStringSlice(values []string) []string {
 	if values == nil {
 		return nil
 	}
-	return *values
+	return append(make([]string, 0, len(values)), values...)
 }
 
 // Validator 接口允许结构体执行自定义校验逻辑 (如跨字段校验)

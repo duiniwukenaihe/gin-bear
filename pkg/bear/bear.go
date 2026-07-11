@@ -499,7 +499,7 @@ func validateProductionSecurity(config *SysConfig) error {
 			return fmt.Errorf("weak jwt secret is not allowed in production")
 		}
 	}
-	if config.WS != nil && !config.WS.CheckOrigin && len(stringSliceValue(config.WS.AllowedOrigins)) == 0 {
+	if config.WS != nil && !config.WS.CheckOrigin && len(config.WS.GetAllowedOrigins()) == 0 {
 		return fmt.Errorf("websocket origin check cannot be disabled in production without allowed origins")
 	}
 	return nil
@@ -760,7 +760,7 @@ func websocketOriginAllowed(config *SysConfig, r *http.Request) bool {
 		return true
 	}
 	origin := r.Header.Get("Origin")
-	allowedOrigins := stringSliceValue(config.WS.AllowedOrigins)
+	allowedOrigins := config.WS.GetAllowedOrigins()
 	if len(allowedOrigins) > 0 {
 		return origin == "" || slices.Contains(allowedOrigins, origin) || slices.Contains(allowedOrigins, "*")
 	}

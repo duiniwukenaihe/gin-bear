@@ -57,11 +57,12 @@ GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/check-coverage.sh "$profile
 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go tool cover -func="$profile"
 ```
 
-The profile regenerated on 2026-07-11 contains 2,822 covered statements out of
-3,723, or 75.799087% before display formatting (75.8%). The checked-in manifest
-lists every production file in each critical group; handler includes all of
-`bear.go`, `handler.go`, `responder.go`, and `fairing.go`, lifecycle includes all
-of `bear.go` and `lifecycle.go`, and scaffold is checked against the current
+The development-time profile regenerated on 2026-07-11 contained 2,822 covered
+statements out of 3,723, or 75.799087% before display formatting (75.8%). These
+figures are diagnostics, not current-commit release evidence. The checked-in
+manifest lists every production file in each critical group; handler includes
+all of `bear.go`, `handler.go`, `responder.go`, and `fairing.go`; lifecycle
+includes all of `bear.go` and `lifecycle.go`; and scaffold is checked against the current
 platform's complete `internal/scaffold` production `GoFiles`. The gate reports:
 
 ```text
@@ -100,10 +101,11 @@ successful route, a validation failure, and an unauthorized request, then exit
 cleanly after `SIGTERM`. Captured logs and stdout traces are rejected if they
 contain the request secret.
 
-After coverage and compatibility pass, run the final gate through its tracked
-entry point. It records commit `1db2743e3b1146ecc6592e0ea46cfa4e5ad311c1` as
-the base HEAD for this review worktree, Go and pinned tool versions, shuffle
-seed `20260711`, each command and exit code, and before/after worktree status:
+After coverage and compatibility pass, commit the reviewed fixes and run the
+final gate through its tracked entry point from a clean HEAD. It records the
+actual commit and git tree hash, the resolved `RC_BASE_REF` merge base, Go and
+pinned tool versions, shuffle seed `20260711`, each command and exit code, and
+clean before/after worktree status:
 
 ```bash
 SHUFFLE_SEED=20260711 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify-rc
@@ -111,17 +113,20 @@ SHUFFLE_SEED=20260711 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify-r
 
 By default logs are retained in a `mktemp` directory outside the repository;
 CI sets `RC_ARTIFACT_DIR` under `runner.temp` and uploads it. The final hygiene
-step permits the active local `codex/production-framework-v010` development
-branch, limits remote heads to `main` and `codex/production-baseline`, rejects
-container/Kubernetes/Helm files and `coverage.out`, and requires final worktree
-status to equal its initial snapshot.
+step permits only local `main`, `codex/production-baseline`, and
+`codex/production-framework-v010` branches, including in detached-HEAD CI. It
+limits remote heads to `main` and `codex/production-baseline`, rejects
+container/Kubernetes/Helm files and `coverage.out` at any depth outside `.git`,
+and requires both initial and final worktree status to be empty.
 
-### Recorded Result: 2026-07-11
+### Historical Development-Time Validation: 2026-07-11
 
-The final fresh run used base HEAD
-`1db2743e3b1146ecc6592e0ea46cfa4e5ad311c1`, shuffle seed `20260711`, Go
-1.25.12, staticcheck 2026.1 (`v0.7.0`), and govulncheck `v1.6.0`. Its audit
-directory was
+The run associated with commit
+`1db2743e3b1146ecc6592e0ea46cfa4e5ad311c1` was made from a dirty worktree
+while review fixes were still under development. It is development-time
+validation only and is not evidence for the current commit or a formal release
+candidate. Its retained diagnostics used shuffle seed `20260711`, Go 1.25.12,
+staticcheck 2026.1 (`v0.7.0`), and govulncheck `v1.6.0`; the audit directory was
 `/var/folders/n0/1dxtrxzn305_fjv9vgth7pf40000gn/T/gin-bear-rc.H44w3t`.
 `results.tsv` recorded exit code 0 for `clean`, `count1`, `shuffle20`, `race3`,
 `vet`, `staticcheck`, `govulncheck`, `release-check`, `diff-check`, `hygiene`,
@@ -134,8 +139,11 @@ warnings, but every affected command exited 0. The before/after status snapshots
 were byte-identical, the release-owned coverage profile was removed, and no
 worktree `coverage.out` remained. Remote heads were only `main` and
 `codex/production-baseline`; the active local development branch remained
-allowed. Human review is still required: this candidate is Unreleased, and no
-tag, push, merge, or release was performed.
+allowed. These historical results must not be reused as fresh gate evidence.
+Formal evidence is created only by a complete `make verify-rc` run after the
+fixes are committed and the starting HEAD is clean. Human review is still
+required: this candidate is Unreleased, and no tag, push, merge, or release was
+performed.
 
 ## Rollback
 

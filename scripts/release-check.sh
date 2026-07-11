@@ -4,6 +4,22 @@ set -euo pipefail
 export GOSUMDB=sum.golang.org
 export GOTOOLCHAIN=go1.25.12
 export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
+
+BUILD_DIR=""
+coverage_profile=""
+coverage_profile_owned=false
+cleanup() {
+	if [[ -n "${BUILD_DIR}" ]]; then
+		rm -rf "${BUILD_DIR}"
+	fi
+	if [[ "${coverage_profile_owned}" == "true" && -n "${coverage_profile}" ]]; then
+		rm -f "${coverage_profile}"
+	fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [[ "${COVERAGE_PROFILE+x}" == "x" ]]; then
 	if [[ -z "${COVERAGE_PROFILE}" ]]; then
 		printf 'COVERAGE_PROFILE must not be empty when explicitly set\n' >&2
@@ -18,15 +34,6 @@ else
 	printf '==> Using release-owned temporary coverage profile %s\n' "${coverage_profile}"
 fi
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gin-bear-build.XXXXXX")"
-cleanup() {
-	rm -rf "${BUILD_DIR}"
-	if [[ "${coverage_profile_owned}" == "true" ]]; then
-		rm -f "${coverage_profile}"
-	fi
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 echo "==> Checking module tidiness"
 go mod tidy -diff

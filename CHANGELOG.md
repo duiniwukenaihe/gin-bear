@@ -29,9 +29,10 @@ before deploying. It records exact behavior changes and rollback steps.
 ### Release Candidate Verification
 
 - Local release-candidate verification raises the repository coverage gate to
-  70%. The freshly regenerated profile is 2,822/3,723 statements (75.8%);
+  70%. A development-time profile recorded 2,822/3,723 statements (75.8%);
   complete handler and lifecycle chains are 82.9% and 84.9%, and every other
-  manifest-backed critical group exceeds 80%.
+  manifest-backed critical group exceeded 80%. These figures are diagnostics,
+  not current-commit release evidence.
 - A committed v0.9.1 module API manifest and pinned official `apidiff` gate
   cover every public Go package, permit additions, reject incompatible changes,
   and compile a separate v0.9 consumer fixture without relying on local tags.
@@ -43,11 +44,10 @@ before deploying. It records exact behavior changes and rollback steps.
 - `make verify-rc` records commit/tool versions, shuffle seed, per-step logs and
   exit codes, and worktree hygiene; release CI uploads that evidence while the
   ordinary `make verify` target remains free of shuffle20/race3 repetition.
-- The fresh local RC run based on commit `1db2743e3b1146ecc6592e0ea46cfa4e5ad311c1`
-  and shuffle seed `20260711` completed clean, count1, shuffle20, race3, vet,
-  pinned staticcheck/govulncheck, release-check, diff, and hygiene with exit 0;
-  govulncheck found zero reachable vulnerabilities and final status was
-  unchanged.
+- The run associated with commit `1db2743e3b1146ecc6592e0ea46cfa4e5ad311c1`
+  used a dirty worktree and is retained only as development-time validation;
+  it is not evidence for the current commit. Formal release-candidate evidence
+  requires a complete `make verify-rc` run from the clean, committed fixes.
 - The candidate awaits human review. It is not published, no release tag has
   been created, and no branch or artifact has been pushed by this verification.
 

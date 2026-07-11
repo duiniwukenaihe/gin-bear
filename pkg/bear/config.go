@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -167,6 +168,24 @@ type AuthConfig struct {
 	PublicPaths      *[]string `yaml:"public_paths" json:"public_paths"`
 }
 
+// SetPublicPaths replaces public paths without retaining the caller's slice.
+func (c *AuthConfig) SetPublicPaths(paths []string) {
+	if paths == nil {
+		c.PublicPaths = nil
+		return
+	}
+	copyOfPaths := cloneStringSlice(paths)
+	c.PublicPaths = &copyOfPaths
+}
+
+// GetPublicPaths returns a copy of the configured public paths.
+func (c *AuthConfig) GetPublicPaths() []string {
+	if c == nil || c.PublicPaths == nil {
+		return nil
+	}
+	return cloneStringSlice(*c.PublicPaths)
+}
+
 type DBConfig struct {
 	Enabled         bool   `yaml:"enabled" json:"enabled"`
 	Type            string `yaml:"type" json:"type"`         // mysql, postgres (default: mysql)
@@ -197,6 +216,24 @@ type WebSocketConfig struct {
 	WriteBufferSize  int       `yaml:"write_buffer_size" json:"write_buffer_size"`
 	CheckOrigin      bool      `yaml:"check_origin" json:"check_origin"`
 	AllowedOrigins   *[]string `yaml:"allowed_origins" json:"allowed_origins"`
+}
+
+// SetAllowedOrigins replaces allowed origins without retaining the caller's slice.
+func (c *WebSocketConfig) SetAllowedOrigins(origins []string) {
+	if origins == nil {
+		c.AllowedOrigins = nil
+		return
+	}
+	copyOfOrigins := cloneStringSlice(origins)
+	c.AllowedOrigins = &copyOfOrigins
+}
+
+// GetAllowedOrigins returns a copy of the configured allowed origins.
+func (c *WebSocketConfig) GetAllowedOrigins() []string {
+	if c == nil || c.AllowedOrigins == nil {
+		return nil
+	}
+	return cloneStringSlice(*c.AllowedOrigins)
 }
 
 // Deprecated: GRPCConfig is compatibility-only. Prefer the supported HTTP lifecycle.
@@ -313,9 +350,7 @@ func (c *SysConfig) validateSemantic() error {
 	}
 	if c.Tracing != nil {
 		exporter := strings.ToLower(strings.TrimSpace(c.Tracing.Exporter))
-		switch exporter {
-		case "", "stdout", "console", "otlp", "otlphttp", "none", "noop":
-		default:
+		if !slices.Contains([]string{"", "stdout", "console", "otlp", "otlphttp", "none", "noop"}, exporter) {
 			return fmt.Errorf("tracing.exporter must be one of stdout, otlp, none")
 		}
 		if c.Tracing.SampleRate < 0 || c.Tracing.SampleRate > 1 {
@@ -323,9 +358,8 @@ func (c *SysConfig) validateSemantic() error {
 		}
 	}
 	if c.Log != nil {
-		switch strings.ToLower(strings.TrimSpace(c.Log.Level)) {
-		case "", "debug", "info", "warn", "warning", "error":
-		default:
+		level := strings.ToLower(strings.TrimSpace(c.Log.Level))
+		if !slices.Contains([]string{"", "debug", "info", "warn", "warning", "error"}, level) {
 			return fmt.Errorf("log.level must be one of debug, info, warn, error")
 		}
 	}

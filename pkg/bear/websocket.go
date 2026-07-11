@@ -25,4 +25,5 @@ func (h *BaseWebSocketHandler) OnMessage(ctx *gin.Context, conn *websocket.Conn,
 }
 
 func (h *BaseWebSocketHandler) OnClose(ctx *gin.Context, conn *websocket.Conn) {
+	_, _ = ctx, conn
 }

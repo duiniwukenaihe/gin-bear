@@ -113,8 +113,8 @@ func TestReleaseCheckOwnsOnlyImplicitCoverageProfile(t *testing.T) {
 			command.Env = append(os.Environ(),
 				"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"RELEASE_TEST_STATE="+state,
-				"COVERAGE_MINIMUM=0",
-				"CRITICAL_COVERAGE_MINIMUM=0",
+				"COVERAGE_MINIMUM=1",
+				"CRITICAL_COVERAGE_MINIMUM=1",
 			)
 			explicitProfile := filepath.Join(repository, "caller-coverage.out")
 			if test.explicit {
@@ -139,6 +139,43 @@ func TestReleaseCheckOwnsOnlyImplicitCoverageProfile(t *testing.T) {
 				t.Fatalf("release check did not use non-mutating tidy check:\n%s", goCalls)
 			}
 		})
+	}
+}
+
+func TestReleaseCheckRemovesOwnedProfileWhenBuildTempCreationFails(t *testing.T) {
+	repository, state := fakeReleaseRepository(t)
+	fakeMktemp := `#!/usr/bin/env bash
+set -euo pipefail
+count_file="${RELEASE_TEST_STATE}/mktemp-count"
+count=0
+if [[ -f "${count_file}" ]]; then count="$(cat "${count_file}")"; fi
+count=$((count + 1))
+printf '%s\n' "${count}" > "${count_file}"
+if [[ "${count}" == "1" ]]; then
+	profile="${RELEASE_TEST_STATE}/owned-coverage.out"
+	: > "${profile}"
+	printf '%s\n' "${profile}" > "${RELEASE_TEST_STATE}/owned-profile-path"
+	printf '%s\n' "${profile}"
+	exit 0
+fi
+exit 73
+`
+	if err := os.WriteFile(filepath.Join(repository, "bin", "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("./scripts/release-check.sh")
+	command.Dir = repository
+	command.Env = append(os.Environ(),
+		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RELEASE_TEST_STATE="+state,
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("release check unexpectedly passed second mktemp failure:\n%s", output)
+	}
+	profile := strings.TrimSpace(readTestFile(t, filepath.Join(state, "owned-profile-path")))
+	if _, statErr := os.Stat(profile); !os.IsNotExist(statErr) {
+		t.Fatalf("release-owned profile survived BUILD_DIR mktemp failure: %v\n%s", statErr, output)
 	}
 }
 
@@ -173,6 +210,78 @@ func TestRCGateAndReleaseWorkflowAreAuditable(t *testing.T) {
 		if !strings.Contains(release, want) {
 			t.Fatalf("release workflow missing %q:\n%s", want, release)
 		}
+	}
+}
+
+func TestVerifyRCRejectsDirtyRepositoryBeforeVersionOrTestCommands(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	output, err := runFakeRC(repository, artifact, state, "RC_TEST_DIRTY=1")
+	if err == nil {
+		t.Fatalf("verify-rc.sh accepted a dirty repository:\n%s", output)
+	}
+	if _, statErr := os.Stat(filepath.Join(state, "go-calls")); !os.IsNotExist(statErr) {
+		t.Fatalf("verify-rc.sh invoked go before rejecting dirty status: %v\n%s", statErr, output)
+	}
+}
+
+func TestVerifyRCRecordsTreeAndChecksCompleteCandidateRange(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	output, err := runFakeRC(repository, artifact, state)
+	if err != nil {
+		t.Fatalf("verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	metadata := readTestFile(t, filepath.Join(artifact, "metadata.txt"))
+	for _, want := range []string{"commit=fixture-commit", "tree=fixture-tree", "base_ref=main", "base_commit=fixture-merge-base"} {
+		if !strings.Contains(metadata, want) {
+			t.Fatalf("metadata missing %q:\n%s", want, metadata)
+		}
+	}
+	gitCalls := readTestFile(t, filepath.Join(state, "git-calls"))
+	for _, want := range []string{"diff --check fixture-merge-base..HEAD", "show --check HEAD"} {
+		if !strings.Contains(gitCalls, want) {
+			t.Fatalf("candidate diff audit missing %q:\n%s", want, gitCalls)
+		}
+	}
+}
+
+func TestVerifyRCRejectsMissingBaseRefClearly(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	output, err := runFakeRC(repository, artifact, state, "RC_TEST_BASE_MISSING=1")
+	if err == nil {
+		t.Fatalf("verify-rc.sh accepted missing base ref:\n%s", output)
+	}
+	if !strings.Contains(string(output), "RC base ref does not exist: main") {
+		t.Fatalf("missing-base failure is not actionable:\n%s", output)
+	}
+}
+
+func TestVerifyRCHygieneRejectsUnexpectedLocalBranch(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	branches := "main,codex/production-baseline,codex/production-framework-v010,codex/unreviewed"
+	output, err := runFakeRC(repository, artifact, state, "RC_TEST_LOCAL_BRANCHES="+branches)
+	if err == nil {
+		t.Fatalf("verify-rc.sh accepted unexpected local branch:\n%s", output)
+	}
+	if !strings.Contains(string(output), "unexpected local branch: codex/unreviewed") {
+		t.Fatalf("local-branch failure is not actionable:\n%s", output)
+	}
+}
+
+func TestVerifyRCHygieneRejectsForbiddenFilesAtAnyDepth(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	forbidden := filepath.Join(repository, "one", "two", "three", "four", "five", "Dockerfile")
+	if err := os.MkdirAll(filepath.Dir(forbidden), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(forbidden, []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runFakeRC(repository, artifact, state)
+	if err == nil {
+		t.Fatalf("verify-rc.sh accepted deeply nested Dockerfile:\n%s", output)
+	}
+	if !strings.Contains(string(output), "Dockerfile") {
+		t.Fatalf("forbidden-file failure is not actionable:\n%s", output)
 	}
 }
 
@@ -305,6 +414,9 @@ func fakeReleaseRepository(t *testing.T) (string, string) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(repository, "scripts", "check-coverage.sh"), []byte("#!/usr/bin/env bash\nset -euo pipefail\ntest -s \"$1\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(repository, "scripts", "check-api-compat.sh"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -347,6 +459,88 @@ exit 0
 		}
 	}
 	return repository, state
+}
+
+func fakeRCRepository(t *testing.T) (string, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	artifact := filepath.Join(root, "artifact")
+	state := filepath.Join(root, "state")
+	for _, directory := range []string{filepath.Join(repository, "scripts"), filepath.Join(repository, "bin"), artifact, state} {
+		if err := os.MkdirAll(directory, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	verifyScript, err := os.ReadFile("verify-rc.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "scripts", "verify-rc.sh"), verifyScript, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "scripts", "release-check.sh"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	fakeGo := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${RC_TEST_STATE}/go-calls"
+if [[ "${1:-}" == "version" ]]; then printf '%s\n' 'go version go1.25.12 fixture'; fi
+if [[ "${1:-} ${2:-} ${3:-}" == "run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -version" ]]; then printf '%s\n' 'staticcheck fixture'; fi
+if [[ "${1:-} ${2:-} ${3:-}" == "run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -version" ]]; then printf '%s\n' 'govulncheck fixture'; fi
+exit 0
+`
+	fakeGit := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${RC_TEST_STATE}/git-calls"
+case "${1:-}" in
+	status)
+		if [[ "${RC_TEST_DIRTY:-0}" == "1" ]]; then printf '%s\n' ' M tracked.go'; fi
+		;;
+	rev-parse)
+		if [[ "${2:-}" == "HEAD" ]]; then printf '%s\n' fixture-commit
+		elif [[ "${2:-}" == 'HEAD^{tree}' ]]; then printf '%s\n' fixture-tree
+		elif [[ "${2:-}" == "--verify" ]]; then
+			if [[ "${RC_TEST_BASE_MISSING:-0}" == "1" ]]; then exit 1; fi
+			printf '%s\n' fixture-base
+		fi
+		;;
+	merge-base) printf '%s\n' fixture-merge-base ;;
+	for-each-ref)
+		branches="${RC_TEST_LOCAL_BRANCHES:-main,codex/production-baseline,codex/production-framework-v010}"
+		printf '%s\n' "${branches}" | tr ',' '\n'
+		;;
+	branch)
+		branches="${RC_TEST_LOCAL_BRANCHES:-main,codex/production-baseline,codex/production-framework-v010}"
+		printf '%s\n' "${branches}" | tr ',' '\n'
+		;;
+	ls-remote)
+		printf '%s\n' 'fixture refs/heads/main'
+		printf '%s\n' 'fixture refs/heads/codex/production-baseline'
+		;;
+esac
+exit 0
+`
+	for name, contents := range map[string]string{"go": fakeGo, "git": fakeGit} {
+		if err := os.WriteFile(filepath.Join(repository, "bin", name), []byte(contents), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return repository, artifact, state
+}
+
+func runFakeRC(repository, artifact, state string, extraEnvironment ...string) ([]byte, error) {
+	command := exec.Command("./scripts/verify-rc.sh")
+	command.Dir = repository
+	command.Env = append(os.Environ(),
+		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RC_ARTIFACT_DIR="+artifact,
+		"RC_TEST_STATE="+state,
+		"RC_BASE_REF=main",
+		"SHUFFLE_SEED=20260711",
+	)
+	command.Env = append(command.Env, extraEnvironment...)
+	return command.CombinedOutput()
 }
 
 func readTestFile(t *testing.T, path string) string {

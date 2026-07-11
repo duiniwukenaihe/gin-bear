@@ -4,6 +4,7 @@ package releasee2e
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,6 +23,36 @@ import (
 
 const releaseSecret = "task10-release-secret-7Yp3mQ9"
 const maxApplicationLogBytes = 1 << 20
+
+func TestKillAndWaitProcessReportsKillErrorWithPIDAndLogs(t *testing.T) {
+	waitDone := make(chan error)
+	err := killAndWaitProcess(4242, func() error { return errors.New("permission denied") }, waitDone, "bounded-output", 20*time.Millisecond)
+	if err == nil {
+		t.Fatal("killAndWaitProcess accepted Kill error")
+	}
+	for _, want := range []string{"PID 4242", "permission denied", "bounded-output"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Kill error missing %q: %v", want, err)
+		}
+	}
+}
+
+func TestKillAndWaitProcessTimesOutWithoutHanging(t *testing.T) {
+	waitDone := make(chan error)
+	started := time.Now()
+	err := killAndWaitProcess(5252, func() error { return nil }, waitDone, "bounded-timeout-output", 20*time.Millisecond)
+	if err == nil {
+		t.Fatal("killAndWaitProcess unexpectedly completed without Wait result")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("killAndWaitProcess hung for %s", elapsed)
+	}
+	for _, want := range []string{"PID 5252", "bounded-timeout-output"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("timeout error missing %q: %v", want, err)
+		}
+	}
+}
 
 func TestReleaseCandidateApplications(t *testing.T) {
 	if os.Getenv("BEAR_RELEASE_E2E") != "1" {
@@ -113,7 +144,9 @@ func exerciseApplication(t *testing.T, binary, directory string) {
 		if stopped {
 			return
 		}
-		running.killAndWait()
+		if err := running.killAndWait(); err != nil {
+			t.Errorf("force-stop application: %v", err)
+		}
 	}()
 
 	assertResponse(t, client, http.MethodGet, baseURL+"/live", "", nil, http.StatusOK, `"status":"ok"`)
@@ -186,7 +219,9 @@ func startApplication(t *testing.T, binary, directory string) (*runningApplicati
 		} else {
 			failures = append(failures, fmt.Sprintf("attempt %d: %v\n%s", attempt, err, running.output()))
 		}
-		running.killAndWait()
+		if err := running.killAndWait(); err != nil {
+			t.Fatalf("stop failed application attempt: %v", err)
+		}
 	}
 	t.Fatalf("application failed to start after 3 complete attempts:\n%s", strings.Join(failures, "\n"))
 	return nil, "", nil
@@ -315,15 +350,37 @@ func readFile(t *testing.T, path string) string {
 	return string(contents)
 }
 
-func (application *runningApplication) killAndWait() {
+func (application *runningApplication) killAndWait() error {
 	if application == nil || application.waited {
-		return
+		return nil
 	}
-	if application.command.Process != nil {
-		_ = application.command.Process.Kill()
+	if application.command == nil || application.command.Process == nil {
+		return fmt.Errorf("cannot kill application without a process; bounded logs:\n%s", application.output())
 	}
-	<-application.waitDone
+	err := killAndWaitProcess(
+		application.command.Process.Pid,
+		application.command.Process.Kill,
+		application.waitDone,
+		application.output(),
+		5*time.Second,
+	)
+	if err != nil {
+		return err
+	}
 	application.waited = true
+	return nil
+}
+
+func killAndWaitProcess(pid int, kill func() error, waitDone <-chan error, logs string, timeout time.Duration) error {
+	if err := kill(); err != nil {
+		return fmt.Errorf("kill application PID %d: %w; bounded logs:\n%s", pid, err, logs)
+	}
+	select {
+	case <-waitDone:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("application PID %d did not exit within %s after Kill; bounded logs:\n%s", pid, timeout, logs)
+	}
 }
 
 func (application *runningApplication) output() string {

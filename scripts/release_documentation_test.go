@@ -42,6 +42,23 @@ func TestMigrationMetricsGuidanceMatchesConfigurationAndCompatibilityBehavior(t 
 	}
 }
 
+func TestMigrationDocumentsComparableCollectionFieldSourceChange(t *testing.T) {
+	text := strings.Join(strings.Fields(readDocumentationFile(t, "../docs/migration-v0.9-to-v0.10.md")), " ")
+	for _, phrase := range []string{
+		"`AuthConfig.PublicPaths`",
+		"`WebSocketConfig.AllowedOrigins`",
+		"`[]string` to `*[]string`",
+		"`SetPublicPaths` and `GetPublicPaths`",
+		"`SetAllowedOrigins` and `GetAllowedOrigins`",
+		"pointer identity",
+		"v0.9 struct comparability",
+	} {
+		if !strings.Contains(text, phrase) {
+			t.Fatalf("migration collection guidance missing %q", phrase)
+		}
+	}
+}
+
 func TestReadmeUsesTestedExamplesAndCanonicalCLInstallPath(t *testing.T) {
 	text := readDocumentationFile(t, "../README.md")
 	for _, phrase := range []string{
@@ -191,6 +208,26 @@ func TestReleaseCandidateResultIsAuditableAndStillUnpublished(t *testing.T) {
 	for _, phrase := range []string{"local release-candidate verification", "awaits human review", "not published"} {
 		if !strings.Contains(strings.ToLower(changelog), phrase) {
 			t.Fatalf("changelog missing RC publication state %q", phrase)
+		}
+	}
+}
+
+func TestHistoricalDirtyRunIsNotPresentedAsCurrentCommitEvidence(t *testing.T) {
+	runbook := strings.Join(strings.Fields(readDocumentationFile(t, "../docs/runbook.md")), " ")
+	changelog := strings.Join(strings.Fields(readDocumentationFile(t, "../CHANGELOG.md")), " ")
+	for name, text := range map[string]string{"runbook": runbook, "changelog": changelog} {
+		for _, phrase := range []string{"development-time validation", "dirty worktree", "not evidence for the current commit"} {
+			if !strings.Contains(strings.ToLower(text), phrase) {
+				t.Fatalf("%s does not classify historical run as %q", name, phrase)
+			}
+		}
+	}
+	for _, forbidden := range []string{
+		"The fresh local RC run based on commit `1db2743e3b1146ecc6592e0ea46cfa4e5ad311c1`",
+		"The final fresh run used base HEAD `1db2743e3b1146ecc6592e0ea46cfa4e5ad311c1`",
+	} {
+		if strings.Contains(runbook, forbidden) || strings.Contains(changelog, forbidden) {
+			t.Fatalf("historical dirty run is still presented as fresh evidence: %q", forbidden)
 		}
 	}
 }

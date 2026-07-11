@@ -25,7 +25,7 @@ func (r JSONResponse) RespondTo() gin.HandlerFunc {
 // compiled from their concrete function values when routes are constructed.
 //
 // Deprecated: route registration performs the only required compilation.
-func WarmupHandlers([]RouteMetadata) {}
+func WarmupHandlers(routes []RouteMetadata) { _ = routes }
 
 // Convert compiles a business handler into a Gin handler during construction.
 // A standard gin.HandlerFunc is returned unchanged and remains an opaque

@@ -1,5 +1,8 @@
 # Each row is: critical-group repository-relative-production-file.
-# Lists are intentionally explicit so additions require a reviewed gate update.
+# check-coverage.sh derives ownership from current-platform go list .GoFiles:
+# handler=bear.go,fairing*.go,handler*.go,responder*.go; lifecycle=bear.go,lifecycle*.go;
+# auth=auth*.go,jwt*.go; binding/errors/config-loader/migration-lock/cron-lock use
+# their named prefixes; cli and scaffold own all production GoFiles in their packages.
 handler pkg/bear/bear.go
 handler pkg/bear/fairing.go
 handler pkg/bear/handler.go
