@@ -17,6 +17,9 @@ func compileHandler(handler any) (compiledHandler, error) {
 	if !value.IsValid() || value.Kind() != reflect.Func {
 		return nil, fmt.Errorf("handler must be a function, got %T", handler)
 	}
+	if value.IsNil() {
+		return nil, fmt.Errorf("handler must not be nil")
+	}
 	plan, err := compileArguments(value.Type())
 	if err != nil {
 		return nil, err
@@ -91,8 +94,14 @@ func isNilReflectValue(value reflect.Value) bool {
 func opaqueGinHandler(handler any) (gin.HandlerFunc, bool) {
 	switch typed := handler.(type) {
 	case gin.HandlerFunc:
+		if typed == nil {
+			return nil, false
+		}
 		return typed, true
 	case func(*gin.Context):
+		if typed == nil {
+			return nil, false
+		}
 		return gin.HandlerFunc(typed), true
 	default:
 		return nil, false

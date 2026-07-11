@@ -733,10 +733,11 @@ func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gi
 }
 
 func (b *Bear) runRequestFairings(ctx *gin.Context, routeFairings []Fairing) error {
-	for _, fairing := range routeFairings {
-		if err := fairing.OnRequest(ctx); err != nil {
-			return err
-		}
+	if err := runRequestFairings(ctx, routeFairings); err != nil {
+		return err
+	}
+	if requestFairingTerminal(ctx) {
+		return nil
 	}
 	return b.fairingHandler.OnRequest(ctx)
 }

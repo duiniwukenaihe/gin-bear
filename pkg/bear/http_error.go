@@ -15,7 +15,11 @@ import (
 // 4xx and 5xx statuses; invalid statuses and unexpected errors become HTTP 500.
 // Wrapped causes are logged with request metadata and are never sent to clients.
 func WriteError(ctx *gin.Context, err error) {
-	if ctx == nil || ctx.Writer.Written() {
+	if ctx == nil {
+		return
+	}
+	ctx.Abort()
+	if ctx.Writer.Written() {
 		return
 	}
 	logHTTPError(ctx, err)
@@ -76,6 +80,9 @@ func errorResponse(ctx *gin.Context, err error) (int, Response) {
 }
 
 func safeBearErrorMessage(ctx *gin.Context, err *BearError, status int) string {
+	if status >= http.StatusInternalServerError {
+		return "Internal server error"
+	}
 	if err.Key != "" {
 		if localizer := GetLocalizer(ctx); localizer != nil {
 			message, localizeErr := localizer.Localize(&i18n.LocalizeConfig{
@@ -86,9 +93,6 @@ func safeBearErrorMessage(ctx *gin.Context, err *BearError, status int) string {
 				return message
 			}
 		}
-	}
-	if status >= http.StatusInternalServerError {
-		return "Internal server error"
 	}
 	if err.Message != "" {
 		return err.Message

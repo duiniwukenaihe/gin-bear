@@ -59,12 +59,7 @@ func (f *FairingHandler) AddFairing(fairings ...Fairing) {
 }
 
 func (f *FairingHandler) OnRequest(ctx *gin.Context) error {
-	for i := 0; i < len(f.requestFairings); i++ {
-		if err := f.requestFairings[i].OnRequest(ctx); err != nil {
-			return err
-		}
-	}
-	return nil
+	return runRequestFairings(ctx, f.requestFairings)
 }
 
 func (f *FairingHandler) OnResponse(result interface{}) interface{} {
@@ -91,13 +86,30 @@ func (f *FairingHandler) onResponse(result interface{}) (interface{}, error) {
 
 // OnRequestWithRoute 执行全局 OnRequest，然后执行路由级别的 OnRequest
 func (f *FairingHandler) OnRequestWithRoute(ctx *gin.Context, routeFairings []Fairing) error {
-	// 1. 先执行路由级别的 OnRequest（优先级更高）
-	for _, f := range routeFairings {
-		if err := f.OnRequest(ctx); err != nil {
+	if err := runRequestFairings(ctx, routeFairings); err != nil {
+		return err
+	}
+	if requestFairingTerminal(ctx) {
+		return nil
+	}
+	return f.OnRequest(ctx)
+}
+
+func runRequestFairings(ctx *gin.Context, fairings []Fairing) error {
+	for _, fairing := range fairings {
+		if requestFairingTerminal(ctx) {
+			return nil
+		}
+		if err := fairing.OnRequest(ctx); err != nil {
 			return err
 		}
+		if requestFairingTerminal(ctx) {
+			return nil
+		}
 	}
+	return nil
+}
 
-	// 2. 再执行全局 OnRequest
-	return f.OnRequest(ctx)
+func requestFairingTerminal(ctx *gin.Context) bool {
+	return ctx == nil || ctx.IsAborted() || ctx.Writer.Written()
 }
