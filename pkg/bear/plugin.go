@@ -102,6 +102,9 @@ func (p *PluginManager) Load(path string) error {
 	if err := validatePluginPathForConfig(path, p.bear.runtime.Config); err != nil {
 		return err
 	}
+	if p.bear.rejectsLateLifecycleRegistration() {
+		return errors.New("plugins cannot be loaded after ApplyAll because Build may add lifecycle resources")
+	}
 
 	pluginHandle, err := plugin.Open(path)
 	if err != nil {
@@ -129,14 +132,10 @@ func (p *PluginManager) Load(path string) error {
 }
 
 func (p *PluginManager) registerModule(mod Module) error {
-	beans := mod.Beans()
 	if p.bear.rejectsLateLifecycleRegistration() {
-		for _, bean := range beans {
-			if isLifecycleBean(bean) {
-				return fmt.Errorf("plugin %s lifecycle bean %s cannot be registered after ApplyAll", mod.Name(), bean.Name())
-			}
-		}
+		return fmt.Errorf("plugin %s cannot be registered after ApplyAll because Build may add lifecycle resources", mod.Name())
 	}
+	beans := mod.Beans()
 	// 1. 注册 Beans 到主 IoC 容器
 	for _, bean := range beans {
 		p.bear.runtime.Container.Set(bean)
@@ -150,20 +149,6 @@ func (p *PluginManager) registerModule(mod Module) error {
 	defer func() { p.bear.pluginMode = false }()
 	mod.Build(p.bear)
 	return nil
-}
-
-func isLifecycleBean(bean any) bool {
-	if bean == nil {
-		return false
-	}
-	if _, ok := bean.(Initializer); ok {
-		return true
-	}
-	if _, ok := bean.(ContextShutdowner); ok {
-		return true
-	}
-	_, ok := bean.(Shutdowner)
-	return ok
 }
 
 func validatePluginPathForConfig(path string, config *SysConfig) error {

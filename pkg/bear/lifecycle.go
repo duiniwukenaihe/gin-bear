@@ -22,6 +22,7 @@ type Lifecycle struct {
 	beanEntries map[reflect.Type]*lifecycleEntry
 	state       lifecycleState
 	startErr    error
+	stopErr     error
 }
 
 type lifecycleEntry struct {
@@ -48,6 +49,16 @@ const lifecycleRollbackTimeout = 5 * time.Second
 
 func newLifecycle() *Lifecycle {
 	return &Lifecycle{beanEntries: make(map[reflect.Type]*lifecycleEntry)}
+}
+
+func (l *Lifecycle) registrationClosed() bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	closed := l.state != lifecycleNew
+	l.mu.Unlock()
+	return closed
 }
 
 func (l *Lifecycle) setBean(beanType reflect.Type, bean any) {
@@ -196,13 +207,18 @@ func (l *Lifecycle) rollbackStart(startErr error) error {
 			components = append(components, entry.component)
 		}
 	}
-	l.state = lifecycleStopped
+	l.state = lifecycleStopping
 	l.startErr = startErr
 	l.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), lifecycleRollbackTimeout)
 	defer cancel()
-	if rollbackErr := stopLifecycleComponents(ctx, components); rollbackErr != nil {
+	rollbackErr := stopLifecycleComponents(ctx, components)
+	l.mu.Lock()
+	l.stopErr = rollbackErr
+	l.state = lifecycleStopped
+	l.mu.Unlock()
+	if rollbackErr != nil {
 		return errors.Join(startErr, fmt.Errorf("lifecycle rollback failed: %w", rollbackErr))
 	}
 	return startErr
@@ -227,8 +243,9 @@ func (l *Lifecycle) Stop(ctx context.Context) error {
 	defer l.opMu.Unlock()
 	l.mu.Lock()
 	if l.state == lifecycleStopped {
+		err := l.stopErr
 		l.mu.Unlock()
-		return nil
+		return err
 	}
 	l.state = lifecycleStopping
 	components := make([]any, 0, len(l.components))
@@ -238,10 +255,14 @@ func (l *Lifecycle) Stop(ctx context.Context) error {
 			components = append(components, entry.component)
 		}
 	}
-	l.state = lifecycleStopped
 	l.mu.Unlock()
 
-	return stopLifecycleComponents(ctx, components)
+	stopErr := stopLifecycleComponents(ctx, components)
+	l.mu.Lock()
+	l.stopErr = stopErr
+	l.state = lifecycleStopped
+	l.mu.Unlock()
+	return stopErr
 }
 
 func stopLifecycleComponents(ctx context.Context, components []any) error {

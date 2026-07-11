@@ -29,6 +29,7 @@ type Runtime struct {
 	readinessChecks   *readinessCheckCoordinator
 	hijackedMu        sync.Mutex
 	hijacked          map[io.Closer]struct{}
+	hijackedClosing   bool
 }
 
 type legacyFacade struct {
@@ -60,13 +61,38 @@ func newRuntime(config *SysConfig) *Runtime {
 	return runtime
 }
 
-func (r *Runtime) trackHijackedConnection(connection io.Closer) {
+func (r *Runtime) trackHijackedConnection(connection io.Closer) bool {
 	if r == nil || connection == nil {
+		return false
+	}
+	r.hijackedMu.Lock()
+	if r.hijackedClosing {
+		r.hijackedMu.Unlock()
+		_ = connection.Close()
+		return false
+	}
+	r.hijacked[connection] = struct{}{}
+	r.hijackedMu.Unlock()
+	return true
+}
+
+func (r *Runtime) beginHijackedShutdown() {
+	if r == nil {
 		return
 	}
 	r.hijackedMu.Lock()
-	r.hijacked[connection] = struct{}{}
+	r.hijackedClosing = true
 	r.hijackedMu.Unlock()
+}
+
+func (r *Runtime) hijackedShutdownStarted() bool {
+	if r == nil {
+		return true
+	}
+	r.hijackedMu.Lock()
+	closing := r.hijackedClosing
+	r.hijackedMu.Unlock()
+	return closing
 }
 
 func (r *Runtime) untrackHijackedConnection(connection io.Closer) {

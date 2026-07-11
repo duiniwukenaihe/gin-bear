@@ -1,6 +1,7 @@
 package bear
 
 import (
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -11,9 +12,13 @@ import (
 
 const (
 	defaultWebSocketMaxMessageBytes int64 = 1 << 20
+	maxWebSocketMessageBytes              = 16 << 20
 	defaultWebSocketReadTimeout           = 60 * time.Second
 	defaultWebSocketWriteTimeout          = 10 * time.Second
 	defaultWebSocketPingInterval          = 30 * time.Second
+	maxWebSocketReadTimeout               = 5 * time.Minute
+	maxWebSocketWriteTimeout              = time.Minute
+	maxWebSocketPingInterval              = 5 * time.Minute
 )
 
 type webSocketPolicy struct {
@@ -46,6 +51,36 @@ func webSocketPolicyForConfig(config *SysConfig) webSocketPolicy {
 		policy.pingInterval = value
 	}
 	return policy
+}
+
+func validateProductionWebSocketPolicy(config *SysConfig) error {
+	if config == nil || config.Config == nil {
+		return nil
+	}
+	if raw, exists := config.Config["websocket.max_message_bytes"]; exists {
+		value, ok := positiveInt64(raw)
+		if !ok || value > maxWebSocketMessageBytes {
+			return fmt.Errorf("websocket.max_message_bytes must be an integer between 1 and %d", maxWebSocketMessageBytes)
+		}
+	}
+	for _, setting := range []struct {
+		key string
+		max time.Duration
+	}{
+		{key: "websocket.read_timeout", max: maxWebSocketReadTimeout},
+		{key: "websocket.write_timeout", max: maxWebSocketWriteTimeout},
+		{key: "websocket.ping_interval", max: maxWebSocketPingInterval},
+	} {
+		raw, exists := config.Config[setting.key]
+		if !exists {
+			continue
+		}
+		value, ok := positiveDuration(raw)
+		if !ok || value > setting.max {
+			return fmt.Errorf("%s must be a positive duration at most %s", setting.key, setting.max)
+		}
+	}
+	return nil
 }
 
 func positiveInt64(value any) (int64, bool) {

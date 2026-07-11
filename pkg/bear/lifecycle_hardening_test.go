@@ -3,6 +3,7 @@ package bear
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,41 @@ type blockingContextShutdowner struct {
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type legacyBlockingShutdowner struct {
+	name    string
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (c *legacyBlockingShutdowner) Name() string { return c.name }
+
+func (c *legacyBlockingShutdowner) Shutdown() error {
+	if c.calls.Add(1) == 1 {
+		close(c.started)
+	}
+	<-c.release
+	return nil
+}
+
+type countedErrorShutdowner struct {
+	name    string
+	err     error
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (c *countedErrorShutdowner) Name() string { return c.name }
+
+func (c *countedErrorShutdowner) ShutdownContext(context.Context) error {
+	if c.calls.Add(1) == 1 {
+		close(c.started)
+	}
+	<-c.release
+	return c.err
 }
 
 func (c *blockingContextShutdowner) Name() string { return c.name }
@@ -190,5 +226,136 @@ func TestShutdownContextHooksAreDeadlineBoundAndInstanceScoped(t *testing.T) {
 		if err := <-errs; !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("Stop() error = %v, want deadline exceeded", err)
 		}
+	}
+}
+
+func TestLegacyShutdownTimeoutIsCachedWithoutStartingAnotherWorker(t *testing.T) {
+	component := &legacyBlockingShutdowner{
+		name:    "legacy-blocking",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer close(component.release)
+	lifecycle := newLifecycle()
+	lifecycle.Add(component)
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	firstErr := lifecycle.Stop(ctx)
+	if !errors.Is(firstErr, context.DeadlineExceeded) {
+		t.Fatalf("first Stop() error = %v, want deadline exceeded", firstErr)
+	}
+
+	const repeats = 12
+	results := make(chan error, repeats)
+	for range repeats {
+		go func() { results <- lifecycle.Stop(context.Background()) }()
+	}
+	for range repeats {
+		if err := <-results; err != firstErr {
+			t.Fatalf("repeated Stop() error = %v, want cached %v", err, firstErr)
+		}
+	}
+	if got := component.calls.Load(); got != 1 {
+		t.Fatalf("legacy shutdown calls = %d, want one bounded worker", got)
+	}
+}
+
+func TestConcurrentStopWaitersReceiveSameCachedHookError(t *testing.T) {
+	hookErr := errors.New("shutdown failed")
+	component := &countedErrorShutdowner{
+		name:    "failing-shutdown",
+		err:     hookErr,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	lifecycle := newLifecycle()
+	lifecycle.Add(component)
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	const callers = 16
+	results := make(chan error, callers)
+	for range callers {
+		go func() { results <- lifecycle.Stop(context.Background()) }()
+	}
+	<-component.started
+	close(component.release)
+	var firstErr error
+	for range callers {
+		err := <-results
+		if !errors.Is(err, hookErr) {
+			t.Fatalf("Stop() error = %v, want hook error", err)
+		}
+		if firstErr == nil {
+			firstErr = err
+		} else if err != firstErr {
+			t.Fatalf("Stop() returned unstable error instances: first=%p current=%p", firstErr, err)
+		}
+	}
+	if got := component.calls.Load(); got != 1 {
+		t.Fatalf("shutdown calls = %d, want 1", got)
+	}
+}
+
+func TestProductionRejectsUnsafeWebSocketDynamicPolicy(t *testing.T) {
+	t.Setenv("BEAR_ENV", "prod")
+	tests := []struct {
+		key   string
+		value any
+	}{
+		{key: "websocket.max_message_bytes", value: "invalid"},
+		{key: "websocket.max_message_bytes", value: 0},
+		{key: "websocket.max_message_bytes", value: -1},
+		{key: "websocket.max_message_bytes", value: int64(1 << 30)},
+		{key: "websocket.read_timeout", value: "invalid"},
+		{key: "websocket.read_timeout", value: "0s"},
+		{key: "websocket.write_timeout", value: "-1s"},
+		{key: "websocket.ping_interval", value: "24h"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key+"/"+fmt.Sprint(tt.value), func(t *testing.T) {
+			config := NewSysConfig()
+			config.Auth.JWTSecret = "websocket-policy-test-secret-with-32-characters"
+			config.Config = UserConfig{tt.key: tt.value}
+			if err := validateProductionSecurity(config); err == nil || !strings.Contains(err.Error(), tt.key) {
+				t.Fatalf("validateProductionSecurity() error = %v, want %s rejection", err, tt.key)
+			}
+		})
+	}
+}
+
+func TestDevelopmentWebSocketDynamicPolicyKeepsSafeFallbacks(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	config := NewSysConfig()
+	config.Config = UserConfig{
+		"websocket.max_message_bytes": -1,
+		"websocket.read_timeout":      "invalid",
+		"websocket.write_timeout":     "0s",
+		"websocket.ping_interval":     "-1s",
+	}
+	policy := webSocketPolicyForConfig(config)
+	if policy.maxMessageBytes != defaultWebSocketMaxMessageBytes ||
+		policy.readTimeout != defaultWebSocketReadTimeout ||
+		policy.writeTimeout != defaultWebSocketWriteTimeout ||
+		policy.pingInterval != defaultWebSocketPingInterval {
+		t.Fatalf("development fallback policy = %+v", policy)
+	}
+}
+
+func TestLoadConfigRejectsUnsafeProductionWebSocketDynamicPolicy(t *testing.T) {
+	t.Setenv("BEAR_ENV", "prod")
+	path := writeConfig(t, "application.yaml", `
+auth:
+  jwt_secret: websocket-load-test-secret-with-32-characters
+config:
+  websocket.read_timeout: 24h
+`)
+	_, err := LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "websocket.read_timeout") {
+		t.Fatalf("LoadConfig() error = %v, want websocket policy rejection", err)
 	}
 }

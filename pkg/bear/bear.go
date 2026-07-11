@@ -323,7 +323,10 @@ func (b *Bear) Launch(ctx context.Context) error {
 
 	shutdownBudget := shutdownTimeout(config)
 	if err := runShutdownPhase(shutdownBudget, func(ctx context.Context) error {
-		return errors.Join(b.runtime.closeHijackedConnections(), shutdownHTTPServer(ctx, server))
+		b.runtime.beginHijackedShutdown()
+		serverErr := shutdownHTTPServer(ctx, server)
+		connectionsErr := b.runtime.closeHijackedConnections()
+		return errors.Join(serverErr, connectionsErr)
 	}); err != nil {
 		launchErrors = append(launchErrors, err)
 	}
@@ -525,6 +528,9 @@ func validateProductionSecurity(config *SysConfig) error {
 	if err := validateProductionTimeouts(config); err != nil {
 		return err
 	}
+	if err := validateProductionWebSocketPolicy(config); err != nil {
+		return err
+	}
 	if config.WS != nil && !config.WS.CheckOrigin && len(config.WS.GetAllowedOrigins()) == 0 {
 		return fmt.Errorf("websocket origin check cannot be disabled in production without allowed origins")
 	}
@@ -685,6 +691,10 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 			WriteError(ctx, err)
 			return
 		}
+		if b.runtime.hijackedShutdownStarted() {
+			ctx.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
 
 		// 3. 获取 WS 配置并初始化升级程序
 		config := b.runtime.Config
@@ -718,7 +728,10 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 			b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket upgrade failed", "error_code", "BEAR_WS_UPGRADE")
 			return
 		}
-		b.runtime.trackHijackedConnection(conn)
+		if !b.runtime.trackHijackedConnection(conn) {
+			b.runtime.Logger.InfoContext(ctx.Request.Context(), "WebSocket rejected during shutdown", "error_code", "BEAR_WS_SHUTTING_DOWN")
+			return
+		}
 		defer b.runtime.untrackHijackedConnection(conn)
 		defer conn.Close()
 		conn.SetReadLimit(policy.maxMessageBytes)
@@ -1035,8 +1048,12 @@ func (b *Bear) launchApplyError() error {
 
 func (b *Bear) rejectsLateLifecycleRegistration() bool {
 	b.applyMu.Lock()
-	defer b.applyMu.Unlock()
-	return b.applyState != applyNotStarted
+	applyClosed := b.applyState != applyNotStarted
+	b.applyMu.Unlock()
+	if applyClosed {
+		return true
+	}
+	return b.runtime == nil || b.runtime.Lifecycle.registrationClosed()
 }
 
 // Group 创建路由组 (自动感知当前的挂载点)，支持 IClass 接口的 Handler 自动构建路由
