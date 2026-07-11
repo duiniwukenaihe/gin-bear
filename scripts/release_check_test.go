@@ -61,10 +61,11 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 	for _, want := range []string{
 		`GOBIN="${RUNNER_TEMP}/bin" go install honnef.co/go/tools/cmd/staticcheck@v0.7.0`,
 		`GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/vuln/cmd/govulncheck@v1.6.0`,
-		`GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597`,
+		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597`,
 		"STATICCHECK_BIN: ${{ runner.temp }}/bin/staticcheck",
 		"GOVULNCHECK_BIN: ${{ runner.temp }}/bin/govulncheck",
 		"APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff",
+		"APIDIFF_EXPECTED_SHA256: 84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f",
 		"RC_ALLOW_NETWORK: \"1\"",
 		"RELEASE_CHECK_METADATA: ${{ runner.temp }}/release-check-metadata.txt",
 		"run: make verify",
@@ -154,8 +155,9 @@ func TestReleaseExpectedVersionComesFromPushedTag(t *testing.T) {
 	if strings.Contains(workflow, "RC_EXPECTED_VERSION: v0.10.0-rc.1") {
 		t.Fatalf("release workflow pins every v* tag to rc.1:\n%s", workflow)
 	}
-	if !strings.Contains(workflow, `GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/exp/cmd/apidiff@`) ||
-		!strings.Contains(workflow, "APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff") {
+	if !strings.Contains(workflow, `CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/exp/cmd/apidiff@`) ||
+		!strings.Contains(workflow, "APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff") ||
+		!strings.Contains(workflow, "APIDIFF_EXPECTED_SHA256: 84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f") {
 		t.Fatalf("release workflow does not prepare and pass a pinned local apidiff binary:\n%s", workflow)
 	}
 	if strings.Contains(workflow, "API_COMPAT_ALLOW_NETWORK:") {
@@ -750,6 +752,32 @@ func TestAPICompatibilityGateRejectsUncontrolledPathAPIDiff(t *testing.T) {
 	}
 }
 
+func TestAPICompatibilityGateRejectsFakeExitZeroShellAPIDiff(t *testing.T) {
+	directory, bin := fakeAPICompatibilityDirectory(t)
+	apidiffPath := filepath.Join(bin, "apidiff")
+	apidiffContents, err := os.ReadFile(apidiffPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedSHA256 := fmt.Sprintf("%x", sha256.Sum256(apidiffContents))
+	command := exec.Command("./check-api-compat.sh")
+	command.Dir = directory
+	command.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_API_STATE="+directory,
+		"APIDIFF_BIN="+apidiffPath,
+		"APIDIFF_EXPECTED_SHA256="+expectedSHA256,
+		"FAKE_APIDIFF_BUILD_INFO=unavailable",
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("API gate accepted fake exit-0 shell APIDIFF_BIN:\n%s", output)
+	}
+	if !strings.Contains(string(output), "go version -m") {
+		t.Fatalf("fake APIDIFF_BIN rejection does not identify missing build info:\n%s", output)
+	}
+}
+
 func TestAPICompatibilityGateRecordsControlledOfflineMode(t *testing.T) {
 	directory, bin := fakeAPICompatibilityDirectory(t)
 	metadata := filepath.Join(directory, "metadata.txt")
@@ -759,6 +787,7 @@ func TestAPICompatibilityGateRecordsControlledOfflineMode(t *testing.T) {
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_API_STATE="+directory,
 		"APIDIFF_BIN="+filepath.Join(bin, "apidiff"),
+		"APIDIFF_EXPECTED_SHA256="+fakeAPIDiffSHA256(t, bin),
 		"API_COMPAT_METADATA="+metadata,
 	)
 	output, err := command.CombinedOutput()
@@ -782,12 +811,62 @@ func TestAPICompatibilityGateRecordsControlledOfflineMode(t *testing.T) {
 			"apidiff_source=controlled-path",
 			"apidiff_path=" + apidiffPath,
 			"apidiff_sha256=" + apidiffSHA256,
-			"apidiff_go_version_m=unavailable",
+			"apidiff_expected_sha256=" + apidiffSHA256,
+			"apidiff_build_path=golang.org/x/exp/cmd/apidiff",
+			"apidiff_expected_build_path=golang.org/x/exp/cmd/apidiff",
+			"apidiff_build_module=golang.org/x/exp",
+			"apidiff_expected_build_module=golang.org/x/exp",
+			"apidiff_build_version=v0.0.0-20260709172345-9ea1abe57597",
+			"apidiff_expected_build_version=v0.0.0-20260709172345-9ea1abe57597",
+			"apidiff_build_commit=9ea1abe57597",
+			"apidiff_expected_build_commit=9ea1abe57597",
 		} {
 			if !strings.Contains(evidence, want) {
 				t.Fatalf("API compatibility evidence missing %q:\n%s", want, evidence)
 			}
 		}
+	}
+}
+
+func TestAPICompatibilityGateRejectsWrongControlledAPIDiffIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		checksum  func(t *testing.T, bin string) string
+		buildInfo string
+		match     string
+	}{
+		{
+			name:     "wrong checksum",
+			checksum: func(*testing.T, string) string { return strings.Repeat("0", sha256.Size*2) },
+			match:    "APIDIFF_BIN SHA256 mismatch",
+		},
+		{
+			name:     "wrong module",
+			checksum: fakeAPIDiffSHA256,
+			buildInfo: "\tpath\tgolang.org/x/exp/cmd/apidiff\n" +
+				"\tmod\texample.com/forged\tv0.0.0-20260709172345-9ea1abe57597\th1:forged\n",
+			match: "APIDIFF_BIN build module mismatch",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory, bin := fakeAPICompatibilityDirectory(t)
+			command := exec.Command("./check-api-compat.sh")
+			command.Dir = directory
+			command.Env = append(os.Environ(),
+				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"FAKE_API_STATE="+directory,
+				"FAKE_APIDIFF_BUILD_INFO="+test.buildInfo,
+				"APIDIFF_BIN="+filepath.Join(bin, "apidiff"),
+				"APIDIFF_EXPECTED_SHA256="+test.checksum(t, bin),
+			)
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("API gate accepted %s APIDIFF_BIN identity:\n%s", test.name, output)
+			}
+			if !strings.Contains(string(output), test.match) {
+				t.Fatalf("APIDIFF_BIN rejection missing %q:\n%s", test.match, output)
+			}
+		})
 	}
 }
 
@@ -856,6 +935,7 @@ func TestAPICompatibilityGateRecordsOptInBaselineRebuild(t *testing.T) {
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_API_STATE="+directory,
 		"APIDIFF_BIN="+filepath.Join(bin, "apidiff"),
+		"APIDIFF_EXPECTED_SHA256="+fakeAPIDiffSHA256(t, bin),
 		"API_COMPAT_METADATA="+metadata,
 		"API_BASELINE_REBUILD=1",
 	)
@@ -883,7 +963,7 @@ func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *test
 			directory, bin := fakeAPICompatibilityDirectory(t)
 			command := exec.Command("./check-api-compat.sh")
 			command.Dir = directory
-			command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_API_STATE="+directory, "FAKE_APIDIFF_OUTPUT="+test.output, "APIDIFF_BIN="+filepath.Join(bin, "apidiff"))
+			command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_API_STATE="+directory, "FAKE_APIDIFF_OUTPUT="+test.output, "APIDIFF_BIN="+filepath.Join(bin, "apidiff"), "APIDIFF_EXPECTED_SHA256="+fakeAPIDiffSHA256(t, bin))
 			output, err := command.CombinedOutput()
 			if test.wantFailed && err == nil {
 				t.Fatalf("API gate accepted incompatible output:\n%s", output)
@@ -923,7 +1003,26 @@ func fakeAPICompatibilityDirectory(t *testing.T) (string, string) {
 	if err := os.WriteFile(filepath.Join(directory, "api", "v0.9.1.txt.sha256"), []byte(checksum), 0644); err != nil {
 		t.Fatal(err)
 	}
-	fakeGo := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${FAKE_API_STATE}/go-calls\"\nif [[ \"${1:-}\" == \"run\" ]]; then printf '%s' \"${FAKE_APIDIFF_OUTPUT:-}\"; exit 0; fi\nexit 99\n"
+	fakeGo := `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FAKE_API_STATE}/go-calls"
+if [[ "${1:-}" == "run" ]]; then
+	printf '%s' "${FAKE_APIDIFF_OUTPUT:-}"
+	exit 0
+fi
+if [[ "${1:-} ${2:-}" == "version -m" ]]; then
+	if [[ "${FAKE_APIDIFF_BUILD_INFO:-}" == "unavailable" ]]; then
+		exit 99
+	fi
+	if [[ -n "${FAKE_APIDIFF_BUILD_INFO:-}" ]]; then
+		printf '%s' "${FAKE_APIDIFF_BUILD_INFO}"
+	else
+		printf '\tpath\tgolang.org/x/exp/cmd/apidiff\n'
+		printf '\tmod\tgolang.org/x/exp\tv0.0.0-20260709172345-9ea1abe57597\th1:fixture\n'
+	fi
+	exit 0
+fi
+exit 99
+`
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(fakeGo), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -932,6 +1031,15 @@ func fakeAPICompatibilityDirectory(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	return directory, bin
+}
+
+func fakeAPIDiffSHA256(t *testing.T, bin string) string {
+	t.Helper()
+	contents, err := os.ReadFile(filepath.Join(bin, "apidiff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(contents))
 }
 
 func TestGeneratedReleaseE2EUsesPublicCLIAndPreservesGeneratedApp(t *testing.T) {

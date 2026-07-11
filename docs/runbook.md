@@ -14,7 +14,7 @@
    populated module cache, and a local govulncheck database:
 
    ```bash
-   SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff make verify-rc
+   SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
    ```
 4. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
 5. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
@@ -57,7 +57,7 @@ workflow exemption, not signature verification. A local release operator with
 an isolated trusted `GNUPGHOME` must run:
 
 ```bash
-RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.10.0-rc.1 RC_EXPECTED_VERSION=v0.10.0-rc.1 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff make verify-rc
+RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.10.0-rc.1 RC_EXPECTED_VERSION=v0.10.0-rc.1 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
 ```
 
 When `RC_RELEASE_TAG` is non-empty, `RC_VERIFY_TAG_SIGNATURE` is mandatory and
@@ -68,7 +68,9 @@ explicit exemption. Supplying the signature variable without a release tag is
 invalid.
 
 The workflow installs pinned `staticcheck`, `govulncheck`, and `apidiff`
-binaries before the gate. It explicitly sets `RC_ALLOW_NETWORK=1`, recorded as
+binaries before the gate. The `apidiff` build fixes Go 1.25.12,
+Linux/amd64, and `CGO_ENABLED=0`, then supplies the independently trusted
+SHA-256 `84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f`. It explicitly sets `RC_ALLOW_NETWORK=1`, recorded as
 `network_mode=online-opt-in`, because govulncheck refreshes vulnerability data.
 The API gate still receives the controlled `APIDIFF_BIN` and leaves
 `API_COMPAT_ALLOW_NETWORK=0`.
@@ -119,7 +121,7 @@ critical coverage scaffold 82.9%
 Public API compatibility is checked without repository history or local tags:
 
 ```bash
-APIDIFF_BIN=/opt/gin-bear/bin/apidiff scripts/check-api-compat.sh
+APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f scripts/check-api-compat.sh
 ```
 
 The committed `scripts/api/v0.9.1.txt` module manifest covers every public Go
@@ -134,11 +136,18 @@ an arbitrary PATH binary or invokes `go run module@version`; set
 local tag, clone, or shallow repository history. Reconstruction is an explicit
 manual or independent audit and is not required by the default offline gate,
 which checks only the committed hash and additive API compatibility. The release
-workflow prepares the pinned binary before invoking that offline gate. The
-network switch, rebuild switch, tool source, canonical executable path,
-SHA-256, and available `go version -m` identity are printed to stdout and
-appended to `API_COMPAT_METADATA` when that path is provided. `APIDIFF_BIN`
-must be a non-empty absolute path to a regular, non-symlink executable.
+workflow prepares the pinned binary before invoking that offline gate.
+`APIDIFF_EXPECTED_SHA256` is mandatory with `APIDIFF_BIN`; it must be an
+explicit trusted digest supplied by the operator or CI, never a digest computed
+and trusted by the same gate invocation. The gate rejects a hash mismatch,
+unreadable Go build info, or a build path, module, pseudo-version, or commit that
+does not match the pinned `golang.org/x/exp/cmd/apidiff` identity. The network
+switch, rebuild switch, tool source, canonical executable path, actual and
+expected SHA-256, raw `go version -m` output, and parsed actual and expected
+build identity are printed to stdout and appended to `API_COMPAT_METADATA`
+when that path is provided. Metadata is evidence only and never bypasses these
+checks. `APIDIFF_BIN` must be a non-empty absolute path to a regular,
+non-symlink executable.
 
 `scripts/release-check.sh` independently prints and persists
 `release_check_network` and `release_check_network_opt_in`. Set
@@ -174,7 +183,7 @@ pinned tool versions, shuffle seed `20260711`, each command and exit code, and
 clean before/after worktree status:
 
 ```bash
-SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff make verify-rc
+SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
 ```
 
 By default logs are retained in a `mktemp` directory outside the repository;
