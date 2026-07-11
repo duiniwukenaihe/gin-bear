@@ -24,9 +24,57 @@ import (
 const releaseSecret = "task10-release-secret-7Yp3mQ9"
 const maxApplicationLogBytes = 1 << 20
 
+func TestStartApplicationRetriesAfterProcessExitsBeforeLive(t *testing.T) {
+	directory := t.TempDir()
+	marker := filepath.Join(directory, "first-attempt")
+	binary := filepath.Join(directory, "retry-application")
+	writeFile(t, binary, `#!/bin/sh
+if mkdir "$BEAR_RELEASE_E2E_ATTEMPT_MARKER" 2>/dev/null; then
+	exit 17
+fi
+exec "$BEAR_RELEASE_E2E_TEST_BINARY" -test.run '^TestReleaseE2ELiveHelper$'
+`)
+	if err := os.Chmod(binary, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEAR_RELEASE_E2E_ATTEMPT_MARKER", marker)
+	t.Setenv("BEAR_RELEASE_E2E_TEST_BINARY", os.Args[0])
+	t.Setenv("BEAR_RELEASE_E2E_LIVE_HELPER", "1")
+
+	running, baseURL, client := startApplication(t, binary, directory)
+	t.Cleanup(func() {
+		if err := running.killAndWait(); err != nil {
+			t.Errorf("stop retry application: %v", err)
+		}
+	})
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("first application attempt did not run: %v", err)
+	}
+	assertResponse(t, client, http.MethodGet, baseURL+"/live", "", nil, http.StatusOK, "live")
+}
+
+func TestReleaseE2ELiveHelper(t *testing.T) {
+	if os.Getenv("BEAR_RELEASE_E2E_LIVE_HELPER") != "1" {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/live", func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(response, "live")
+	})
+	server := &http.Server{
+		Addr:              "127.0.0.1:" + os.Getenv("BEAR_SERVER_PORT"),
+		Handler:           mux,
+		ReadHeaderTimeout: time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestKillAndWaitProcessReportsKillErrorWithPIDAndLogs(t *testing.T) {
-	waitDone := make(chan error)
-	err := killAndWaitProcess(4242, func() error { return errors.New("permission denied") }, waitDone, "bounded-output", 20*time.Millisecond)
+	wait := &processWait{done: make(chan struct{})}
+	err := killAndWaitProcess(4242, func() error { return errors.New("permission denied") }, wait, "bounded-output", 20*time.Millisecond)
 	if err == nil {
 		t.Fatal("killAndWaitProcess accepted Kill error")
 	}
@@ -38,9 +86,9 @@ func TestKillAndWaitProcessReportsKillErrorWithPIDAndLogs(t *testing.T) {
 }
 
 func TestKillAndWaitProcessTimesOutWithoutHanging(t *testing.T) {
-	waitDone := make(chan error)
+	wait := &processWait{done: make(chan struct{})}
 	started := time.Now()
-	err := killAndWaitProcess(5252, func() error { return nil }, waitDone, "bounded-timeout-output", 20*time.Millisecond)
+	err := killAndWaitProcess(5252, func() error { return os.ErrProcessDone }, wait, "bounded-timeout-output", 20*time.Millisecond)
 	if err == nil {
 		t.Fatal("killAndWaitProcess unexpectedly completed without Wait result")
 	}
@@ -159,9 +207,10 @@ func exerciseApplication(t *testing.T, binary, directory string) {
 		t.Fatalf("send SIGTERM: %v", err)
 	}
 	select {
-	case err := <-running.waitDone:
+	case <-running.wait.done:
 		stopped = true
 		running.waited = true
+		err := running.wait.err
 		if err != nil {
 			t.Fatalf("application exited after SIGTERM: %v\n%s", err, running.output())
 		}
@@ -181,11 +230,11 @@ func exerciseApplication(t *testing.T, binary, directory string) {
 }
 
 type runningApplication struct {
-	command  *exec.Cmd
-	waitDone chan error
-	stdout   *boundedBuffer
-	stderr   *boundedBuffer
-	waited   bool
+	command *exec.Cmd
+	wait    *processWait
+	stdout  *boundedBuffer
+	stderr  *boundedBuffer
+	waited  bool
 }
 
 func startApplication(t *testing.T, binary, directory string) (*runningApplication, string, *http.Client) {
@@ -211,10 +260,9 @@ func startApplication(t *testing.T, binary, directory string) (*runningApplicati
 		if err := running.command.Start(); err != nil {
 			t.Fatal(err)
 		}
-		running.waitDone = make(chan error, 1)
-		go func() { running.waitDone <- running.command.Wait() }()
+		running.wait = waitForProcess(running.command)
 		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-		if err := waitForLive(client, baseURL+"/live", running.waitDone, 20*time.Second); err == nil {
+		if err := waitForLive(client, baseURL+"/live", running.wait, 20*time.Second); err == nil {
 			return running, baseURL, client
 		} else {
 			failures = append(failures, fmt.Sprintf("attempt %d: %v\n%s", attempt, err, running.output()))
@@ -227,12 +275,26 @@ func startApplication(t *testing.T, binary, directory string) (*runningApplicati
 	return nil, "", nil
 }
 
-func waitForLive(client *http.Client, url string, waitDone chan error, timeout time.Duration) error {
+type processWait struct {
+	done chan struct{}
+	err  error
+}
+
+func waitForProcess(command *exec.Cmd) *processWait {
+	wait := &processWait{done: make(chan struct{})}
+	go func() {
+		wait.err = command.Wait()
+		close(wait.done)
+	}()
+	return wait
+}
+
+func waitForLive(client *http.Client, url string, wait *processWait, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		select {
-		case err := <-waitDone:
-			waitDone <- err
+		case <-wait.done:
+			err := wait.err
 			if err != nil {
 				return fmt.Errorf("process exited before live: %w", err)
 			}
@@ -360,7 +422,7 @@ func (application *runningApplication) killAndWait() error {
 	err := killAndWaitProcess(
 		application.command.Process.Pid,
 		application.command.Process.Kill,
-		application.waitDone,
+		application.wait,
 		application.output(),
 		5*time.Second,
 	)
@@ -371,12 +433,13 @@ func (application *runningApplication) killAndWait() error {
 	return nil
 }
 
-func killAndWaitProcess(pid int, kill func() error, waitDone <-chan error, logs string, timeout time.Duration) error {
-	if err := kill(); err != nil {
+func killAndWaitProcess(pid int, kill func() error, wait *processWait, logs string, timeout time.Duration) error {
+	if err := kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("kill application PID %d: %w; bounded logs:\n%s", pid, err, logs)
 	}
 	select {
-	case <-waitDone:
+	case <-wait.done:
+		_ = wait.err
 		return nil
 	case <-time.After(timeout):
 		return fmt.Errorf("application PID %d did not exit within %s after Kill; bounded logs:\n%s", pid, timeout, logs)
