@@ -45,7 +45,7 @@ const runtimeContextKey = "bear_runtime"
 func newRuntime(config *SysConfig) *Runtime {
 	lifecycle := newLifecycle()
 	container := NewBeanFactory()
-	container.onSet = lifecycle.setBean
+	container.onSet = lifecycle.registerBean
 	container.onRemove = lifecycle.removeBean
 	runtime := &Runtime{
 		Config:          config,

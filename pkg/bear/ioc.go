@@ -11,7 +11,7 @@ type BeanFactory struct {
 	mu       sync.RWMutex
 	beans    map[reflect.Type]any
 	order    []reflect.Type
-	onSet    func(reflect.Type, any)
+	onSet    func(reflect.Type, any, func()) error
 	onRemove func(reflect.Type)
 }
 
@@ -83,41 +83,50 @@ func Resolve[T any](factory *BeanFactory) T {
 
 // Set 注册一个 Bean
 func (f *BeanFactory) Set(bean any) {
+	_ = f.TrySet(bean)
+}
+
+// TrySet registers a bean or reports that the owning lifecycle is closed.
+func (f *BeanFactory) TrySet(bean any) error {
 	if f == nil || bean == nil {
-		return
+		return nil
 	}
 	v := reflect.ValueOf(bean)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, exists := f.beans[v.Type()]; !exists {
-		f.order = append(f.order, v.Type())
+	return f.trySet(v.Type(), bean)
+}
+
+func (f *BeanFactory) trySet(beanType reflect.Type, bean any) error {
+	commit := func() {
+		if _, exists := f.beans[beanType]; !exists {
+			f.order = append(f.order, beanType)
+		}
+		f.beans[beanType] = bean
 	}
-	f.beans[v.Type()] = bean
-	onSet := f.onSet
-	if onSet != nil {
-		onSet(v.Type(), bean)
+	if f.onSet != nil {
+		return f.onSet(beanType, bean, commit)
 	}
+	commit()
+	return nil
 }
 
 // SetWithInterface 注册一个 Bean 并绑定到指定接口类型
 // ifacePtr 必须是指向接口的指针，例如 (*MyInterface)(nil)
 func (f *BeanFactory) SetWithInterface(ifacePtr any, bean any) {
+	_ = f.TrySetWithInterface(ifacePtr, bean)
+}
+
+// TrySetWithInterface registers a bean for an interface or reports rejection.
+func (f *BeanFactory) TrySetWithInterface(ifacePtr any, bean any) error {
 	t := reflect.TypeOf(ifacePtr).Elem()
 	if t.Kind() != reflect.Interface {
 		// 如果不是接口，尝试作为普通类型注册
-		f.Set(bean)
-		return
+		return f.TrySet(bean)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, exists := f.beans[t]; !exists {
-		f.order = append(f.order, t)
-	}
-	f.beans[t] = bean
-	onSet := f.onSet
-	if onSet != nil {
-		onSet(t, bean)
-	}
+	return f.trySet(t, bean)
 }
 
 // Remove 移除一个 Bean

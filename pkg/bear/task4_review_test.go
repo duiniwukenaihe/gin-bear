@@ -407,10 +407,10 @@ func TestBeanFactorySerializesMutationWithLifecycleTracking(t *testing.T) {
 	container := NewBeanFactory()
 	setEntered := make(chan struct{})
 	releaseSet := make(chan struct{})
-	container.onSet = func(beanType reflect.Type, bean any) {
+	container.onSet = func(beanType reflect.Type, bean any, commit func()) error {
 		close(setEntered)
 		<-releaseSet
-		lifecycle.setBean(beanType, bean)
+		return lifecycle.registerBean(beanType, bean, commit)
 	}
 	container.onRemove = lifecycle.removeBean
 	component := &countedLifecycleBean{name: "removed-during-set"}

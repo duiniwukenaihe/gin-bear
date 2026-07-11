@@ -444,11 +444,14 @@ plugin with a new application instance and use a readiness-checked rolling
 replacement to move traffic.
 
 `Launch` closes the same registration barrier even when an application skips
-`ApplyAll`. Register lifecycle components and shutdown hooks before startup:
-the compatibility methods `Lifecycle.Add` and `Bear.OnShutdown` safely ignore
-registrations once startup has begun. Use `Lifecycle.TryAdd` and
-`Bear.TryOnShutdown` when the caller must receive
-`bear.ErrLifecycleRegistrationClosed`. Shutdown remains strictly LIFO; when its
+`ApplyAll`. It starts the lifecycle before binding HTTP or gRPC listeners, and
+an initializer failure prevents the server from listening. Register lifecycle
+components and shutdown hooks before startup: the compatibility methods
+`Lifecycle.Add`, `Bear.OnShutdown`, and `BeanFactory.Set` safely ignore
+registrations once startup has begun. Use `Lifecycle.TryAdd`,
+`Bear.TryOnShutdown`, and `BeanFactory.TrySet` when the caller must receive
+`bear.ErrLifecycleRegistrationClosed`. Interface registrations follow the same
+rule through `TrySetWithInterface`. Shutdown remains strictly LIFO; when its
 context expires, Bear does not start another component. A legacy `Shutdown()`
 call that already started may finish in one bounded background worker, while
 `Stop` returns the context error and caches that result.

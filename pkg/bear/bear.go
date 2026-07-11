@@ -279,6 +279,9 @@ func (b *Bear) Launch(ctx context.Context) error {
 		return err
 	}
 	b.runtime.Lifecycle.sealRegistration()
+	if err := b.runtime.Lifecycle.Start(ctx); err != nil {
+		return err
+	}
 	config := b.runtime.Config
 	logger := b.runtime.Logger
 	server := b.buildHTTPServer(config)

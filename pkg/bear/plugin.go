@@ -209,7 +209,9 @@ func (p *PluginManager) Load(path string) error {
 
 		mod := getModule()
 		p.bear.runtime.Logger.Info("Loading dynamic module", "name", mod.Name(), "path", path)
-		p.registerModuleInRegistration(mod)
+		if err := p.registerModuleInRegistration(mod); err != nil {
+			return err
+		}
 		p.plugins[path] = &loadedPlugin{Module: mod, Symbol: sym}
 		return nil
 	})
@@ -217,8 +219,7 @@ func (p *PluginManager) Load(path string) error {
 
 func (p *PluginManager) registerModule(mod Module) error {
 	return p.withRegistration(func() error {
-		p.registerModuleInRegistration(mod)
-		return nil
+		return p.registerModuleInRegistration(mod)
 	})
 }
 
@@ -230,11 +231,13 @@ func (p *PluginManager) withRegistration(register func() error) error {
 	return register()
 }
 
-func (p *PluginManager) registerModuleInRegistration(mod Module) {
+func (p *PluginManager) registerModuleInRegistration(mod Module) error {
 	beans := mod.Beans()
 	// 1. 注册 Beans 到主 IoC 容器
 	for _, bean := range beans {
-		p.bear.runtime.Container.Set(bean)
+		if err := p.bear.runtime.Container.TrySet(bean); err != nil {
+			return fmt.Errorf("register plugin bean %s: %w", bean.Name(), err)
+		}
 		// 自动执行依赖注入
 		p.bear.runtime.Container.Apply(bean)
 	}
@@ -244,6 +247,7 @@ func (p *PluginManager) registerModuleInRegistration(mod Module) {
 	p.bear.pluginMode = true
 	defer func() { p.bear.pluginMode = false }()
 	mod.Build(p.bear)
+	return nil
 }
 
 func validatePluginPathForConfig(path string, config *SysConfig) error {

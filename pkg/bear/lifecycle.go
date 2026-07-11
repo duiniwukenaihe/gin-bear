@@ -82,6 +82,25 @@ func (l *Lifecycle) setBean(beanType reflect.Type, bean any) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.setBeanLocked(beanType, bean)
+}
+
+func (l *Lifecycle) registerBean(beanType reflect.Type, bean any, commit func()) error {
+	if l == nil || bean == nil {
+		commit()
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.registrationSealed || l.state != lifecycleNew {
+		return ErrLifecycleRegistrationClosed
+	}
+	commit()
+	l.setBeanLocked(beanType, bean)
+	return nil
+}
+
+func (l *Lifecycle) setBeanLocked(beanType reflect.Type, bean any) {
 	if l.state == lifecycleStopping || l.state == lifecycleStopped {
 		return
 	}
