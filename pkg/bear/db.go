@@ -190,6 +190,15 @@ func postgresTLSVerifiesHostname(cfg *pgconn.Config) bool {
 
 // NewGormAdapter 创建 GORM 适配器
 func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
+	validationCfg := cfg
+	if cfg != nil && !cfg.Enabled {
+		activeCfg := *cfg
+		activeCfg.Enabled = true
+		validationCfg = &activeCfg
+	}
+	if err := validateProductionDBTLS(validationCfg, isProductionMode(nil)); err != nil {
+		return nil, err
+	}
 	dsn, err := buildDSN(cfg)
 	if err != nil {
 		return nil, err

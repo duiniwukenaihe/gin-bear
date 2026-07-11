@@ -131,10 +131,14 @@ func validateJWTExpiration(config *JWTConfig) error {
 	if config == nil {
 		return errors.New("jwt configuration is unavailable")
 	}
-	if config.Expires <= 0 {
-		return fmt.Errorf("%w: got %d", ErrInvalidTokenExpiration, config.Expires)
+	return validateTokenExpirationHours(config.Expires)
+}
+
+func validateTokenExpirationHours(expires int) error {
+	if expires > 0 {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("%w: got %d", ErrInvalidTokenExpiration, expires)
 }
 
 func (j *JWTUtil) Name() string {

@@ -393,13 +393,18 @@ func (c *SysConfig) validateSemantic() error {
 			return fmt.Errorf("health.readiness_timeout must be a valid duration: %w", err)
 		}
 	}
-	if c.Auth != nil && c.Auth.JWTClockSkew != "" {
-		skew, err := time.ParseDuration(c.Auth.JWTClockSkew)
-		if err != nil {
-			return fmt.Errorf("auth.jwt_clock_skew must be a valid duration: %w", err)
+	if c.Auth != nil {
+		if err := validateTokenExpirationHours(c.Auth.TokenExpireHours); err != nil {
+			return err
 		}
-		if skew < 0 || skew > 5*time.Minute {
-			return fmt.Errorf("auth.jwt_clock_skew must be between 0 and 5m")
+		if c.Auth.JWTClockSkew != "" {
+			skew, err := time.ParseDuration(c.Auth.JWTClockSkew)
+			if err != nil {
+				return fmt.Errorf("auth.jwt_clock_skew must be a valid duration: %w", err)
+			}
+			if skew < 0 || skew > 5*time.Minute {
+				return fmt.Errorf("auth.jwt_clock_skew must be between 0 and 5m")
+			}
 		}
 	}
 	if c.DB != nil {
@@ -408,6 +413,9 @@ func (c *SysConfig) validateSemantic() error {
 			if _, err := effectivePostgresSSLMode(c.DB); err != nil {
 				return err
 			}
+		}
+		if err := validateProductionDBTLS(c.DB, isProductionMode(c)); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -3,6 +3,7 @@ package bear
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"strings"
 	"testing"
 
@@ -178,6 +179,90 @@ func TestValidateProductionDBTLSSkipsNonProductionAndDisabledDB(t *testing.T) {
 	insecure.Enabled = false
 	if err := validateProductionDBTLS(insecure, true); err != nil {
 		t.Fatalf("disabled database config rejected: %v", err)
+	}
+}
+
+func TestSysConfigValidateEnforcesProductionDBTLS(t *testing.T) {
+	t.Setenv("BEAR_ENV", "production")
+	t.Setenv("GIN_MODE", "")
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = true
+	cfg.DB.Type = "postgres"
+	cfg.DB.DSN = "postgres://user:validate-secret@db.example/app?sslmode=disable"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "verify-full") {
+		t.Fatalf("SysConfig.Validate error = %v, want production TLS rejection", err)
+	}
+	if strings.Contains(err.Error(), "validate-secret") {
+		t.Fatalf("SysConfig.Validate leaked DSN credential: %v", err)
+	}
+
+	t.Setenv("BEAR_ENV", "dev")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("development SysConfig.Validate rejected insecure TLS: %v", err)
+	}
+}
+
+func TestLoadConfigEnforcesProductionDBTLSFromYAML(t *testing.T) {
+	t.Setenv("BEAR_ENV", "production")
+	t.Setenv("GIN_MODE", "")
+	path := writeConfig(t, "production-insecure-db.yaml", `
+database:
+  enabled: true
+  type: postgres
+  dsn: postgres://user:yaml-secret@db.example/app?sslmode=disable
+auth:
+  jwt_secret: production-secret-with-at-least-32-characters
+  token_expire_hours: 24
+`)
+
+	_, err := LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "verify-full") {
+		t.Fatalf("LoadConfig error = %v, want production TLS rejection", err)
+	}
+	if strings.Contains(err.Error(), "yaml-secret") {
+		t.Fatalf("LoadConfig leaked DSN credential: %v", err)
+	}
+}
+
+func TestNewGormAdapterDefensivelyEnforcesProductionDBTLS(t *testing.T) {
+	t.Setenv("BEAR_ENV", "production")
+	t.Setenv("GIN_MODE", "")
+	cfg := &DBConfig{
+		Type: "postgres",
+		DSN:  "postgres://user:adapter-secret@db.example/app?sslmode=disable",
+	}
+
+	adapter, err := NewGormAdapter(cfg)
+	if adapter != nil || err == nil || !strings.Contains(err.Error(), "verify-full") {
+		t.Fatalf("NewGormAdapter = %#v, error = %v, want production TLS rejection", adapter, err)
+	}
+	if strings.Contains(err.Error(), "adapter-secret") {
+		t.Fatalf("NewGormAdapter leaked DSN credential: %v", err)
+	}
+
+	t.Setenv("BEAR_ENV", "dev")
+	t.Setenv("GIN_MODE", "release")
+	if _, err := NewGormAdapter(cfg); err == nil || !strings.Contains(err.Error(), "verify-full") {
+		t.Fatalf("release-mode NewGormAdapter error = %v, want production TLS rejection", err)
+	}
+
+	t.Setenv("GIN_MODE", "debug")
+	_, err = NewGormAdapter(cfg)
+	if err != nil && strings.Contains(err.Error(), "verify-full") {
+		t.Fatalf("development NewGormAdapter applied production TLS policy: %v", err)
+	}
+}
+
+func TestSysConfigValidateRejectsNonPositiveTokenExpiration(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	cfg := NewSysConfig()
+	cfg.Auth.TokenExpireHours = 0
+
+	err := cfg.Validate()
+	if !errors.Is(err, ErrInvalidTokenExpiration) {
+		t.Fatalf("SysConfig.Validate error = %v, want invalid token expiration", err)
 	}
 }
 

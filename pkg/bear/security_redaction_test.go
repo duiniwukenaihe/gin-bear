@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -51,6 +53,135 @@ func TestSanitizeForObservabilityReturnsStableErrorCategory(t *testing.T) {
 	}
 	if got := SanitizeForObservability("opaque panic detail"); got != "[REDACTED]" {
 		t.Fatalf("SanitizeForObservability panic value = %q, want redacted", got)
+	}
+}
+
+func TestContextHandlerLocallyRedactsSecretsAndPreservesDiagnostics(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(&ContextHandler{Handler: slog.NewJSONHandler(&output, nil)})
+	logger.Error(
+		"token validation failed; Authorization: Bearer auth-secret; password=message-secret; endpoint=https://alice:url-secret@api.example/v1/orders?token=query-secret; retrying",
+		"postgres_connection", "host=db.example user=alice password='postgres secret' dbname=app sslmode=verify-full",
+		"mysql_connection", "alice:mysql-secret@tcp(db.example:3306)/app?token=query-secret",
+		"error_category", "token_invalid",
+	)
+
+	logged := output.String()
+	for _, forbidden := range []string{
+		"auth-secret", "message-secret", "alice:url-secret", "query-secret",
+		"postgres secret", "mysql-secret",
+	} {
+		if strings.Contains(logged, forbidden) {
+			t.Fatalf("log leaked %q: %s", forbidden, logged)
+		}
+	}
+	for _, required := range []string{
+		"token validation failed", "retrying", "Authorization: Bearer [REDACTED]",
+		"password=[REDACTED]", "https://api.example/v1/orders", "host=db.example",
+		"dbname=app", "tcp(db.example:3306)/app", "token_invalid",
+	} {
+		if !strings.Contains(logged, required) {
+			t.Fatalf("log lost safe diagnostic %q: %s", required, logged)
+		}
+	}
+}
+
+func TestContextHandlerRecursivelyRedactsCommonStructuredValues(t *testing.T) {
+	type payload struct {
+		Host     string
+		Path     string
+		Password string
+		Endpoint *url.URL
+		Headers  http.Header
+		Nested   map[string]any
+		Items    []any
+		Self     *payload
+	}
+
+	endpoint := &url.URL{
+		Scheme:   "https",
+		User:     url.UserPassword("alice", "userinfo-secret"),
+		Host:     "api.example",
+		Path:     "/v1/orders",
+		RawQuery: "token=url-query-secret",
+	}
+	value := &payload{
+		Host:     "worker.example",
+		Path:     "/jobs/:id",
+		Password: "struct-password-secret",
+		Endpoint: endpoint,
+		Headers: http.Header{
+			"Authorization": {"Bearer header-secret"},
+			"Cookie":        {"sid=cookie-secret"},
+			"X-Trace-ID":    {"trace-123"},
+		},
+		Nested: map[string]any{
+			"query": map[string]string{"token": "nested-query-secret"},
+			"error": errors.New("password=nested-error-secret"),
+			"safe":  "token validation failed",
+		},
+		Items: []any{
+			map[string]any{"secret": "slice-secret", "host": "slice.example"},
+			errors.New("authorization=slice-error-secret"),
+			"ordinary diagnostic",
+		},
+	}
+	value.Self = value
+
+	var output bytes.Buffer
+	logger := slog.New(&ContextHandler{Handler: slog.NewJSONHandler(&output, nil)})
+	logger.Info("structured event",
+		"payload", value,
+		"request", slog.GroupValue(
+			slog.String("token", "group-secret"),
+			slog.String("host", "group.example"),
+		),
+	)
+
+	logged := output.String()
+	for _, forbidden := range []string{
+		"userinfo-secret", "url-query-secret", "struct-password-secret",
+		"header-secret", "cookie-secret", "nested-query-secret", "nested-error-secret",
+		"slice-secret", "slice-error-secret", "group-secret",
+	} {
+		if strings.Contains(logged, forbidden) {
+			t.Fatalf("structured log leaked %q: %s", forbidden, logged)
+		}
+	}
+	for _, required := range []string{
+		"worker.example", "/jobs/:id", "https://api.example/v1/orders", "trace-123",
+		"token validation failed", "internal_error", "slice.example", "ordinary diagnostic",
+		"group.example", "[CYCLE]", "[REDACTED]",
+	} {
+		if !strings.Contains(logged, required) {
+			t.Fatalf("structured log lost safe value %q: %s", required, logged)
+		}
+	}
+}
+
+func TestContextHandlerBoundsNestedDepthAndCollectionLength(t *testing.T) {
+	deep := map[string]any{"leaf": "safe-leaf"}
+	for i := 0; i < 20; i++ {
+		deep = map[string]any{fmt.Sprintf("level_%02d", i): deep}
+	}
+	large := make([]any, 40)
+	for i := range large {
+		large[i] = fmt.Sprintf("item-%02d", i)
+	}
+	large[len(large)-1] = map[string]any{"password": "collection-secret"}
+
+	var output bytes.Buffer
+	logger := slog.New(&ContextHandler{Handler: slog.NewJSONHandler(&output, nil)})
+	logger.Info("bounded", "deep", deep, "large", large)
+
+	logged := output.String()
+	if strings.Contains(logged, "collection-secret") || strings.Contains(logged, "safe-leaf") {
+		t.Fatalf("bounded redactor traversed beyond its limits: %s", logged)
+	}
+	for _, required := range []string{"item-00", "[TRUNCATED]"} {
+		if !strings.Contains(logged, required) {
+			t.Fatalf("bounded redactor missing %q: %s", required, logged)
+		}
 	}
 }
 
