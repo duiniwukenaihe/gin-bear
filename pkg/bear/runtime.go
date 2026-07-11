@@ -15,11 +15,12 @@ type HTTPMetrics = httpMetricsRegistry
 
 // Runtime contains state owned by one Bear application.
 type Runtime struct {
-	Config    *SysConfig
-	Logger    *slog.Logger
-	Container *BeanFactory
-	Lifecycle *Lifecycle
-	Metrics   *HTTPMetrics
+	Config          *SysConfig
+	Logger          *slog.Logger
+	Container       *BeanFactory
+	Lifecycle       *Lifecycle
+	Metrics         *HTTPMetrics
+	readinessChecks *readinessCheckCoordinator
 }
 
 type legacyFacade struct {
@@ -38,11 +39,12 @@ func newRuntime(config *SysConfig) *Runtime {
 	container.onSet = lifecycle.setBean
 	container.onRemove = lifecycle.removeBean
 	return &Runtime{
-		Config:    config,
-		Logger:    newLogger(config),
-		Container: container,
-		Lifecycle: lifecycle,
-		Metrics:   newHTTPMetricsRegistry(defaultDurationBuckets),
+		Config:          config,
+		Logger:          newLogger(config),
+		Container:       container,
+		Lifecycle:       lifecycle,
+		Metrics:         newHTTPMetricsRegistry(defaultDurationBuckets),
+		readinessChecks: newReadinessCheckCoordinator(),
 	}
 }
 

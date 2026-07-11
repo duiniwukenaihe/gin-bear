@@ -33,11 +33,12 @@ func TracingMiddleware(provider oteltrace.TracerProvider, propagator propagation
 	return func(c *gin.Context) {
 		extracted := propagator.Extract(c.Request.Context(), propagation.HeaderCarrier(c.Request.Header))
 		route := tracingRoute(c)
-		spanName := c.Request.Method + " " + route
+		method := normalizeHTTPMethod(c.Request.Method)
+		spanName := method + " " + route
 		ctx, span := tracer.Start(extracted, spanName,
 			oteltrace.WithSpanKind(oteltrace.SpanKindServer),
 			oteltrace.WithAttributes(
-				attribute.String("http.request.method", c.Request.Method),
+				attribute.String("http.request.method", method),
 				attribute.String("http.route", route),
 				attribute.String("client.address", c.ClientIP()),
 				attribute.String("service.version", Version),
@@ -50,7 +51,7 @@ func TracingMiddleware(provider oteltrace.TracerProvider, propagator propagation
 
 		finalRoute := tracingRoute(c)
 		if finalRoute != route {
-			span.SetName(c.Request.Method + " " + finalRoute)
+			span.SetName(method + " " + finalRoute)
 			span.SetAttributes(attribute.String("http.route", finalRoute))
 		}
 		status := c.Writer.Status()

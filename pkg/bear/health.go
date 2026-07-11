@@ -2,9 +2,12 @@ package bear
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -64,7 +67,7 @@ func (h *HealthController) ready(ctx *gin.Context) {
 		}
 		checkers = append(checkers, checker)
 	}
-	results := runReadinessChecks(checkCtx, timeout, checkers)
+	results := runReadinessChecksWithCoordinator(checkCtx, timeout, checkers, runtimeReadinessChecks(runtime))
 
 	logger := readinessLogger(runtime)
 	checks := make(map[string]string, len(results))
@@ -100,9 +103,40 @@ type readinessResult struct {
 	Err  error
 }
 
+var errReadinessCheckBusy = errors.New("readiness check already in progress")
+
+type readinessCheckerKey struct {
+	typ     reflect.Type
+	pointer uintptr
+	name    string
+}
+
+type readinessCheckCoordinator struct {
+	mu       sync.Mutex
+	inFlight map[readinessCheckerKey]struct{}
+}
+
+func newReadinessCheckCoordinator() *readinessCheckCoordinator {
+	return &readinessCheckCoordinator{inFlight: make(map[readinessCheckerKey]struct{})}
+}
+
+func runtimeReadinessChecks(runtime *Runtime) *readinessCheckCoordinator {
+	if runtime != nil && runtime.readinessChecks != nil {
+		return runtime.readinessChecks
+	}
+	return newReadinessCheckCoordinator()
+}
+
 func runReadinessChecks(parent context.Context, timeout time.Duration, checkers []ReadinessChecker) []readinessResult {
+	return runReadinessChecksWithCoordinator(parent, timeout, checkers, newReadinessCheckCoordinator())
+}
+
+func runReadinessChecksWithCoordinator(parent context.Context, timeout time.Duration, checkers []ReadinessChecker, coordinator *readinessCheckCoordinator) []readinessResult {
 	if len(checkers) == 0 {
 		return nil
+	}
+	if coordinator == nil {
+		coordinator = newReadinessCheckCoordinator()
 	}
 	ordered := append([]ReadinessChecker(nil), checkers...)
 	sort.Slice(ordered, func(i, j int) bool {
@@ -117,16 +151,19 @@ func runReadinessChecks(parent context.Context, timeout time.Duration, checkers 
 	}
 	completed := make(chan indexedResult, len(ordered))
 	for i, checker := range ordered {
-		i, checker := i, checker
-		go func() {
-			completed <- indexedResult{
-				index: i,
-				readinessResult: readinessResult{
-					Name: checker.Name(),
-					Err:  checker.CheckReady(deadlineCtx),
-				},
-			}
-		}()
+		if coordinator.start(checker) {
+			i, checker := i, checker
+			go func() {
+				result := readinessResult{Name: checker.Name(), Err: checker.CheckReady(deadlineCtx)}
+				coordinator.finish(checker)
+				completed <- indexedResult{index: i, readinessResult: result}
+			}()
+			continue
+		}
+		completed <- indexedResult{
+			index:           i,
+			readinessResult: readinessResult{Name: checker.Name(), Err: errReadinessCheckBusy},
+		}
 	}
 
 	results := make([]readinessResult, len(ordered))
@@ -149,6 +186,34 @@ func runReadinessChecks(parent context.Context, timeout time.Duration, checkers 
 		}
 	}
 	return results
+}
+
+func (c *readinessCheckCoordinator) start(checker ReadinessChecker) bool {
+	key := readinessCheckerIdentity(checker)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, running := c.inFlight[key]; running {
+		return false
+	}
+	c.inFlight[key] = struct{}{}
+	return true
+}
+
+func (c *readinessCheckCoordinator) finish(checker ReadinessChecker) {
+	c.mu.Lock()
+	delete(c.inFlight, readinessCheckerIdentity(checker))
+	c.mu.Unlock()
+}
+
+func readinessCheckerIdentity(checker ReadinessChecker) readinessCheckerKey {
+	value := reflect.ValueOf(checker)
+	key := readinessCheckerKey{typ: value.Type()}
+	if value.Kind() == reflect.Ptr {
+		key.pointer = value.Pointer()
+		return key
+	}
+	key.name = checker.Name()
+	return key
 }
 
 func readinessLogger(runtime *Runtime) *slog.Logger {

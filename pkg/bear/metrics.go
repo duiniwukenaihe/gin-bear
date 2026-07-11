@@ -76,7 +76,7 @@ func (r *httpMetricsRegistry) Record(method, route string, status int, latency t
 	if r == nil {
 		return
 	}
-	method = metricMethod(method)
+	method = normalizeHTTPMethod(method)
 	statusLabel := strconv.Itoa(status)
 	r.requests.WithLabelValues(method, route, statusLabel).Inc()
 	if status >= http.StatusBadRequest {
@@ -85,7 +85,7 @@ func (r *httpMetricsRegistry) Record(method, route string, status int, latency t
 	r.duration.WithLabelValues(method, route, statusLabel).Observe(latency.Seconds())
 }
 
-func metricMethod(method string) string {
+func normalizeHTTPMethod(method string) string {
 	switch strings.ToUpper(strings.TrimSpace(method)) {
 	case http.MethodConnect:
 		return http.MethodConnect

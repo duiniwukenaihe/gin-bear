@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -147,6 +148,38 @@ func TestTracingUsesBoundedUnmatchedRoute(t *testing.T) {
 	}
 }
 
+func TestTracingNormalizesUnknownMethodsToOther(t *testing.T) {
+	resetGinModeForTest(t)
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	router := gin.New()
+	router.Use(TracingMiddleware(provider, propagation.TraceContext{}))
+	method := "BREW-tenant-123"
+	response := performRequest(router, httptest.NewRequest(method, "/accounts/42", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.Code)
+	}
+
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("span count = %d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name != "OTHER unmatched" {
+		t.Fatalf("span name = %q, want normalized method", span.Name)
+	}
+	if !spanHasStringAttr(span.Attributes, "http.request.method", "OTHER") {
+		t.Fatalf("method attributes = %#v, want OTHER", span.Attributes)
+	}
+	for _, attr := range span.Attributes {
+		if strings.Contains(attr.Value.AsString(), method) {
+			t.Fatalf("trace exposed unbounded request method in %#v", attr)
+		}
+	}
+}
+
 func TestMetricsNormalizeMethodsToBoundedLabels(t *testing.T) {
 	metrics := newHTTPMetricsRegistry(defaultDurationBuckets)
 	metrics.Record("get", "/known", http.StatusOK, time.Millisecond)
@@ -249,9 +282,114 @@ func TestRunReadinessChecksReturnsAtDeadlineWhenCheckerIgnoresContext(t *testing
 	}
 }
 
+func TestReadinessSingleFlightsNonCooperativeCheckersAndRecovers(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Health.ReadinessTimeout = "10ms"
+	app := Ignite(cfg)
+	checker := newPersistentBlockingReadinessCheck("blocked")
+	app.Beans(checker).EnableHealth()
+	requireNoError(t, app.ApplyAll(context.Background()))
+
+	first := performRequest(app, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if first.Code != http.StatusServiceUnavailable {
+		t.Fatalf("first readiness status = %d body = %s", first.Code, first.Body.String())
+	}
+	select {
+	case <-checker.started:
+	case <-time.After(time.Second):
+		t.Fatal("non-cooperative checker did not start")
+	}
+
+	statuses := make(chan int, 32)
+	var probes sync.WaitGroup
+	for range 32 {
+		probes.Add(1)
+		go func() {
+			defer probes.Done()
+			response := performRequest(app, httptest.NewRequest(http.MethodGet, "/ready", nil))
+			statuses <- response.Code
+		}()
+	}
+	probes.Wait()
+	close(statuses)
+	for status := range statuses {
+		if status != http.StatusServiceUnavailable {
+			t.Fatalf("busy readiness status = %d, want 503", status)
+		}
+	}
+	if got := atomic.LoadInt32(&checker.calls); got != 1 {
+		t.Fatalf("non-cooperative checker calls = %d, want one in-flight call", got)
+	}
+	if got := atomic.LoadInt32(&checker.maxActive); got != 1 {
+		t.Fatalf("non-cooperative checker max active = %d, want one", got)
+	}
+
+	close(checker.release)
+	select {
+	case <-checker.completed:
+	case <-time.After(time.Second):
+		t.Fatal("non-cooperative checker did not complete after release")
+	}
+
+	recovered := performRequest(app, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if recovered.Code != http.StatusOK {
+		t.Fatalf("recovered readiness status = %d body = %s", recovered.Code, recovered.Body.String())
+	}
+	if got := atomic.LoadInt32(&checker.calls); got != 2 {
+		t.Fatalf("recovered checker calls = %d, want a new call after completion", got)
+	}
+}
+
 type blockingReadinessCheck struct {
 	name    string
 	release <-chan struct{}
+}
+
+type persistentBlockingReadinessCheck struct {
+	name      string
+	release   chan struct{}
+	started   chan struct{}
+	completed chan struct{}
+	calls     int32
+	active    int32
+	maxActive int32
+}
+
+func newPersistentBlockingReadinessCheck(name string) *persistentBlockingReadinessCheck {
+	return &persistentBlockingReadinessCheck{
+		name:      name,
+		release:   make(chan struct{}),
+		started:   make(chan struct{}, 2),
+		completed: make(chan struct{}, 2),
+	}
+}
+
+func (c *persistentBlockingReadinessCheck) Name() string { return c.name }
+
+func (c *persistentBlockingReadinessCheck) CheckReady(context.Context) error {
+	atomic.AddInt32(&c.calls, 1)
+	active := atomic.AddInt32(&c.active, 1)
+	updateMaxInt32(&c.maxActive, active)
+	c.started <- struct{}{}
+	defer func() {
+		atomic.AddInt32(&c.active, -1)
+		c.completed <- struct{}{}
+	}()
+	<-c.release
+	return nil
+}
+
+func updateMaxInt32(target *int32, candidate int32) {
+	for {
+		current := atomic.LoadInt32(target)
+		if candidate <= current || atomic.CompareAndSwapInt32(target, current, candidate) {
+			return
+		}
+	}
 }
 
 func (c *blockingReadinessCheck) Name() string { return c.name }
