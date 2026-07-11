@@ -1,7 +1,11 @@
 package main
 
-import "github.com/duiniwukenaihe/gin-bear/cmd/bear-cli/cmd"
+import (
+	"os"
+
+	"github.com/duiniwukenaihe/gin-bear/internal/cli"
+)
 
 func main() {
-	cmd.Execute()
+	os.Exit(cli.Execute(os.Args[1:], os.Stdout, os.Stderr))
 }

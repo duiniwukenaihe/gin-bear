@@ -7,53 +7,9 @@ import (
 	"strings"
 	"text/template"
 	"unicode"
-
-	"github.com/spf13/cobra"
 )
 
-var (
-	fields string // 额外字段，如: name:string,age:int,email:string
-)
-
-var genCmd = &cobra.Command{
-	Use:   "gen [type] [name]",
-	Short: "Generate code (api|model|dto)",
-	Long: `Generate boilerplate code for Controller, Service, Repository, Model, DTO.
-
-Types:
-  api     - Generate full CRUD API (Controller, Service, Repository, Model, DTO, Module)
-  model   - Generate Model only
-  dto     - Generate DTO only
-
-Examples:
-  bear gen api user
-  bear gen api product --fields "name:string,price:float,stock:int"
-  bear gen model order
-  bear gen dto user`,
-	Args: cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
-		genType := args[0]
-		name := args[1]
-
-		switch genType {
-		case "api":
-			generateAPI(name, fields)
-		case "model":
-			generateModel(name, fields)
-		case "dto":
-			generateDTO(name, fields)
-		default:
-			fmt.Printf("Unsupported type: %s\n", genType)
-			fmt.Println("Supported types: api, model, dto")
-			os.Exit(1)
-		}
-	},
-}
-
-func init() {
-	genCmd.Flags().StringVarP(&fields, "fields", "f", "", "Additional fields (e.g., name:string,age:int,email:string)")
-	rootCmd.AddCommand(genCmd)
-}
+var genCmd = legacyCommand("gen")
 
 type TemplateData struct {
 	PackageName string  // user
@@ -203,7 +159,7 @@ func generateAPI(name string, fieldsStr string) {
 	dir := filepath.Join("pkg", packageName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Printf("Failed to create directory: %v\n", err)
-		os.Exit(1)
+		return
 	}
 
 	// Generate files
@@ -257,7 +213,7 @@ func generateModel(name string, fieldsStr string) {
 	dir := filepath.Join("pkg", packageName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Printf("Failed to create directory: %v\n", err)
-		os.Exit(1)
+		return
 	}
 
 	data := TemplateData{
@@ -291,7 +247,7 @@ func generateDTO(name string, fieldsStr string) {
 	dir := filepath.Join("pkg", packageName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Printf("Failed to create directory: %v\n", err)
-		os.Exit(1)
+		return
 	}
 
 	data := TemplateData{

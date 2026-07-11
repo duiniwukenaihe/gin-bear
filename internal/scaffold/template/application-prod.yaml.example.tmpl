@@ -1,0 +1,38 @@
+server:
+  port: 8080
+  name: "{{.Name}}"
+  mode: "release"
+  shutdown_timeout: "10s"
+  trusted_proxies:
+    - "127.0.0.1"
+
+database:
+  enabled: true
+  type: "postgres"
+  host: "postgres"
+  port: "5432"
+  user: "gin_bear"
+  password: "change-me"
+  dbname: "gin_bear"
+  sslmode: "require"
+
+tracing:
+  enabled: false
+  service_name: "{{.Name}}"
+  exporter: "otlp"
+  otlp_endpoint: "http://otel-collector:4318/v1/traces"
+  sample_rate: 1.0
+
+auth:
+  jwt_secret: "replace-with-at-least-32-random-characters"
+  token_expire_hours: 24
+  public_paths:
+    - "/health"
+    - "/live"
+    - "/ready"
+    - "/version"
+    - "/metrics"
+
+metrics:
+  enabled: true
+  path: "/metrics"

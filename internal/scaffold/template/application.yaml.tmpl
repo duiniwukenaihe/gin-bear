@@ -1,0 +1,27 @@
+server:
+  port: 8080
+  name: "{{.Name}}"
+  shutdown_timeout: "5s"
+
+database:
+  enabled: false
+
+tracing:
+  enabled: false
+  service_name: "{{.Name}}"
+  exporter: "stdout"
+  sample_rate: 1.0
+
+auth:
+  jwt_secret: "replace-with-at-least-32-random-characters"
+  token_expire_hours: 24
+  public_paths:
+    - "/health"
+    - "/live"
+    - "/ready"
+    - "/version"
+    - "/metrics"
+
+metrics:
+  enabled: true
+  path: "/metrics"

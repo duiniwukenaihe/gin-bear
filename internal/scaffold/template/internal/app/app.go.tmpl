@@ -1,0 +1,20 @@
+package app
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
+)
+
+func Run(ctx context.Context) error {
+	application := bear.Ignite()
+	application.EnableHealth()
+	if err := application.ApplyAll(ctx); err != nil {
+		return fmt.Errorf("initialize application: %w", err)
+	}
+	if err := application.Launch(ctx); err != nil {
+		return fmt.Errorf("launch application: %w", err)
+	}
+	return nil
+}
