@@ -32,7 +32,6 @@ jobs:
           RC_RELEASE_TAG: ${{ github.ref_name }}
           RC_EXPECTED_VERSION: v0.10.0-rc.1
           RC_VERIFY_TAG_SIGNATURE: "false"
-          API_BASELINE_REBUILD: "1"
         run: make verify-rc
 
       - name: Upload RC verification evidence

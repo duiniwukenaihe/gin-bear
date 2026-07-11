@@ -338,7 +338,10 @@ func (c *SysConfig) Validate() error {
 	if err := validate.Struct(c); err != nil {
 		return err
 	}
-	return c.validateSemantic()
+	if err := c.validateSemantic(); err != nil {
+		return err
+	}
+	return validateProductionSecurity(c)
 }
 
 func (c *SysConfig) validateSemantic() error {
@@ -636,7 +639,9 @@ func applyEnvOverrides(config *SysConfig) {
 		}
 	}
 	if config.Auth != nil {
-		if secret := os.Getenv("JWT_SECRET"); secret != "" {
+		if secret := os.Getenv("BEAR_AUTH_JWT_SECRET"); secret != "" {
+			config.Auth.JWTSecret = secret
+		} else if secret := os.Getenv("JWT_SECRET"); secret != "" {
 			config.Auth.JWTSecret = secret
 		}
 	}

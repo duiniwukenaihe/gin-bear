@@ -704,12 +704,33 @@ func TestProductionExampleUsesHardenedDefaults(t *testing.T) {
 	if slices.Contains(cfg.Auth.GetPublicPaths(), "/metrics") {
 		t.Fatal("production example exposes /metrics as an auth public path")
 	}
-	if len(cfg.Auth.JWTSecret) < 32 {
-		t.Fatalf("JWT placeholder length = %d", len(cfg.Auth.JWTSecret))
+	if cfg.Auth.JWTSecret != "" {
+		t.Fatalf("production example JWT placeholder = %q, want empty", cfg.Auth.JWTSecret)
 	}
 
 	if err := validateProductionSecurity(cfg); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
 		t.Fatalf("production placeholder was not rejected by final guard: %v", err)
+	}
+	t.Setenv("BEAR_ENV", "production")
+	t.Setenv("BEAR_AUTH_JWT_SECRET", "")
+	t.Setenv("JWT_SECRET", "")
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
+		t.Fatalf("SysConfig.Validate accepted production example without BEAR_AUTH_JWT_SECRET: %v", err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
+		t.Fatalf("production example without BEAR_AUTH_JWT_SECRET was not rejected: %v", err)
+	}
+
+	t.Setenv("BEAR_AUTH_JWT_SECRET", randomProductionJWTKey(t))
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("production example with strong BEAR_AUTH_JWT_SECRET failed: %v", err)
+	}
+	if err := loaded.Validate(); err != nil {
+		t.Fatalf("validate production example with injected secret: %v", err)
+	}
+	if err := validateProductionSecurity(loaded); err != nil {
+		t.Fatalf("production startup rejected injected secret: %v", err)
 	}
 }
 

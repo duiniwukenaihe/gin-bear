@@ -170,6 +170,9 @@ func TestReleaseWorkflowIsTagScopedAndUsesImmutableActions(t *testing.T) {
 			t.Fatalf("release workflow must remain CLI-only and permissions-scoped; found %q", unwanted)
 		}
 	}
+	if strings.Contains(workflow, "API_BASELINE_REBUILD") {
+		t.Fatal("release workflow must not require API baseline reconstruction")
+	}
 }
 
 func TestRunbookUsesPinnedVerificationAndChecksReleaseChecksums(t *testing.T) {

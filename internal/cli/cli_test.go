@@ -185,6 +185,13 @@ func TestResourceFieldParsingAndNames(t *testing.T) {
 			t.Fatalf("invalid fields %q were accepted", raw)
 		}
 	}
+	withoutName, err := parseResourceFields("amount:decimal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutName) != 2 || withoutName[0].Name != "Name" || withoutName[1].Name != "Amount" {
+		t.Fatalf("explicit fields without name = %#v, want default Name plus explicit fields", withoutName)
+	}
 
 	imports := resourceImports([]field{{GoType: "decimal.Decimal"}, {GoType: "time.Time"}, {GoType: "decimal.Decimal"}, {GoType: "string"}})
 	if strings.Count(imports, "decimal") != 1 || !strings.Contains(imports, `"time"`) || strings.Index(imports, "decimal") > strings.Index(imports, "time") {

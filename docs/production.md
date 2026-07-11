@@ -7,7 +7,7 @@ Use production mode in deployed environments:
 ```bash
 export BEAR_ENV=prod
 export GIN_MODE=release
-export JWT_SECRET="$(openssl rand -base64 48)"
+export BEAR_AUTH_JWT_SECRET="$(openssl rand -base64 48)"
 ```
 
 `server.mode: release` in YAML has the same effect as `GIN_MODE=release`.
@@ -17,7 +17,7 @@ export JWT_SECRET="$(openssl rand -base64 48)"
 Start from `application-prod.yaml.example` and keep real secrets outside git. Supported environment overrides include:
 
 - `BEAR_SERVER_PORT`
-- `JWT_SECRET`
+- `BEAR_AUTH_JWT_SECRET` (`JWT_SECRET` remains a compatibility fallback)
 - `REDIS_ADDR`
 - `POSTGRES_HOST`
 - `POSTGRES_PORT`
@@ -88,14 +88,15 @@ optional; configured clock skew must be between zero and five minutes:
 
 ```yaml
 auth:
-  jwt_secret: "set-with-JWT_SECRET-32-plus-random-chars"
+  jwt_secret: ""
   jwt_issuer: "https://auth.example.com"
   jwt_audience: "gin-bear-api"
   jwt_clock_skew: "30s"
 ```
 
-Set the actual secret with `JWT_SECRET`; the example value is deliberately
-recognized as unsafe and production startup rejects it. Configure matching
+Set the actual secret with `BEAR_AUTH_JWT_SECRET`; production startup rejects
+the empty example value. `JWT_SECRET` remains a lower-priority compatibility
+fallback. Configure matching
 `Issuer`, `Audience`, and `ClockSkew` fields on `JWTUtil.Config` when creating
 the JWT utility. Generated tokens include configured issuer and audience
 claims, and parsing requires them when configured.

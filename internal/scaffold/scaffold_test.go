@@ -431,10 +431,18 @@ func TestGeneratedCRUD(t *testing.T) {
 	}
 
 	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"first","email":"first@example.com"}` + "`" + `, http.StatusOK)
+	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"second","email":"second@example.com"}` + "`" + `, http.StatusOK)
 	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"invalid","email":"not-an-email"}` + "`" + `, http.StatusBadRequest)
 
 	list := request(http.MethodGet, "/api/v1/invoice?page=1&page_size=10", "", http.StatusOK)
-	if list["total"] != float64(1) { t.Fatalf("list total=%v payload=%v", list["total"], list) }
+	if list["total"] != float64(2) { t.Fatalf("list total=%v payload=%v", list["total"], list) }
+	matched := request(http.MethodGet, "/api/v1/invoice?keyword=first", "", http.StatusOK)
+	matchedList, ok := matched["list"].([]any)
+	if !ok || matched["total"] != float64(1) || len(matchedList) != 1 {
+		t.Fatalf("keyword list/count mismatch payload=%v", matched)
+	}
+	matchedItem, ok := matchedList[0].(map[string]any)
+	if !ok || matchedItem["name"] != "first" { t.Fatalf("keyword payload=%v", matched) }
 	item := request(http.MethodGet, "/api/v1/invoice/1", "", http.StatusOK)
 	if item["id"] != float64(1) || item["name"] != "first" { t.Fatalf("get payload=%v", item) }
 
@@ -444,7 +452,7 @@ func TestGeneratedCRUD(t *testing.T) {
 
 	request(http.MethodDelete, "/api/v1/invoice/1", "", http.StatusOK)
 	empty := request(http.MethodGet, "/api/v1/invoice", "", http.StatusOK)
-	if empty["total"] != float64(0) { t.Fatalf("delete list payload=%v", empty) }
+	if empty["total"] != float64(1) { t.Fatalf("delete list payload=%v", empty) }
 }
 `
 	if err := os.WriteFile(filepath.Join(project, "crud_e2e_test.go"), []byte(fixture), 0644); err != nil {
@@ -481,10 +489,10 @@ func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, serverBinary)
 	cmd.Dir = project
-	cmd.Env = append(os.Environ(), "BEAR_ENV=production", fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "JWT_SECRET=", "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+	cmd.Env = append(os.Environ(), "BEAR_ENV=production", fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "BEAR_AUTH_JWT_SECRET=", "JWT_SECRET=", "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
 	output, err := cmd.CombinedOutput()
 	if err == nil {
-		t.Fatalf("generated production server started without JWT_SECRET:\n%s", output)
+		t.Fatalf("generated production server started without BEAR_AUTH_JWT_SECRET:\n%s", output)
 	}
 	if ctx.Err() != nil || !strings.Contains(string(output), "weak jwt secret") {
 		t.Fatalf("generated production startup did not fail closed: context=%v err=%v\n%s", ctx.Err(), err, output)

@@ -60,9 +60,15 @@ rebuild_baseline() {
 	printf 'v0.9.1 API baseline reproducibly rebuilt from the public module cache\n'
 }
 
-if [[ "${API_BASELINE_REBUILD:-0}" == "1" ]]; then
-	rebuild_baseline
-fi
+rebuild_flag="${API_BASELINE_REBUILD-0}"
+case "${rebuild_flag}" in
+0) ;;
+1) rebuild_baseline ;;
+*)
+	printf 'API_BASELINE_REBUILD must be 0 or 1\n' >&2
+	exit 1
+	;;
+esac
 
 if ! incompatible="$(go run "${apidiff}" -m -incompatible "${baseline}" "${module}")"; then
 	printf 'v0.9.1 API compatibility analysis failed\n' >&2

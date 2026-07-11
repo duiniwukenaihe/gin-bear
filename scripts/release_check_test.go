@@ -461,6 +461,22 @@ func TestAPICompatibilityGateOffersModuleCacheRebuildWithoutGitHistory(t *testin
 	}
 }
 
+func TestAPICompatibilityGateRejectsInvalidRebuildFlag(t *testing.T) {
+	for _, value := range []string{"", "banana"} {
+		t.Run(value, func(t *testing.T) {
+			command := exec.Command("./check-api-compat.sh")
+			command.Env = append(os.Environ(), "API_BASELINE_REBUILD="+value, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("API compatibility gate accepted invalid rebuild flag %q:\n%s", value, output)
+			}
+			if !strings.Contains(string(output), "API_BASELINE_REBUILD must be 0 or 1") {
+				t.Fatalf("invalid rebuild flag failure is not actionable:\n%s", output)
+			}
+		})
+	}
+}
+
 func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *testing.T) {
 	for _, test := range []struct {
 		name       string

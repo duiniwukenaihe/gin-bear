@@ -104,7 +104,9 @@ rejects removals or incompatible changes; the separate v0.9 consumer fixture is
 also compiled by `go test ./...`. The gate first checks the committed SHA-256
 sidecar. Set `API_BASELINE_REBUILD=1` to rebuild the manifest from the public
 `v0.9.1` Go module cache and compare it byte for byte; this path does not use a
-local tag, clone, or shallow repository history.
+local tag, clone, or shallow repository history. Reconstruction is an explicit
+manual or independent audit and is not required by the offline release job,
+which checks only the committed hash and additive API compatibility.
 
 Run the release-only compatibility test once with:
 

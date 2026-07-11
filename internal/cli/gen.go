@@ -241,7 +241,7 @@ func executeResourceTemplate(name, source string, data resourceData) ([]byte, er
 
 func parseResourceFields(raw string) ([]field, error) {
 	if strings.TrimSpace(raw) == "" {
-		return []field{{Name: "Name", GoType: "string", JSONName: "name", Validate: "required", GormTag: "type:varchar(100)"}}, nil
+		return []field{defaultNameField()}, nil
 	}
 	parts := strings.Split(raw, ",")
 	fields := make([]field, 0, len(parts))
@@ -263,7 +263,14 @@ func parseResourceFields(raw string) ([]field, error) {
 		}
 		fields = append(fields, field{Name: name, GoType: goType, JSONName: jsonName, Validate: validate, GormTag: gormTag})
 	}
+	if _, hasName := seen["Name"]; !hasName {
+		fields = append([]field{defaultNameField()}, fields...)
+	}
 	return fields, nil
+}
+
+func defaultNameField() field {
+	return field{Name: "Name", GoType: "string", JSONName: "name", Validate: "required", GormTag: "type:varchar(100)"}
 }
 
 func fieldType(kind string) (string, string, string, error) {
@@ -454,6 +461,7 @@ import (
 	"errors"
 
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
+	"gorm.io/gorm"
 )
 
 type {{.Title}}Repository struct {
@@ -476,7 +484,7 @@ func (r *{{.Title}}Repository) FindByID(ctx context.Context, id int64) (*{{.Titl
 func (r *{{.Title}}Repository) FindByCondition(ctx context.Context, query *{{.Title}}QueryDTO) ([]*{{.Title}}Model, error) {
 	if query == nil { query = &{{.Title}}QueryDTO{} }
 	query.Normalize()
-	db := r.DB(ctx).Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize)
+	db := r.queryScope(ctx, query).Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize)
 	var list []*{{.Title}}Model
 	err := db.Find(&list).Error
 	return list, err
@@ -484,8 +492,16 @@ func (r *{{.Title}}Repository) FindByCondition(ctx context.Context, query *{{.Ti
 
 func (r *{{.Title}}Repository) Count(ctx context.Context, query *{{.Title}}QueryDTO) (int64, error) {
 	var count int64
-	err := r.DB(ctx).Model(&{{.Title}}Model{}).Count(&count).Error
+	err := r.queryScope(ctx, query).Count(&count).Error
 	return count, err
+}
+
+func (r *{{.Title}}Repository) queryScope(ctx context.Context, query *{{.Title}}QueryDTO) *gorm.DB {
+	db := r.DB(ctx).Model(&{{.Title}}Model{})
+	if query != nil && query.Keyword != "" {
+		db = db.Where("name LIKE ?", "%"+query.Keyword+"%")
+	}
+	return db
 }
 
 func (r *{{.Title}}Repository) Create(ctx context.Context, dto *{{.Title}}CreateDTO) (*{{.Title}}Model, error) {
