@@ -36,13 +36,13 @@ func (h legacyLogHandler) Handle(ctx context.Context, record slog.Record) error 
 
 func (h legacyLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	cloned := h.clone()
-	cloned.operations = append(cloned.operations, legacyLogOperation{attrs: append([]slog.Attr(nil), attrs...)})
+	cloned.operations = append(cloned.operations, legacyLogOperation{attrs: sanitizeLogAttrs(attrs)})
 	return cloned
 }
 
 func (h legacyLogHandler) WithGroup(name string) slog.Handler {
 	cloned := h.clone()
-	cloned.operations = append(cloned.operations, legacyLogOperation{group: name})
+	cloned.operations = append(cloned.operations, legacyLogOperation{group: sanitizeLogKey(name)})
 	return cloned
 }
 
@@ -84,7 +84,7 @@ func (h *ContextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 }
 
 func (h *ContextHandler) WithGroup(name string) slog.Handler {
-	return &ContextHandler{Handler: h.Handler.WithGroup(name)}
+	return &ContextHandler{Handler: h.Handler.WithGroup(sanitizeLogKey(name))}
 }
 
 // SetDefaultLogger initializes the legacy global logger with default settings.

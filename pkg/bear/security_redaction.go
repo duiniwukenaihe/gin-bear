@@ -291,7 +291,9 @@ func sanitizeLogAttr(attr slog.Attr) slog.Attr {
 }
 
 func sanitizeLogAttrAt(attr slog.Attr, state *observableRedactionState, depth int) slog.Attr {
-	if isSensitiveObservableKey(attr.Key) {
+	originalKey := attr.Key
+	attr.Key = sanitizeLogKey(originalKey)
+	if isSensitiveObservableKey(originalKey) {
 		attr.Value = slog.StringValue(redactedObservableValue)
 		return attr
 	}
@@ -315,6 +317,20 @@ func sanitizeLogAttrAt(attr slog.Attr, state *observableRedactionState, depth in
 		attr.Value = slog.AnyValue(sanitizeStructuredValue(attr.Key, attr.Value.Any(), state, depth+1))
 	}
 	return attr
+}
+
+func sanitizeLogKey(key string) string {
+	if sanitizeObservableString(key) != key {
+		return "_redacted"
+	}
+	lowerKey := strings.ToLower(key)
+	if strings.Contains(lowerKey, "authorization") && strings.Contains(lowerKey, "bearer") {
+		return "_redacted"
+	}
+	if isSensitiveObservableKey(key) && strings.ContainsAny(key, "=: \t\r\n") {
+		return "_redacted"
+	}
+	return key
 }
 
 func sanitizeStructuredValue(key string, value any, state *observableRedactionState, depth int) any {

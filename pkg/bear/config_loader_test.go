@@ -627,6 +627,25 @@ func TestLoadConfigRejectsWhitespaceProductionSecret(t *testing.T) {
 	}
 }
 
+func TestSysConfigValidateRejectsKnownProductionJWTPlaceholders(t *testing.T) {
+	t.Setenv("BEAR_ENV", "production")
+	t.Setenv("GIN_MODE", "")
+
+	for _, placeholder := range []string{
+		"bear-secret",
+		"your-secret-key",
+		"set-with-JWT_SECRET-32-plus-random-chars",
+		"replace-with-at-least-32-random-characters",
+	} {
+		cfg := NewSysConfig()
+		cfg.Auth.JWTSecret = placeholder
+
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
+			t.Fatalf("SysConfig.Validate accepted known JWT placeholder %q: %v", placeholder, err)
+		}
+	}
+}
+
 func TestDefaultAuthPathsDoNotExposeMetrics(t *testing.T) {
 	if slices.Contains(NewSysConfig().Auth.GetPublicPaths(), "/metrics") {
 		t.Fatal("default auth public paths expose /metrics")
@@ -643,8 +662,8 @@ func TestProductionExampleUsesHardenedDefaults(t *testing.T) {
 	if err := decodeConfig(data, path, cfg, true); err != nil {
 		t.Fatalf("decode production example: %v", err)
 	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("validate production example structure: %v", err)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
+		t.Fatalf("production example placeholder was not rejected by Validate: %v", err)
 	}
 	if cfg.DB.SSLMode != "verify-full" {
 		t.Fatalf("database.sslmode = %q", cfg.DB.SSLMode)
@@ -660,7 +679,7 @@ func TestProductionExampleUsesHardenedDefaults(t *testing.T) {
 	}
 
 	if err := validateProductionSecurity(cfg); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
-		t.Fatalf("production placeholder was not rejected: %v", err)
+		t.Fatalf("production placeholder was not rejected by final guard: %v", err)
 	}
 }
 

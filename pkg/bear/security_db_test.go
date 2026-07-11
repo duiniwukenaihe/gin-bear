@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
+	"gorm.io/gorm/logger"
 )
 
 type gormParamsFilter interface {
@@ -31,6 +35,47 @@ func TestBuildGormConfigAlwaysParameterizesQueries(t *testing.T) {
 		}
 		if len(params) != 0 {
 			t.Fatalf("parameterized logger retained binding params: %#v", params)
+		}
+	}
+}
+
+func TestGormLoggerDoesNotExposeDatabaseDetailsToStdout(t *testing.T) {
+	oldStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	t.Cleanup(func() { os.Stdout = oldStdout })
+
+	dbLogger := buildGormConfig(&DBConfig{SlowQueryThreshold: "1ns"}).Logger.LogMode(logger.Info)
+	dbLogger.Info(context.Background(), "dsn=%s", "info-credential-marker")
+	dbLogger.Warn(context.Background(), "password=%s", "warn-credential-marker")
+	dbLogger.Error(context.Background(), "Authorization Bearer %s", "error-credential-marker")
+	dbLogger.Trace(context.Background(), time.Now().Add(-time.Millisecond), func() (string, int64) {
+		return "SELECT * FROM users WHERE password = 'trace-credential-marker' AND dsn = 'dsn-credential-marker'", 7
+	}, errors.New("database error password=error-text-marker"))
+
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = oldStdout
+	logged, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(logged)
+	for _, forbidden := range []string{
+		"info-credential-marker", "warn-credential-marker", "error-credential-marker",
+		"trace-credential-marker", "dsn-credential-marker", "error-text-marker",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("GORM logger leaked database detail %q", forbidden)
+		}
+	}
+	for _, required := range []string{"category=info", "category=warn", "category=error", "elapsed=", "rows=7"} {
+		if !strings.Contains(output, required) {
+			t.Fatalf("GORM logger omitted diagnostic %q from %q", required, output)
 		}
 	}
 }
@@ -186,6 +231,7 @@ func TestSysConfigValidateEnforcesProductionDBTLS(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")
 	cfg := NewSysConfig()
+	cfg.Auth.JWTSecret = productionTestJWTKey
 	cfg.DB.Enabled = true
 	cfg.DB.Type = "postgres"
 	cfg.DB.DSN = "postgres://user:validate-secret@db.example/app?sslmode=disable"
@@ -290,6 +336,7 @@ func TestProductionMySQLTLSFailsAtAllStartupBoundaries(t *testing.T) {
 
 	t.Run("Validate", func(t *testing.T) {
 		cfg := NewSysConfig()
+		cfg.Auth.JWTSecret = productionTestJWTKey
 		cfg.DB.Enabled = true
 		cfg.DB.Type = "mysql"
 		cfg.DB.DSN = dsn

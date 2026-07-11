@@ -283,14 +283,68 @@ func buildGormConfig(cfg *DBConfig) *gorm.Config {
 			SingularTable: true, // 使用单数表名
 		},
 		PrepareStmt: false, // 禁用预编译语句缓存以兼容旧版驱动或某些插件
-		Logger: logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
+		Logger: newSecureGormLogger(log.New(os.Stdout, "", log.LstdFlags), logger.Config{
 			SlowThreshold:        slowThreshold,
 			LogLevel:             logger.Warn,
-			Colorful:             false,
 			ParameterizedQueries: true,
 		}),
 	}
 	return gormCfg
+}
+
+type secureGormLogger struct {
+	output *log.Logger
+	config logger.Config
+}
+
+func newSecureGormLogger(output *log.Logger, config logger.Config) logger.Interface {
+	return &secureGormLogger{output: output, config: config}
+}
+
+func (l *secureGormLogger) LogMode(level logger.LogLevel) logger.Interface {
+	cloned := *l
+	cloned.config.LogLevel = level
+	return &cloned
+}
+
+func (l *secureGormLogger) Info(context.Context, string, ...interface{}) {
+	if l.config.LogLevel >= logger.Info {
+		l.output.Print("gorm category=info")
+	}
+}
+
+func (l *secureGormLogger) Warn(context.Context, string, ...interface{}) {
+	if l.config.LogLevel >= logger.Warn {
+		l.output.Print("gorm category=warn")
+	}
+}
+
+func (l *secureGormLogger) Error(context.Context, string, ...interface{}) {
+	if l.config.LogLevel >= logger.Error {
+		l.output.Print("gorm category=error")
+	}
+}
+
+func (l *secureGormLogger) Trace(_ context.Context, begin time.Time, query func() (string, int64), err error) {
+	elapsed := time.Since(begin)
+	category := ""
+	switch {
+	case err != nil && l.config.LogLevel >= logger.Error:
+		category = "error"
+	case l.config.SlowThreshold > 0 && elapsed > l.config.SlowThreshold && l.config.LogLevel >= logger.Warn:
+		category = "slow"
+	case l.config.LogLevel >= logger.Info:
+		category = "trace"
+	default:
+		return
+	}
+
+	_, rows := query()
+	l.output.Printf("gorm category=%s elapsed=%s rows=%d", category, elapsed, rows)
+}
+
+func (*secureGormLogger) ParamsFilter(_ context.Context, sql string, _ ...interface{}) (string, []interface{}) {
+	return sql, nil
 }
 
 // Repository 基础仓库模式 (利用 Generics)

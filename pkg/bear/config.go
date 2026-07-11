@@ -406,6 +406,9 @@ func (c *SysConfig) validateSemantic() error {
 				return fmt.Errorf("auth.jwt_clock_skew must be between 0 and 5m")
 			}
 		}
+		if isProductionMode(c) && isWeakProductionJWTSecret(c.Auth.JWTSecret) {
+			return fmt.Errorf("weak jwt secret is not allowed in production")
+		}
 	}
 	if c.DB != nil {
 		dbType := strings.ToLower(strings.TrimSpace(c.DB.Type))
@@ -419,6 +422,22 @@ func (c *SysConfig) validateSemantic() error {
 		}
 	}
 	return nil
+}
+
+func isWeakProductionJWTSecret(secret string) bool {
+	secret = strings.TrimSpace(secret)
+	if len(secret) < 32 {
+		return true
+	}
+	switch secret {
+	case "bear-secret",
+		"your-secret-key",
+		"set-with-JWT_SECRET-32-plus-random-chars",
+		"replace-with-at-least-32-random-characters":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateCORSConfig(config *SysConfig) error {

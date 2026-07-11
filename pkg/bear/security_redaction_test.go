@@ -108,6 +108,27 @@ func TestContextHandlerRedactsSensitiveObservableData(t *testing.T) {
 	}
 }
 
+func TestContextHandlerRedactsSensitiveAttrKeysAndNestedGroupNames(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(&ContextHandler{Handler: slog.NewJSONHandler(&output, nil)})
+	logger.WithGroup("Authorization Bearer group-credential-marker").
+		WithGroup("nested password=nested-group-marker").
+		Info("structured keys",
+			"password=attr-key-marker", "discarded sensitive value",
+			"safe_key", "retained-safe-value",
+		)
+
+	logged := output.String()
+	for _, forbidden := range []string{"group-credential-marker", "nested-group-marker", "attr-key-marker"} {
+		if strings.Contains(logged, forbidden) {
+			t.Fatalf("structured log key or group leaked %q: %s", forbidden, logged)
+		}
+	}
+	if !strings.Contains(logged, "safe_key") || !strings.Contains(logged, "retained-safe-value") {
+		t.Fatalf("structured log lost safe attribute: %s", logged)
+	}
+}
+
 func TestSanitizeForObservabilityReturnsStableErrorCategory(t *testing.T) {
 	got := SanitizeForObservability(errors.New("postgres://user:password@db/app?token=secret"))
 	if got != "internal_error" {

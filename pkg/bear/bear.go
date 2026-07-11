@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"reflect"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -494,8 +493,7 @@ func validateProductionSecurity(config *SysConfig) error {
 		return nil
 	}
 	if config.Auth != nil {
-		secret := strings.TrimSpace(config.Auth.JWTSecret)
-		if secret == "" || secret == "bear-secret" || secret == "your-secret-key" || secret == "set-with-JWT_SECRET-32-plus-random-chars" || len(secret) < 32 {
+		if isWeakProductionJWTSecret(config.Auth.JWTSecret) {
 			return fmt.Errorf("weak jwt secret is not allowed in production")
 		}
 	}

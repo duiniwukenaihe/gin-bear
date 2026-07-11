@@ -29,6 +29,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const productionTestJWTKey = "test-only-jwt-key-with-32-random-characters"
+
 func resetTestInjector() {
 	setDefaultInjector(NewBeanFactory())
 }
@@ -987,7 +989,7 @@ func TestIgniteConfiguresGinReleaseMode(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = productionTestJWTKey
 
 	Ignite(cfg)
 
@@ -1017,6 +1019,27 @@ func TestIgniteRejectsWeakJWTSecretInProduction(t *testing.T) {
 	Ignite(cfg)
 }
 
+func TestIgniteRejectsScaffoldJWTPlaceholderInRelease(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Server.Mode = "release"
+	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected scaffold JWT placeholder panic")
+		}
+		if !strings.Contains(r.(string), "weak jwt secret") {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	Ignite(cfg)
+}
+
 func TestIgniteUsesBearEnvProductionMode(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)
@@ -1024,7 +1047,7 @@ func TestIgniteUsesBearEnvProductionMode(t *testing.T) {
 	t.Setenv("GIN_MODE", "")
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = productionTestJWTKey
 
 	Ignite(cfg)
 
@@ -1395,7 +1418,7 @@ func TestGenerateOpenAPIIncludesJWTSecurityScheme(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Name = "secure-openapi-test"
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = productionTestJWTKey
 
 	app := Ignite(cfg)
 	app.Mount("/api", &openAPITestController{})
@@ -1613,7 +1636,7 @@ func TestAuthFairingUsesConfiguredPublicPaths(t *testing.T) {
 }
 
 func TestJWTUtilRejectsUnexpectedSigningMethod(t *testing.T) {
-	util := NewJWTUtil("replace-with-at-least-32-random-characters", 24)
+	util := NewJWTUtil(productionTestJWTKey, 24)
 	token := jwt.NewWithClaims(jwt.SigningMethodHS512, CustomClaims{
 		UserID: 1,
 		Email:  "a@example.com",
@@ -1773,7 +1796,7 @@ func TestIgniteRejectsDisabledWebSocketOriginCheckInProduction(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = productionTestJWTKey
 	cfg.WS.CheckOrigin = false
 
 	defer func() {
