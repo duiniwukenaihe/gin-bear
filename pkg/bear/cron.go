@@ -99,7 +99,7 @@ func (m *CronManager) AddDistributedFunc(spec string, lockKey string, ttl time.D
 		}
 
 		m.logger.Info("Distributed job started", "job", lockKey)
-		warningTimer := time.AfterFunc(ttl*4/5, func() {
+		warningTimer := time.AfterFunc(cronLockWarningDelay(ttl), func() {
 			m.logger.Warn("Distributed job lock TTL nearing expiration",
 				"job", lockKey,
 				"ttl", ttl,
@@ -118,4 +118,8 @@ func (m *CronManager) AddDistributedFunc(spec string, lockKey string, ttl time.D
 
 		cmd()
 	})
+}
+
+func cronLockWarningDelay(ttl time.Duration) time.Duration {
+	return ttl/5*4 + ttl%5*4/5
 }

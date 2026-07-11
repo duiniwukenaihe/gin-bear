@@ -322,6 +322,19 @@ func TestCronWarnsWhenExecutionReachesEightyPercentOfTTL(t *testing.T) {
 	}
 }
 
+func TestCronLockWarningDelayAvoidsDurationOverflow(t *testing.T) {
+	maxTTL := time.Duration(1<<63 - 1)
+	want := maxTTL/5*4 + maxTTL%5*4/5
+
+	got := cronLockWarningDelay(maxTTL)
+	if got <= 0 {
+		t.Fatalf("warning delay = %s, want positive", got)
+	}
+	if got != want {
+		t.Fatalf("warning delay = %s, want %s", got, want)
+	}
+}
+
 func assertLockOwner(t *testing.T, client *redis.Client, key, owner string) {
 	t.Helper()
 	got, err := client.Get(context.Background(), key).Result()
