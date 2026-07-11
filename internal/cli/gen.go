@@ -188,6 +188,11 @@ func pinResourceDependencies(directory string, fields []field) error {
 	if err != nil {
 		return fmt.Errorf("parse go.mod: %w", err)
 	}
+	for _, requirement := range file.Require {
+		if requirement.Mod.Path == "github.com/shopspring/decimal" {
+			return nil
+		}
+	}
 	if err := file.AddRequire("github.com/shopspring/decimal", decimalModuleVersion); err != nil {
 		return fmt.Errorf("add decimal requirement: %w", err)
 	}

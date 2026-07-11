@@ -95,15 +95,20 @@ func TestAllCICheckoutAndSetupGoActionsUseReleasePins(t *testing.T) {
 	}
 }
 
-func TestReleaseExpectedVersionMatchesScaffoldDefault(t *testing.T) {
-	const version = "v0.10.0-rc.1"
-	cli := readTestFile(t, "../internal/cli/new.go")
-	if !strings.Contains(cli, `const defaultFrameworkVersion = "`+version+`"`) {
-		t.Fatalf("scaffold default does not match release version %s:\n%s", version, cli)
-	}
+func TestReleaseExpectedVersionComesFromPushedTag(t *testing.T) {
 	workflow := readTestFile(t, "../.github/workflows/release.yml")
-	if !strings.Contains(workflow, "RC_EXPECTED_VERSION: "+version) {
-		t.Fatalf("release workflow does not enforce version %s:\n%s", version, workflow)
+	if !strings.Contains(workflow, "RC_EXPECTED_VERSION: ${{ github.ref_name }}") {
+		t.Fatalf("release workflow does not pass the pushed tag as the expected module version:\n%s", workflow)
+	}
+	if strings.Contains(workflow, "RC_EXPECTED_VERSION: v0.10.0-rc.1") {
+		t.Fatalf("release workflow pins every v* tag to rc.1:\n%s", workflow)
+	}
+	if !strings.Contains(workflow, `GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/exp/cmd/apidiff@`) ||
+		!strings.Contains(workflow, "APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff") {
+		t.Fatalf("release workflow does not prepare and pass a pinned local apidiff binary:\n%s", workflow)
+	}
+	if strings.Contains(workflow, "API_COMPAT_ALLOW_NETWORK:") {
+		t.Fatalf("release verification gate enables API network fallback:\n%s", workflow)
 	}
 }
 
@@ -295,6 +300,52 @@ func TestVerifyRCRecordsTreeAndChecksCompleteCandidateRange(t *testing.T) {
 	}
 }
 
+func TestVerifyRCDerivesStableShuffleSeedFromCandidate(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	firstArtifact := filepath.Join(artifact, "first")
+	secondArtifact := filepath.Join(artifact, "second")
+	if output, err := runFakeRC(repository, firstArtifact, state, "RC_TEST_DATE=111"); err != nil {
+		t.Fatalf("first verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	if output, err := runFakeRC(repository, secondArtifact, state, "RC_TEST_DATE=222"); err != nil {
+		t.Fatalf("second verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	first := metadataValue(t, filepath.Join(firstArtifact, "metadata.txt"), "shuffle_seed")
+	second := metadataValue(t, filepath.Join(secondArtifact, "metadata.txt"), "shuffle_seed")
+	if first == "" || first != second {
+		t.Fatalf("derived shuffle seeds differ for the same candidate: first=%q second=%q", first, second)
+	}
+}
+
+func TestVerifyRCRemoteHygieneIsExplicitOptIn(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	if output, err := runFakeRC(repository, artifact, state); err != nil {
+		t.Fatalf("offline verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	if calls := readTestFile(t, filepath.Join(state, "git-calls")); strings.Contains(calls, "ls-remote") {
+		t.Fatalf("default RC verification used the network:\n%s", calls)
+	}
+
+	remoteArtifact := filepath.Join(filepath.Dir(artifact), "remote-artifact")
+	if output, err := runFakeRC(repository, remoteArtifact, state, "RC_REMOTE_HYGIENE=1"); err != nil {
+		t.Fatalf("opt-in remote hygiene failed: %v\n%s", err, output)
+	}
+	if calls := readTestFile(t, filepath.Join(state, "git-calls")); !strings.Contains(calls, "ls-remote --heads origin") {
+		t.Fatalf("opt-in remote hygiene did not inspect origin:\n%s", calls)
+	}
+}
+
+func TestVerifyRCRejectsInvalidRemoteHygieneFlag(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	output, err := runFakeRC(repository, artifact, state, "RC_REMOTE_HYGIENE=banana")
+	if err == nil {
+		t.Fatalf("verify-rc.sh accepted an invalid remote hygiene flag:\n%s", output)
+	}
+	if !strings.Contains(string(output), "RC_REMOTE_HYGIENE must be 0 or 1") {
+		t.Fatalf("invalid remote hygiene failure is not actionable:\n%s", output)
+	}
+}
+
 func TestVerifyRCRejectsMissingBaseRefClearly(t *testing.T) {
 	repository, artifact, state := fakeRCRepository(t)
 	output, err := runFakeRC(repository, artifact, state, "RC_TEST_BASE_MISSING=1")
@@ -366,6 +417,36 @@ func TestVerifyRCRejectsInvalidReleaseTagContracts(t *testing.T) {
 			}
 			if !strings.Contains(string(output), test.match) {
 				t.Fatalf("tag contract failure missing %q:\n%s", test.match, output)
+			}
+		})
+	}
+}
+
+func TestVerifyRCAlwaysParsesSignatureFlag(t *testing.T) {
+	for _, value := range []string{"", "banana"} {
+		t.Run("invalid-"+value, func(t *testing.T) {
+			repository, artifact, state := fakeRCRepository(t)
+			output, err := runFakeRC(repository, artifact, state, "RC_VERIFY_TAG_SIGNATURE="+value)
+			if err == nil {
+				t.Fatalf("verify-rc.sh accepted invalid signature flag %q without a tag:\n%s", value, output)
+			}
+			if !strings.Contains(string(output), "RC_VERIFY_TAG_SIGNATURE must be true or false") {
+				t.Fatalf("invalid signature flag failure is not actionable:\n%s", output)
+			}
+		})
+	}
+}
+
+func TestVerifyRCRejectsSignaturePolicyWithoutReleaseTag(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			repository, artifact, state := fakeRCRepository(t)
+			output, err := runFakeRC(repository, artifact, state, "RC_VERIFY_TAG_SIGNATURE="+value)
+			if err == nil {
+				t.Fatalf("verify-rc.sh accepted signature policy %q without a release tag:\n%s", value, output)
+			}
+			if !strings.Contains(string(output), "RC_VERIFY_TAG_SIGNATURE requires RC_RELEASE_TAG") {
+				t.Fatalf("missing-tag signature failure is not actionable:\n%s", output)
 			}
 		})
 	}
@@ -477,6 +558,22 @@ func TestAPICompatibilityGateRejectsInvalidRebuildFlag(t *testing.T) {
 	}
 }
 
+func TestAPICompatibilityGateRejectsInvalidNetworkFlag(t *testing.T) {
+	for _, value := range []string{"", "banana"} {
+		t.Run(value, func(t *testing.T) {
+			command := exec.Command("./check-api-compat.sh")
+			command.Env = append(os.Environ(), "API_COMPAT_ALLOW_NETWORK="+value)
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("API compatibility gate accepted invalid network flag %q:\n%s", value, output)
+			}
+			if !strings.Contains(string(output), "API_COMPAT_ALLOW_NETWORK must be 0 or 1") {
+				t.Fatalf("invalid network flag failure is not actionable:\n%s", output)
+			}
+		})
+	}
+}
+
 func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -510,19 +607,26 @@ func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *test
 			if err := os.WriteFile(filepath.Join(directory, "api", "v0.9.1.txt.sha256"), []byte(checksum), 0644); err != nil {
 				t.Fatal(err)
 			}
-			fakeGo := "#!/usr/bin/env bash\nprintf '%s' \"${FAKE_APIDIFF_OUTPUT:-}\"\n"
+			fakeGo := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${FAKE_API_STATE}/go-calls\"\nexit 99\n"
 			if err := os.WriteFile(filepath.Join(bin, "go"), []byte(fakeGo), 0755); err != nil {
+				t.Fatal(err)
+			}
+			fakeAPIDiff := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${FAKE_API_STATE}/apidiff-calls\"\nprintf '%s' \"${FAKE_APIDIFF_OUTPUT:-}\"\n"
+			if err := os.WriteFile(filepath.Join(bin, "apidiff"), []byte(fakeAPIDiff), 0755); err != nil {
 				t.Fatal(err)
 			}
 			command := exec.Command("./check-api-compat.sh")
 			command.Dir = directory
-			command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_APIDIFF_OUTPUT="+test.output)
+			command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_API_STATE="+directory, "FAKE_APIDIFF_OUTPUT="+test.output)
 			output, err := command.CombinedOutput()
 			if test.wantFailed && err == nil {
 				t.Fatalf("API gate accepted incompatible output:\n%s", output)
 			}
 			if !test.wantFailed && err != nil {
 				t.Fatalf("API gate rejected compatible additions: %v\n%s", err, output)
+			}
+			if _, statErr := os.Stat(filepath.Join(directory, "go-calls")); !os.IsNotExist(statErr) {
+				t.Fatalf("default API compatibility path invoked go: %v", statErr)
 			}
 		})
 	}
@@ -701,7 +805,10 @@ case "${1:-}" in
 esac
 exit 0
 `
-	for name, contents := range map[string]string{"go": fakeGo, "git": fakeGit} {
+	fakeDate := `#!/usr/bin/env bash
+printf '%s\n' "${RC_TEST_DATE:-123}"
+`
+	for name, contents := range map[string]string{"go": fakeGo, "git": fakeGit, "date": fakeDate} {
 		if err := os.WriteFile(filepath.Join(repository, "bin", name), []byte(contents), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -717,10 +824,20 @@ func runFakeRC(repository, artifact, state string, extraEnvironment ...string) (
 		"RC_ARTIFACT_DIR="+artifact,
 		"RC_TEST_STATE="+state,
 		"RC_BASE_REF=main",
-		"SHUFFLE_SEED=20260711",
 	)
 	command.Env = append(command.Env, extraEnvironment...)
 	return command.CombinedOutput()
+}
+
+func metadataValue(t *testing.T, path, key string) string {
+	t.Helper()
+	for _, line := range strings.Split(readTestFile(t, path), "\n") {
+		if value, found := strings.CutPrefix(line, key+"="); found {
+			return value
+		}
+	}
+	t.Fatalf("metadata %s missing key %s", path, key)
+	return ""
 }
 
 func readTestFile(t *testing.T, path string) string {

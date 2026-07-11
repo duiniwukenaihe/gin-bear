@@ -25,12 +25,18 @@ jobs:
           go-version: "1.25.12"
           cache: true
 
+      - name: Install pinned API compatibility tool
+        run: |
+          mkdir -p "${RUNNER_TEMP}/bin"
+          GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597
+
       - name: Verify release candidate gate
         env:
+          APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff
           RC_ARTIFACT_DIR: ${{ runner.temp }}/rc-verification
           RC_BASE_REF: origin/main
           RC_RELEASE_TAG: ${{ github.ref_name }}
-          RC_EXPECTED_VERSION: v0.10.0-rc.1
+          RC_EXPECTED_VERSION: ${{ github.ref_name }}
           RC_VERIFY_TAG_SIGNATURE: "false"
         run: make verify-rc
 

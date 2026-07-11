@@ -41,8 +41,10 @@ The release workflow runs only for `v*` tags. It runs `make verify-rc` before
 GoReleaser with Go 1.25.12, uploads the `rc-verification` logs even on failure,
 and grants `contents: write` only to the release job. CI resolves
 `RC_BASE_REF=origin/main` and requires it to be an ancestor of the candidate.
-The pushed release tag must be annotated, match `RC_EXPECTED_VERSION`, and
-target the exact candidate HEAD.
+The pushed release tag must be annotated, match the dynamic
+`RC_EXPECTED_VERSION` supplied from `github.ref_name`, and target the exact
+candidate HEAD. This permits later RC and final tags without editing a pinned
+workflow version.
 
 GitHub-hosted CI has no project trust keyring, so it records
 `tag_signature_verification=skipped-no-trusted-keyring`; this is not signature
@@ -51,6 +53,10 @@ verification. A local release operator with the trusted signing keys must run:
 ```bash
 RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.10.0-rc.1 RC_EXPECTED_VERSION=v0.10.0-rc.1 RC_VERIFY_TAG_SIGNATURE=true SHUFFLE_SEED=20260711 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify-rc
 ```
+
+When `RC_VERIFY_TAG_SIGNATURE` is set, it must be exactly `true` or `false` and
+`RC_RELEASE_TAG` must also be set. Omitting the signature variable and release
+tag is the only non-release, not-applicable combination.
 
 The RC path always enforces total coverage `70.0` and every critical group
 `80.0`; lower caller-provided environment values do not reduce these gates.
@@ -102,11 +108,19 @@ The committed `scripts/api/v0.9.1.txt` module manifest covers every public Go
 package from v0.9.1. The pinned official `apidiff` gate permits additions and
 rejects removals or incompatible changes; the separate v0.9 consumer fixture is
 also compiled by `go test ./...`. The gate first checks the committed SHA-256
-sidecar. Set `API_BASELINE_REBUILD=1` to rebuild the manifest from the public
+sidecar. The default path uses an installed `apidiff` binary and does not invoke
+`go run module@version`; set `API_COMPAT_ALLOW_NETWORK=1` to opt into that pinned
+fallback. Set `API_BASELINE_REBUILD=1` to rebuild the manifest from the public
 `v0.9.1` Go module cache and compare it byte for byte; this path does not use a
 local tag, clone, or shallow repository history. Reconstruction is an explicit
-manual or independent audit and is not required by the offline release job,
-which checks only the committed hash and additive API compatibility.
+manual or independent audit and is not required by the default offline gate,
+which checks only the committed hash and additive API compatibility. The release
+workflow prepares the pinned binary before invoking that offline gate.
+
+Remote branch hygiene is also offline by default. Set `RC_REMOTE_HYGIENE=1` to
+opt into `git ls-remote --heads origin`. Both network switches accept only `0`
+or `1`. When `SHUFFLE_SEED` is omitted, `verify-rc` derives a stable seed from
+the candidate commit and tree.
 
 Run the release-only compatibility test once with:
 

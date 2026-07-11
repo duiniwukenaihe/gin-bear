@@ -8,6 +8,15 @@ module="github.com/duiniwukenaihe/gin-bear"
 baseline_version="v0.9.1"
 apidiff="golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597"
 
+network_flag="${API_COMPAT_ALLOW_NETWORK-0}"
+case "${network_flag}" in
+0 | 1) ;;
+*)
+	printf 'API_COMPAT_ALLOW_NETWORK must be 0 or 1\n' >&2
+	exit 1
+	;;
+esac
+
 if [[ ! -f "${baseline}" ]]; then
 	printf 'v0.9.1 API manifest not found: %s\n' "${baseline}" >&2
 	exit 1
@@ -70,7 +79,19 @@ case "${rebuild_flag}" in
 	;;
 esac
 
-if ! incompatible="$(go run "${apidiff}" -m -incompatible "${baseline}" "${module}")"; then
+apidiff_command=()
+if [[ -n "${APIDIFF_BIN:-}" ]]; then
+	apidiff_command=("${APIDIFF_BIN}")
+elif apidiff_bin="$(command -v apidiff)"; then
+	apidiff_command=("${apidiff_bin}")
+elif [[ "${network_flag}" == "1" ]]; then
+	apidiff_command=(go run "${apidiff}")
+else
+	printf 'apidiff is required for offline API compatibility checks; install it or set API_COMPAT_ALLOW_NETWORK=1\n' >&2
+	exit 1
+fi
+
+if ! incompatible="$("${apidiff_command[@]}" -m -incompatible "${baseline}" "${module}")"; then
 	printf 'v0.9.1 API compatibility analysis failed\n' >&2
 	exit 1
 fi

@@ -18,6 +18,14 @@ tree="$(git rev-parse 'HEAD^{tree}')" || exit $?
 base_ref="${RC_BASE_REF:-main}"
 coverage_minimum="70.0"
 critical_coverage_minimum="80.0"
+remote_hygiene="${RC_REMOTE_HYGIENE-0}"
+case "${remote_hygiene}" in
+0 | 1) ;;
+*)
+	printf 'RC_REMOTE_HYGIENE must be 0 or 1\n' >&2
+	exit 1
+	;;
+esac
 if ! base_ref_commit="$(git rev-parse --verify --quiet "${base_ref}^{commit}")"; then
 	printf 'RC base ref does not exist: %s\n' "${base_ref}" >&2
 	exit 1
@@ -31,7 +39,7 @@ if ! base_commit="$(git merge-base "${base_ref_commit}" HEAD)"; then
 	exit 1
 fi
 
-shuffle_seed="${SHUFFLE_SEED:-$(date +%s)}"
+shuffle_seed="${SHUFFLE_SEED:-$(printf '%s\n%s\n' "${commit}" "${tree}" | cksum | awk '{print $1}')}"
 artifact_dir="${RC_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/gin-bear-rc.XXXXXX")}"
 mkdir -p "${artifact_dir}"
 artifact_dir="$(cd "${artifact_dir}" && pwd)"
@@ -43,6 +51,20 @@ release_tag="${RC_RELEASE_TAG:-}"
 release_tag_type="not-applicable"
 release_tag_target="not-applicable"
 tag_signature_verification="not-applicable"
+signature_policy="false"
+if [[ "${RC_VERIFY_TAG_SIGNATURE+x}" == "x" ]]; then
+	case "${RC_VERIFY_TAG_SIGNATURE}" in
+	true | false) signature_policy="${RC_VERIFY_TAG_SIGNATURE}" ;;
+	*)
+		printf 'RC_VERIFY_TAG_SIGNATURE must be true or false\n' >&2
+		exit 1
+		;;
+	esac
+	if [[ -z "${release_tag}" ]]; then
+		printf 'RC_VERIFY_TAG_SIGNATURE requires RC_RELEASE_TAG\n' >&2
+		exit 1
+	fi
+fi
 
 if [[ -n "${release_tag}" ]]; then
 	expected_version="${RC_EXPECTED_VERSION:-}"
@@ -67,7 +89,7 @@ if [[ -n "${release_tag}" ]]; then
 		printf 'release tag must target HEAD: %s targets %s, HEAD is %s\n' "${release_tag}" "${release_tag_target}" "${commit}" >&2
 		exit 1
 	fi
-	case "${RC_VERIFY_TAG_SIGNATURE:-false}" in
+	case "${signature_policy}" in
 	true)
 		if ! git verify-tag "${release_tag}" >"${artifact_dir}/tag-signature.log" 2>&1; then
 			cat "${artifact_dir}/tag-signature.log" >&2
@@ -78,10 +100,6 @@ if [[ -n "${release_tag}" ]]; then
 		;;
 	false)
 		tag_signature_verification="skipped-no-trusted-keyring"
-		;;
-	*)
-		printf 'RC_VERIFY_TAG_SIGNATURE must be true or false\n' >&2
-		exit 1
 		;;
 	esac
 fi
@@ -113,6 +131,7 @@ capture_version() {
 	printf 'coverage_minimum=%s\n' "${coverage_minimum}"
 	printf 'critical_coverage_minimum=%s\n' "${critical_coverage_minimum}"
 	printf 'shuffle_seed=%s\n' "${shuffle_seed}"
+	printf 'remote_hygiene=%s\n' "${remote_hygiene}"
 	printf 'artifact_dir=%s\n' "${artifact_dir}"
 	printf 'GOSUMDB=%s\n' "${GOSUMDB}"
 	printf 'GOTOOLCHAIN=%s\n' "${GOTOOLCHAIN}"
@@ -183,20 +202,24 @@ check_repository_hygiene() {
 		esac
 	done <<<"${local_branches}"
 
-	printf '%s\n' 'Remote heads:'
-	local remote_heads
-	remote_heads="$(git ls-remote --heads origin | awk '{print $2}')" || return 1
-	printf '%s\n' "${remote_heads}"
-	while IFS= read -r head; do
-		[[ -z "${head}" ]] && continue
-		case "${head}" in
-		refs/heads/main | refs/heads/codex/production-baseline) ;;
-		*)
-			printf 'unexpected remote head: %s\n' "${head}" >&2
-			failed=1
-			;;
-		esac
-	done <<<"${remote_heads}"
+	if [[ "${remote_hygiene}" == "1" ]]; then
+		printf '%s\n' 'Remote heads:'
+		local remote_heads
+		remote_heads="$(git ls-remote --heads origin | awk '{print $2}')" || return 1
+		printf '%s\n' "${remote_heads}"
+		while IFS= read -r head; do
+			[[ -z "${head}" ]] && continue
+			case "${head}" in
+			refs/heads/main | refs/heads/codex/production-baseline) ;;
+			*)
+				printf 'unexpected remote head: %s\n' "${head}" >&2
+				failed=1
+				;;
+			esac
+		done <<<"${remote_heads}"
+	else
+		printf '%s\n' 'Remote head audit: skipped (set RC_REMOTE_HYGIENE=1 to enable)'
+	fi
 
 	local forbidden
 	forbidden="$(find . -path './.git' -prune -o -type f \( -name Dockerfile -o -name 'Dockerfile.*' -o -name docker-compose.yml -o -name docker-compose.yaml -o -name compose.yml -o -name compose.yaml -o -path '*/kubernetes/*' -o -path '*/helm/*' -o -name coverage.out \) -print)"

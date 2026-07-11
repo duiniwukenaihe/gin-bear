@@ -398,8 +398,8 @@ func configure(application *bear.Bear) {
 ```
 
 The generated repository requires the application's `GormAdapter`. Decimal
-fields add `github.com/shopspring/decimal v1.4.0` to `go.mod` so generation does
-not resolve a floating dependency version.
+fields add `github.com/shopspring/decimal v1.4.0` to `go.mod` only when the
+requirement is missing. An existing decimal version is preserved.
 
 ## Request Binding
 

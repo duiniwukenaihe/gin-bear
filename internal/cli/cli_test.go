@@ -118,6 +118,32 @@ func TestGenerateDecimalResourcePinsDependencyVersion(t *testing.T) {
 	}
 }
 
+func TestGenerateDecimalResourcePreservesHigherDependencyVersion(t *testing.T) {
+	project := t.TempDir()
+	goModPath := filepath.Join(project, "go.mod")
+	original := "module example.com/invoice\n\ngo 1.25.12\n\nrequire github.com/shopspring/decimal v1.5.0\n"
+	if err := os.WriteFile(goModPath, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := generateResource(context.Background(), resourceOptions{
+		Kind:      "dto",
+		Name:      "invoice",
+		Fields:    "amount:decimal",
+		Directory: project,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	goMod, err := os.ReadFile(goModPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(goMod) != original {
+		t.Fatalf("generation changed an existing higher decimal requirement:\nwant:\n%s\ngot:\n%s", original, goMod)
+	}
+}
+
 func TestGenerateResourceCoversKindsAndRejectsUnsafeInputs(t *testing.T) {
 	project := t.TempDir()
 	fields := strings.Join([]string{
