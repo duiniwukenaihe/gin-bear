@@ -2,9 +2,9 @@ package bear
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -63,11 +63,11 @@ type Bear struct {
 	currentGroup      string
 	fairingHandler    *FairingHandler
 	routeTree         *RouteTree // 路由树，用于存储路由级别的 Fairing
-	onShutdown        []func()
 	routeRegistry     []RouteMetadata
 	grpcServices      []GRPCService
 	mounts            []MountMetadata
 	modules           []Module
+	runtime           *Runtime
 	applied           atomic.Bool // 增加应用标记
 	pluginDispatcher  *PluginDispatcher
 	pluginManager     *PluginManager
@@ -78,11 +78,26 @@ type Bear struct {
 
 // OnShutdown 注册服务关闭时的清理函数
 func (b *Bear) OnShutdown(f ...func()) {
-	b.onShutdown = append(b.onShutdown, f...)
+	if b == nil || b.runtime == nil {
+		return
+	}
+	for _, hook := range f {
+		if hook != nil {
+			b.runtime.Lifecycle.Add(shutdownHook{fn: hook})
+		}
+	}
 }
 
 func (b *Bear) Name() string {
 	return "Bear"
+}
+
+// Runtime returns the application-scoped runtime owned by Bear.
+func (b *Bear) Runtime() *Runtime {
+	if b == nil {
+		return nil
+	}
+	return b.runtime
 }
 
 // Ignite 初始化 Bear 引擎 (轻量级内核)
@@ -100,15 +115,6 @@ func Ignite(args ...any) *Bear {
 		}
 	}
 
-	b := &Bear{
-		Engine:           gin.New(),
-		exprData:         map[string]interface{}{},
-		fairingHandler:   NewFairingHandler(),
-		routeTree:        NewRouteTree(),
-		pluginDispatcher: NewPluginDispatcher(),
-	}
-	b.pluginManager = NewPluginManager(b)
-
 	if config == nil {
 		config = InitConfig()
 	} else {
@@ -122,13 +128,24 @@ func Ignite(args ...any) *Bear {
 		panic(err.Error())
 	}
 
-	// 注册核心底座 Bean
-	SetDefaultLogger(config)
-	for _, warning := range config.compatibilityWarnings() {
-		slog.Warn(warning)
+	runtime := newRuntime(config)
+	b := &Bear{
+		Engine:           gin.New(),
+		exprData:         map[string]interface{}{},
+		fairingHandler:   NewFairingHandler(),
+		routeTree:        NewRouteTree(),
+		pluginDispatcher: NewPluginDispatcher(),
+		runtime:          runtime,
 	}
-	GetInjector().Set(b)
-	GetInjector().Set(config)
+	b.pluginManager = NewPluginManager(b)
+
+	// 注册核心底座 Bean
+	runtime.Container.Set(b)
+	runtime.Container.Set(config)
+	publishDefaultRuntime(runtime)
+	for _, warning := range config.compatibilityWarnings() {
+		runtime.Logger.Warn(warning)
+	}
 	configureGinRuntime(b, config)
 
 	// 禁用 Gin 默认日志，由核心性能中间件接管结构化日志
@@ -137,32 +154,32 @@ func Ignite(args ...any) *Bear {
 
 	// 注入底座中间件
 	b.Use(RequestIDMiddleware())
-	b.Use(PerformanceMiddleware())
-	b.Use(RecoveryMiddleware())
+	b.Use(runtimePerformanceMiddleware(runtime))
+	b.Use(runtimeRecoveryMiddleware(runtime))
 	b.Use(b.pluginDispatcher.Dispatch())
 	for _, middleware := range ginMiddlewares {
 		b.Use(middleware)
 	}
 
-	slog.Info("WhiteBear core awakened", "server", config.Server.Name)
+	runtime.Logger.Info("WhiteBear core awakened", "server", config.Server.Name)
 	return b
 }
 
 // Deprecated: EnableIDGenerator is compatibility-only and has no effect.
 func (b *Bear) EnableIDGenerator() error {
-	slog.Warn("ID Generator is disabled in精简 mode")
+	b.runtime.Logger.Warn("ID Generator is disabled in精简 mode")
 	return nil
 }
 
 // Deprecated: EnableMQ is compatibility-only and has no effect.
 func (b *Bear) EnableMQ(ctx context.Context) *Bear {
-	slog.Warn("MQ is disabled in 精简 mode")
+	b.runtime.Logger.Warn("MQ is disabled in 精简 mode")
 	return b
 }
 
 // EnableTracing 开启链路追踪
 func (b *Bear) EnableTracing(ctx context.Context) *Bear {
-	config := GetByType[*SysConfig]()
+	config := b.runtime.Config
 	if config == nil || config.Tracing == nil || !config.Tracing.Enabled {
 		return b
 	}
@@ -171,7 +188,7 @@ func (b *Bear) EnableTracing(ctx context.Context) *Bear {
 	}
 	provider, err := newTracerProvider(ctx, config.Tracing)
 	if err != nil {
-		slog.Error("Tracing initialization failed", "error", err)
+		b.runtime.Logger.Error("Tracing initialization failed", "error", err)
 		return b
 	}
 	propagator := propagation.TraceContext{}
@@ -179,13 +196,13 @@ func (b *Bear) EnableTracing(ctx context.Context) *Bear {
 	otel.SetTextMapPropagator(propagator)
 	b.Use(TracingMiddleware(provider, propagator))
 	b.OnShutdown(shutdownTracerProvider(provider))
-	slog.Info("Tracing enabled", "exporter", config.Tracing.Exporter, "service", config.Tracing.ServiceName)
+	b.runtime.Logger.Info("Tracing enabled", "exporter", config.Tracing.Exporter, "service", config.Tracing.ServiceName)
 	return b
 }
 
 // EnableMetrics 开启指标监控
 func (b *Bear) EnableMetrics() *Bear {
-	config := GetByType[*SysConfig]()
+	config := b.runtime.Config
 	if config != nil && config.Metrics != nil && !config.Metrics.Enabled {
 		return b
 	}
@@ -198,7 +215,7 @@ func (b *Bear) EnableMetrics() *Bear {
 	}
 	b.GET(path, func(ctx *gin.Context) {
 		ctx.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		ctx.String(http.StatusOK, httpMetrics.RenderPrometheus())
+		ctx.String(http.StatusOK, b.runtime.Metrics.RenderPrometheus())
 	})
 	return b
 }
@@ -206,104 +223,152 @@ func (b *Bear) EnableMetrics() *Bear {
 // Launch 启动 Bear 引擎，支持优雅退出
 // ctx 用于控制启动过程中的超时和取消操作
 func (b *Bear) Launch(ctx context.Context) error {
-	config := GetInjector().Get(reflect.TypeOf((*SysConfig)(nil))).(*SysConfig)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	config := b.runtime.Config
+	logger := b.runtime.Logger
+	server := b.buildHTTPServer(config)
 
-	// MQ 启动已禁用 (精简模式)
-
-	srv := b.buildHTTPServer(config)
-
-	// HTTP 服务器启动错误通道
-	httpErrCh := make(chan error, 1)
-	go func() {
-		slog.Info("WhiteBear is emerging from ice", "addr", srv.Addr, "name", config.Server.Name)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			httpErrCh <- err
-		}
-	}()
-
-	// 启动 gRPC 服务 (阶段 49)
-	if config.GRPC != nil && config.GRPC.Enabled {
-		grpcAddr := fmt.Sprintf(":%d", config.GRPC.Port)
-		lis, err := net.Listen("tcp", grpcAddr)
-		if err != nil {
-			return fmt.Errorf("failed to listen for gRPC: %w", err)
-		}
-
-		grpcServer := grpc.NewServer()
-
-		// 注册服务
-		for _, s := range b.grpcServices {
-			slog.Info("Registering gRPC service", "name", s.Name())
-			s.Register(grpcServer)
-		}
-
-		go func() {
-			slog.Info("WhiteBear gRPC is listening", "addr", grpcAddr)
-			if err := grpcServer.Serve(lis); err != nil {
-				slog.Error("Failed to serve gRPC", "error", err)
-			}
-		}()
-
-		b.OnShutdown(func() {
-			slog.Info("Shutting down WhiteBear gRPC...")
-			grpcServer.GracefulStop()
-		})
+	httpListener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return b.cleanupLaunchFailure(config, fmt.Errorf("failed to listen for HTTP: %w", err))
 	}
 
-	// 优雅退出处理
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	var grpcListener net.Listener
+	var grpcServer *grpc.Server
+	if config.GRPC != nil && config.GRPC.Enabled {
+		grpcAddr := fmt.Sprintf(":%d", config.GRPC.Port)
+		grpcListener, err = net.Listen("tcp", grpcAddr)
+		if err != nil {
+			return b.cleanupLaunchFailure(config, fmt.Errorf("failed to listen for gRPC: %w", err), httpListener)
+		}
+		grpcServer = grpc.NewServer()
+		for _, service := range b.grpcServices {
+			logger.Info("Registering gRPC service", "name", service.Name())
+			service.Register(grpcServer)
+		}
+	}
 
+	type serveResult struct {
+		name string
+		err  error
+	}
+	serverCount := 1
+	if grpcServer != nil {
+		serverCount++
+	}
+	serveResults := make(chan serveResult, serverCount)
+	go func() {
+		logger.Info("WhiteBear is emerging from ice", "addr", httpListener.Addr().String(), "name", config.Server.Name)
+		err := server.Serve(httpListener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		serveResults <- serveResult{name: "HTTP", err: err}
+	}()
+	if grpcServer != nil {
+		go func() {
+			logger.Info("WhiteBear gRPC is listening", "addr", grpcListener.Addr().String())
+			err := grpcServer.Serve(grpcListener)
+			if errors.Is(err, grpc.ErrServerStopped) {
+				err = nil
+			}
+			serveResults <- serveResult{name: "gRPC", err: err}
+		}()
+	}
+
+	signalCtx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	var launchErrors []error
+	received := 0
 	select {
-	case err := <-httpErrCh:
-		return fmt.Errorf("failed to launch bear: %w", err)
-	case <-quit:
-		slog.Info("Shutting down WhiteBear...")
-	case <-ctx.Done():
-		slog.Info("Context cancelled, shutting down...")
+	case result := <-serveResults:
+		received++
+		if result.err != nil {
+			launchErrors = append(launchErrors, fmt.Errorf("%s serve failed: %w", result.name, result.err))
+		}
+	case <-signalCtx.Done():
+		logger.Info("Context cancelled, shutting down...")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout(config))
 	defer cancel()
-
-	// 自动从 IoC 容器中查找并关闭一些标准组件 (示例)
-	// 如果有 WorkerPool 等组件，可以在这里统一处理
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("Bear shutdown forced", "error", err)
+	if err := shutdownHTTPServer(shutdownCtx, server); err != nil {
+		launchErrors = append(launchErrors, err)
+	}
+	if grpcServer != nil {
+		if err := shutdownGRPCServer(shutdownCtx, grpcServer); err != nil {
+			launchErrors = append(launchErrors, err)
+		}
+	}
+	if err := b.runtime.Lifecycle.Stop(shutdownCtx); err != nil {
+		launchErrors = append(launchErrors, err)
 	}
 
-	// 倒序执行清理钩子 (后注册的先退出，通常符合依赖关系)
-	for i := len(b.onShutdown) - 1; i >= 0; i-- {
-		b.onShutdown[i]()
-	}
-
-	// 自动化组件关闭：按照 LIFO (后进先出) 顺序执行销毁，确保依赖安全
-	slog.Info("Automating component shutdown (LIFO)...")
-
-	// 获取所有 Bean 并筛选 Shutdowner
-	var shutdowners []Shutdowner
-	for _, v := range GetInjector().GetBeanMapper() {
-		if s, ok := v.Interface().(Shutdowner); ok {
-			shutdowners = append(shutdowners, s)
+	for received < serverCount {
+		select {
+		case result := <-serveResults:
+			received++
+			if result.err != nil {
+				launchErrors = append(launchErrors, fmt.Errorf("%s serve failed: %w", result.name, result.err))
+			}
+		case <-shutdownCtx.Done():
+			launchErrors = append(launchErrors, fmt.Errorf("waiting for servers to stop: %w", shutdownCtx.Err()))
+			received = serverCount
 		}
 	}
 
-	// 简单的后注册先退出策略 (实际场景中建议在 Register 时记录顺序)
-	for i := len(shutdowners) - 1; i >= 0; i-- {
-		s := shutdowners[i]
-		name := "Unknown"
-		if b, ok := s.(Bean); ok {
-			name = b.Name()
-		}
-		slog.Info("Shutting down component", "name", name)
-		if err := s.Shutdown(); err != nil {
-			slog.Error("Component shutdown failed", "name", name, "error", err)
-		}
-	}
+	logger.Info("WhiteBear returning to ice")
+	return errors.Join(launchErrors...)
+}
 
-	slog.Info("WhiteBear returning to ice")
+func (b *Bear) cleanupLaunchFailure(config *SysConfig, cause error, listeners ...net.Listener) error {
+	errorsToJoin := []error{cause}
+	for _, listener := range listeners {
+		errorsToJoin = append(errorsToJoin, closeListener("pre-bound", listener))
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout(config))
+	defer cancel()
+	errorsToJoin = append(errorsToJoin, b.runtime.Lifecycle.Stop(shutdownCtx))
+	return errors.Join(errorsToJoin...)
+}
+
+func closeListener(name string, listener net.Listener) error {
+	if listener == nil {
+		return nil
+	}
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return fmt.Errorf("close %s listener: %w", name, err)
+	}
 	return nil
+}
+
+func shutdownHTTPServer(ctx context.Context, server *http.Server) error {
+	if err := server.Shutdown(ctx); err != nil {
+		return errors.Join(fmt.Errorf("HTTP shutdown: %w", err), server.Close())
+	}
+	return nil
+}
+
+type grpcShutdownServer interface {
+	GracefulStop()
+	Stop()
+}
+
+func shutdownGRPCServer(ctx context.Context, server grpcShutdownServer) error {
+	done := make(chan struct{})
+	go func() {
+		server.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		server.Stop()
+		return fmt.Errorf("gRPC graceful shutdown: %w", ctx.Err())
+	}
 }
 
 func (b *Bear) buildHTTPServer(config *SysConfig) *http.Server {
@@ -425,8 +490,8 @@ func (b *Bear) Mount(group string, classes ...IClass) *Bear {
 
 // EnableHealth 启用健康检查与指标端点
 func (b *Bear) EnableHealth() *Bear {
-	b.Mount("", &HealthController{})
-	config := GetByType[*SysConfig]()
+	b.Mount("", &HealthController{runtime: b.runtime})
+	config := b.runtime.Config
 	if config == nil || config.Metrics == nil || config.Metrics.Enabled {
 		b.EnableMetrics()
 	}
@@ -447,7 +512,7 @@ func (b *Bear) EnableGzip(minLength ...int) *Bear {
 func (b *Bear) Beans(beans ...Bean) *Bear {
 	for _, bean := range beans {
 		b.exprData[bean.Name()] = bean
-		GetInjector().Set(bean)
+		b.runtime.Container.Set(bean)
 	}
 	return b
 }
@@ -456,7 +521,7 @@ func (b *Bear) Beans(beans ...Bean) *Bear {
 func (b *Bear) Attach(f ...Fairing) *Bear {
 	b.fairingHandler.AddFairing(f...)
 	for _, f1 := range f {
-		GetInjector().Set(f1)
+		b.runtime.Container.Set(f1)
 	}
 	return b
 }
@@ -474,7 +539,7 @@ func (b *Bear) ReloadPlugin(path string) error {
 // AddModule 注册模块
 func (b *Bear) AddModule(modules ...Module) *Bear {
 	for _, mod := range modules {
-		slog.Info("Loading module", "name", mod.Name())
+		b.runtime.Logger.Info("Loading module", "name", mod.Name())
 		// 1. 注册模块中的 Beans
 		b.Beans(mod.Beans()...)
 		// 2. 暂存模块
@@ -486,7 +551,7 @@ func (b *Bear) AddModule(modules ...Module) *Bear {
 // HandleWS 注册 WebSocket 路由
 func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 	// 1. 执行依赖注入
-	GetInjector().Apply(handler)
+	b.runtime.Container.Apply(handler)
 
 	b.activeGroup().GET(relativePath, func(ctx *gin.Context) {
 		// 2. 触发 Fairing OnRequest (支持鉴权、限流等)
@@ -495,7 +560,7 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 		}
 
 		// 3. 获取 WS 配置并初始化升级程序
-		config := GetByType[*SysConfig]()
+		config := b.runtime.Config
 		upgrader := websocket.Upgrader{
 			HandshakeTimeout: time.Duration(config.WS.HandshakeTimeout) * time.Millisecond,
 			ReadBufferSize:   config.WS.ReadBufferSize,
@@ -508,14 +573,14 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 		// 4. 升级协议
 		conn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
 		if err != nil {
-			slog.ErrorContext(ctx.Request.Context(), "WebSocket upgrade failed", "error", err)
+			b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket upgrade failed", "error", err)
 			return
 		}
 		defer conn.Close()
 
 		// 5. 调用 OnConnect
 		if err := handler.OnConnect(ctx, conn); err != nil {
-			slog.ErrorContext(ctx.Request.Context(), "WebSocket OnConnect failed", "error", err)
+			b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket OnConnect failed", "error", err)
 			return
 		}
 
@@ -523,12 +588,12 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 		for {
 			messageType, p, err := conn.ReadMessage()
 			if err != nil {
-				slog.InfoContext(ctx.Request.Context(), "WebSocket connection closed", "error", err)
+				b.runtime.Logger.InfoContext(ctx.Request.Context(), "WebSocket connection closed", "error", err)
 				handler.OnClose(ctx, conn)
 				break
 			}
 			if err := handler.OnMessage(ctx, conn, messageType, p); err != nil {
-				slog.ErrorContext(ctx.Request.Context(), "WebSocket OnMessage error", "error", err)
+				b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket OnMessage error", "error", err)
 			}
 		}
 	})
@@ -570,7 +635,7 @@ func (b *Bear) Handle(httpMethod, relativePath string, handler interface{}) *Bea
 func (b *Bear) HandleWithFairing(httpMethod, relativePath string, handler interface{}, fairings ...Fairing) *Bear {
 	// 1. 对 fairings 进行依赖注入
 	for _, f := range fairings {
-		GetInjector().Apply(f)
+		b.runtime.Container.Apply(f)
 	}
 
 	// 2. 注册到路由树
@@ -686,29 +751,25 @@ func runtimeFuncName(i interface{}) string {
 // ctx 用于控制初始化过程中的超时和取消操作
 func (b *Bear) ApplyAll(ctx context.Context) error {
 	if !b.applied.CompareAndSwap(false, true) {
-		slog.Warn("ApplyAll already called, skipping redundant initialization")
+		b.runtime.Logger.Warn("ApplyAll already called, skipping redundant initialization")
 		return nil
 	}
 	// 1. 第一遍遍历：执行字段注入
-	for _, v := range GetInjector().GetBeanMapper() {
+	for _, bean := range b.runtime.Container.orderedBeans() {
+		v := reflect.ValueOf(bean)
 		if v.Kind() == reflect.Ptr && v.Elem().Kind() == reflect.Struct {
-			GetInjector().Apply(v.Interface())
+			b.runtime.Container.Apply(bean)
 		}
 	}
 
 	// 2. 第二遍遍历：执行 Init 初始化钩子
-	slog.Info("Executing component initializers...")
-	for _, v := range GetInjector().GetBeanMapper() {
-		if initializer, ok := v.Interface().(Initializer); ok {
-			slog.Info("Initializing component", "name", v.Interface().(Bean).Name())
-			if err := initializer.Init(ctx); err != nil {
-				return fmt.Errorf("component initialization failed [%s]: %w", v.Interface().(Bean).Name(), err)
-			}
-		}
+	b.runtime.Logger.Info("Executing component initializers...")
+	if err := b.runtime.Lifecycle.Start(ctx); err != nil {
+		return err
 	}
 
 	// 3. 构建路由 (确保在注入之后)
-	slog.Info("Building routes...")
+	b.runtime.Logger.Info("Building routes...")
 
 	// 3.1 先处理模块 (模块的 Build() 可能会调用 b.Mount() 添加控制器)
 	for _, mod := range b.modules {
@@ -740,7 +801,7 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 
 	// 预热 Handler 缓存
 	WarmupHandlers(b.routeRegistry)
-	slog.Info("Handler cache warmed up", "count", len(b.routeRegistry))
+	b.runtime.Logger.Info("Handler cache warmed up", "count", len(b.routeRegistry))
 
 	return nil
 }

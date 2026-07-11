@@ -8,12 +8,15 @@ import (
 
 // BeanFactory 负责管理所有的 Bean
 type BeanFactory struct {
-	mu    sync.RWMutex
-	beans map[reflect.Type]any
+	mu       sync.RWMutex
+	beans    map[reflect.Type]any
+	order    []reflect.Type
+	onSet    func(reflect.Type, any)
+	onRemove func(reflect.Type)
 }
 
-var injector *BeanFactory
-var iocOnce sync.Once
+var injector = NewBeanFactory()
+var injectorMu sync.RWMutex
 
 // StaticInjector 静态注入函数定义
 type StaticInjector func(interface{})
@@ -30,20 +33,54 @@ func RegisterStaticInjector(name string, injector StaticInjector) {
 
 // GetInjector 获取单例注入器
 func GetInjector() *BeanFactory {
-	iocOnce.Do(func() {
-		injector = &BeanFactory{
-			beans: make(map[reflect.Type]any),
-		}
-	})
-	return injector
+	injectorMu.RLock()
+	factory := injector
+	injectorMu.RUnlock()
+	if factory != nil {
+		return factory
+	}
+	factory = NewBeanFactory()
+	setDefaultInjector(factory)
+	return factory
+}
+
+func setDefaultInjector(factory *BeanFactory) {
+	injectorMu.Lock()
+	injector = factory
+	injectorMu.Unlock()
+}
+
+// NewBeanFactory creates an isolated bean container.
+func NewBeanFactory() *BeanFactory {
+	return &BeanFactory{beans: make(map[reflect.Type]any)}
+}
+
+// Resolve retrieves a bean from the provided container.
+func Resolve[T any](factory *BeanFactory) T {
+	var zero T
+	if factory == nil {
+		return zero
+	}
+	value, _ := factory.Get(reflect.TypeOf((*T)(nil)).Elem()).(T)
+	return value
 }
 
 // Set 注册一个 Bean
 func (f *BeanFactory) Set(bean any) {
+	if f == nil || bean == nil {
+		return
+	}
 	v := reflect.ValueOf(bean)
 	f.mu.Lock()
+	if _, exists := f.beans[v.Type()]; !exists {
+		f.order = append(f.order, v.Type())
+	}
 	f.beans[v.Type()] = bean
+	onSet := f.onSet
 	f.mu.Unlock()
+	if onSet != nil {
+		onSet(v.Type(), bean)
+	}
 }
 
 // SetWithInterface 注册一个 Bean 并绑定到指定接口类型
@@ -56,15 +93,32 @@ func (f *BeanFactory) SetWithInterface(ifacePtr any, bean any) {
 		return
 	}
 	f.mu.Lock()
+	if _, exists := f.beans[t]; !exists {
+		f.order = append(f.order, t)
+	}
 	f.beans[t] = bean
+	onSet := f.onSet
 	f.mu.Unlock()
+	if onSet != nil {
+		onSet(t, bean)
+	}
 }
 
 // Remove 移除一个 Bean
 func (f *BeanFactory) Remove(t reflect.Type) {
 	f.mu.Lock()
 	delete(f.beans, t)
+	for i, registeredType := range f.order {
+		if registeredType == t {
+			f.order = append(f.order[:i], f.order[i+1:]...)
+			break
+		}
+	}
+	onRemove := f.onRemove
 	f.mu.Unlock()
+	if onRemove != nil {
+		onRemove(t)
+	}
 }
 
 // Get 获取指定类型的 Bean
@@ -78,7 +132,8 @@ func (f *BeanFactory) Get(t reflect.Type) any {
 
 	// 如果是接口类型，尝试进行接口实现匹配
 	if t.Kind() == reflect.Interface {
-		for _, bean := range f.beans {
+		for _, registeredType := range f.order {
+			bean := f.beans[registeredType]
 			bt := reflect.TypeOf(bean)
 			if bt.Implements(t) {
 				return bean
@@ -90,16 +145,7 @@ func (f *BeanFactory) Get(t reflect.Type) any {
 
 // GetByType 使用泛型获取 Bean
 func GetByType[T any]() T {
-	var t T
-	targetType := reflect.TypeOf((*T)(nil)).Elem()
-	val := GetInjector().Get(targetType)
-	if val != nil {
-		// 使用类型断言检查，避免 panic
-		if v, ok := val.(T); ok {
-			return v
-		}
-	}
-	return t
+	return Resolve[T](GetInjector())
 }
 
 // GetByType 快捷别名 (BeanFactory 实例版本)
@@ -226,4 +272,19 @@ func (f *BeanFactory) GetBeanMapper() map[reflect.Type]reflect.Value {
 		res[k] = reflect.ValueOf(v)
 	}
 	return res
+}
+
+func (f *BeanFactory) orderedBeans() []any {
+	if f == nil {
+		return nil
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	beans := make([]any, 0, len(f.order))
+	for _, registeredType := range f.order {
+		if bean, ok := f.beans[registeredType]; ok {
+			beans = append(beans, bean)
+		}
+	}
+	return beans
 }

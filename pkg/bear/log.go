@@ -5,9 +5,11 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 )
 
 var Log *slog.Logger
+var logMu sync.RWMutex
 
 // ContextHandler 自动从 context 中提取 request_id 并注入日志
 type ContextHandler struct {
@@ -27,9 +29,18 @@ func (h *ContextHandler) Handle(ctx context.Context, r slog.Record) error {
 
 // SetDefaultLogger 初始化全局上下文感知日志
 func SetDefaultLogger(config ...*SysConfig) {
+	var cfg *SysConfig
+	if len(config) > 0 {
+		cfg = config[0]
+	}
+	logger := newLogger(cfg)
+	setDefaultLogger(logger)
+}
+
+func newLogger(config *SysConfig) *slog.Logger {
 	level := slog.LevelInfo
-	if len(config) > 0 && config[0] != nil && config[0].Log != nil {
-		level = parseLogLevel(config[0].Log.Level)
+	if config != nil && config.Log != nil {
+		level = parseLogLevel(config.Log.Level)
 	}
 	opts := &slog.HandlerOptions{
 		Level: level,
@@ -43,8 +54,27 @@ func SetDefaultLogger(config ...*SysConfig) {
 	handler := &ContextHandler{
 		Handler: slog.NewJSONHandler(os.Stdout, opts),
 	}
-	Log = slog.New(handler)
-	slog.SetDefault(Log)
+	return slog.New(handler)
+}
+
+func setDefaultLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logMu.Lock()
+	Log = logger
+	logMu.Unlock()
+	slog.SetDefault(logger)
+}
+
+func legacyLogger() *slog.Logger {
+	logMu.RLock()
+	logger := Log
+	logMu.RUnlock()
+	if logger != nil {
+		return logger
+	}
+	return slog.Default()
 }
 
 func parseLogLevel(raw string) slog.Level {
@@ -61,43 +91,43 @@ func parseLogLevel(raw string) slog.Level {
 }
 
 func Info(msg string, args ...any) {
-	slog.Info(msg, args...)
+	legacyLogger().Info(msg, args...)
 }
 
 func ErrorLog(msg string, args ...any) {
-	slog.Error(msg, args...)
+	legacyLogger().Error(msg, args...)
 }
 
 func Warn(msg string, args ...any) {
-	slog.Warn(msg, args...)
+	legacyLogger().Warn(msg, args...)
 }
 
 func Debug(msg string, args ...any) {
-	slog.Debug(msg, args...)
+	legacyLogger().Debug(msg, args...)
 }
 
 func InfoContext(ctx context.Context, msg string, args ...any) {
-	slog.InfoContext(ctx, msg, args...)
+	legacyLogger().InfoContext(ctx, msg, args...)
 }
 
 func ErrorContext(ctx context.Context, msg string, args ...any) {
-	slog.ErrorContext(ctx, msg, args...)
+	legacyLogger().ErrorContext(ctx, msg, args...)
 }
 
 func WarnContext(ctx context.Context, msg string, args ...any) {
-	slog.WarnContext(ctx, msg, args...)
+	legacyLogger().WarnContext(ctx, msg, args...)
 }
 
 func DebugContext(ctx context.Context, msg string, args ...any) {
-	slog.DebugContext(ctx, msg, args...)
+	legacyLogger().DebugContext(ctx, msg, args...)
 }
 
 func WithContext(ctx context.Context) *slog.Logger {
 	if ctx == nil {
-		return slog.Default()
+		return legacyLogger()
 	}
 	if rid, ok := ctx.Value(RequestIDKey).(string); ok {
-		return slog.Default().With(string(RequestIDKey), rid)
+		return legacyLogger().With(string(RequestIDKey), rid)
 	}
-	return slog.Default()
+	return legacyLogger()
 }
