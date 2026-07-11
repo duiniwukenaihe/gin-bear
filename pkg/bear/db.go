@@ -5,10 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -43,6 +47,9 @@ func (r *GormAdapter) Name() string {
 
 // buildDSN 构建数据库 DSN，支持 MySQL/PostgreSQL 或直接 DSN
 func buildDSN(cfg *DBConfig) (string, error) {
+	if cfg == nil {
+		return "", errors.New("database config is required")
+	}
 	// 如果已配置 DSN，直接使用
 	if cfg.DSN != "" {
 		return cfg.DSN, nil
@@ -70,24 +77,62 @@ func buildDSN(cfg *DBConfig) (string, error) {
 		if port == "" {
 			port = "5432"
 		}
-		sslmode := cfg.SSLMode
-		if sslmode == "" {
-			sslmode = "disable"
+		sslmode, err := effectivePostgresSSLMode(cfg)
+		if err != nil {
+			return "", err
 		}
-		return fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s",
-			host, user, cfg.Password, dbname, port, sslmode), nil
+		postgresURL := &url.URL{
+			Scheme: "postgres",
+			User:   url.UserPassword(user, cfg.Password),
+			Host:   net.JoinHostPort(host, port),
+			Path:   "/" + dbname,
+		}
+		postgresURL.RawPath = "/" + url.PathEscape(dbname)
+		query := postgresURL.Query()
+		query.Set("sslmode", sslmode)
+		postgresURL.RawQuery = query.Encode()
+		return postgresURL.String(), nil
 	case "mysql":
 		if port == "" {
 			port = "3306"
 		}
-		sslmode := cfg.SSLMode
-		if sslmode == "" {
-			sslmode = "disable"
+		driverConfig := mysqldriver.NewConfig()
+		driverConfig.User = user
+		driverConfig.Passwd = cfg.Password
+		driverConfig.Net = "tcp"
+		driverConfig.Addr = net.JoinHostPort(host, port)
+		driverConfig.DBName = dbname
+		driverConfig.Params = map[string]string{"charset": "utf8mb4"}
+		driverConfig.ParseTime = true
+		driverConfig.Loc = time.Local
+		driverConfig.TLSConfig = strings.TrimSpace(cfg.TLS)
+		dsn := driverConfig.FormatDSN()
+		parsed, err := mysqldriver.ParseDSN(dsn)
+		if err != nil {
+			return "", fmt.Errorf("invalid MySQL DSN configuration: %w", err)
 		}
-		return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local&sslmode=%s",
-			user, cfg.Password, host, port, dbname, sslmode), nil
+		if parsed.User != driverConfig.User || parsed.Passwd != driverConfig.Passwd || parsed.DBName != driverConfig.DBName {
+			return "", errors.New("MySQL user, password, or database name contains characters that cannot be represented safely in a DSN")
+		}
+		return dsn, nil
 	default:
 		return "", fmt.Errorf("unsupported database type: %s, supported: mysql, postgres", dbType)
+	}
+}
+
+func effectivePostgresSSLMode(cfg *DBConfig) (string, error) {
+	sslmode := strings.ToLower(strings.TrimSpace(cfg.PostgresSSLMode))
+	if sslmode == "" {
+		sslmode = strings.ToLower(strings.TrimSpace(cfg.SSLMode))
+	}
+	if sslmode == "" {
+		sslmode = "disable"
+	}
+	switch sslmode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+		return sslmode, nil
+	default:
+		return "", fmt.Errorf("database PostgreSQL sslmode %q is invalid", sslmode)
 	}
 }
 
@@ -304,19 +349,8 @@ func auditUpdateCallback(db *gorm.DB) {
 
 // getUserIDFromContext 尝试从上下文中提取用户 ID
 func getUserIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	// 尝试适配多种 Key 规范
-	if v := ctx.Value("user_id"); v != nil {
-		return v.(string)
-	}
-	if v := ctx.Value("sub"); v != nil {
-		return v.(string)
-	}
-	// 兼容 Gin Context 的传值 (通过 context.WithValue 传递下来的)
-	// 注意：在 Middleware 中我们通常不仅 Set 到 gin.Context，也应该 Set 到 Request.Context
-	return ""
+	userID, _ := UserIDFromContext(ctx)
+	return userID
 }
 
 // Update 更新实体，支持乐观锁

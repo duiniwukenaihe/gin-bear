@@ -2,7 +2,11 @@ package bear
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,6 +17,16 @@ import (
 type RateLimiter interface {
 	Allow(ctx context.Context, key string) bool
 }
+
+type LimiterFailureMode string
+
+const (
+	LimiterFailureModeOpen   LimiterFailureMode = "open"
+	LimiterFailureModeClosed LimiterFailureMode = "closed"
+
+	LimiterFailureOpen   = LimiterFailureModeOpen
+	LimiterFailureClosed = LimiterFailureModeClosed
+)
 
 // MemoryRateLimiter 基于内存的简单计数限流器 (演示用)
 type MemoryRateLimiter struct {
@@ -30,6 +44,9 @@ func NewMemoryRateLimiter(limit int, window time.Duration) *MemoryRateLimiter {
 		limit:  limit,
 		window: window,
 		done:   make(chan struct{}),
+	}
+	if l.Validate() != nil {
+		return l
 	}
 	// 定期清理计数器
 	go func() {
@@ -50,10 +67,27 @@ func NewMemoryRateLimiter(limit int, window time.Duration) *MemoryRateLimiter {
 }
 
 func (l *MemoryRateLimiter) Allow(ctx context.Context, key string) bool {
+	if l.Validate() != nil {
+		return false
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.counts[key]++
 	return l.counts[key] <= l.limit
+}
+
+func (l *MemoryRateLimiter) Validate() error {
+	if l == nil {
+		return errors.New("memory rate limiter is nil")
+	}
+	return validateLimiterPolicy(l.limit, l.window)
+}
+
+func (l *MemoryRateLimiter) RetryAfter() time.Duration {
+	if l == nil {
+		return 0
+	}
+	return l.window
 }
 
 func (l *MemoryRateLimiter) Stop() {
@@ -68,19 +102,21 @@ func (l *MemoryRateLimiter) Name() string {
 
 // RedisRateLimiter 基于 Redis 的分布式限流器 (阶段 44 特性)
 type RedisRateLimiter struct {
-	Adapter    *RedisAdapter
-	Limit      int
-	Window     time.Duration
-	Prefix     string
-	FailClosed bool
+	Adapter     *RedisAdapter
+	Limit       int
+	Window      time.Duration
+	Prefix      string
+	FailClosed  bool
+	FailureMode LimiterFailureMode
 }
 
 func NewRedisRateLimiter(adapter *RedisAdapter, limit int, window time.Duration) *RedisRateLimiter {
 	return &RedisRateLimiter{
-		Adapter: adapter,
-		Limit:   limit,
-		Window:  window,
-		Prefix:  "bear_limiter:",
+		Adapter:     adapter,
+		Limit:       limit,
+		Window:      window,
+		Prefix:      "bear_limiter:",
+		FailureMode: LimiterFailureModeOpen,
 	}
 }
 
@@ -100,8 +136,11 @@ return 1
 `
 
 func (l *RedisRateLimiter) Allow(ctx context.Context, key string) bool {
+	if l.Validate() != nil {
+		return false
+	}
 	if l.Adapter == nil || l.Adapter.Client == nil {
-		return !l.FailClosed
+		return !l.failClosed()
 	}
 
 	fullKey := l.Prefix + key
@@ -109,10 +148,46 @@ func (l *RedisRateLimiter) Allow(ctx context.Context, key string) bool {
 	res, err := l.Adapter.Client.Eval(ctx, luaIncr, []string{fullKey}, l.Limit, l.Window.Milliseconds()).Int()
 	if err != nil {
 		slog.ErrorContext(ctx, "Redis RateLimiter error", "error", err)
-		return !l.FailClosed
+		return !l.failClosed()
 	}
 
 	return res == 1
+}
+
+func (l *RedisRateLimiter) Validate() error {
+	if l == nil {
+		return errors.New("redis rate limiter is nil")
+	}
+	if err := validateLimiterPolicy(l.Limit, l.Window); err != nil {
+		return err
+	}
+	switch l.FailureMode {
+	case "", LimiterFailureModeOpen, LimiterFailureModeClosed:
+		return nil
+	default:
+		return fmt.Errorf("limiter failure mode must be %q or %q", LimiterFailureModeOpen, LimiterFailureModeClosed)
+	}
+}
+
+func (l *RedisRateLimiter) RetryAfter() time.Duration {
+	if l == nil {
+		return 0
+	}
+	return l.Window
+}
+
+func (l *RedisRateLimiter) failClosed() bool {
+	return l.FailClosed || l.FailureMode == LimiterFailureModeClosed
+}
+
+func validateLimiterPolicy(limit int, window time.Duration) error {
+	if limit <= 0 {
+		return fmt.Errorf("rate limiter limit must be positive: %d", limit)
+	}
+	if window <= 0 {
+		return fmt.Errorf("rate limiter window must be positive: %s", window)
+	}
+	return nil
 }
 
 func (l *RedisRateLimiter) Name() string {
@@ -123,9 +198,22 @@ func (l *RedisRateLimiter) Name() string {
 func RateLimitMiddleware(limiter RateLimiter) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !limiter.Allow(c.Request.Context(), c.ClientIP()) {
-			c.AbortWithStatusJSON(429, Error(429, "Too many requests (Distributed)"))
+			c.Header("Retry-After", strconv.FormatInt(retryAfterSeconds(limiter), 10))
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, Error(http.StatusTooManyRequests, "Too many requests (Distributed)"))
 			return
 		}
 		c.Next()
 	}
+}
+
+func retryAfterSeconds(limiter RateLimiter) int64 {
+	delay := time.Second
+	if provider, ok := limiter.(interface{ RetryAfter() time.Duration }); ok && provider.RetryAfter() > 0 {
+		delay = provider.RetryAfter()
+	}
+	seconds := int64((delay + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
 }

@@ -2,6 +2,8 @@ package bear
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -41,8 +43,11 @@ func (r *RedisAdapter) CheckReady(ctx context.Context) error {
 	return r.Client.Ping(ctx).Err()
 }
 
-// NewRedisAdapter 创建 Redis 适配器
-func NewRedisAdapter(cfg *RedisConfig) *RedisAdapter {
+// OpenRedisAdapter creates a Redis adapter and reports startup ping failures.
+func OpenRedisAdapter(cfg *RedisConfig) (*RedisAdapter, error) {
+	if cfg == nil {
+		return nil, errors.New("redis config is required")
+	}
 	opts := &redis.Options{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
@@ -67,6 +72,7 @@ func NewRedisAdapter(cfg *RedisConfig) *RedisAdapter {
 	}
 
 	client := redis.NewClient(opts)
+	adapter := &RedisAdapter{Client: client}
 
 	// 链路追踪集成
 	config := GetByType[*SysConfig]()
@@ -81,16 +87,34 @@ func NewRedisAdapter(cfg *RedisConfig) *RedisAdapter {
 	defer cancel()
 
 	if err := client.Ping(ctx).Err(); err != nil {
-		slog.Error("Failed to connect to Redis", "error", err, "addr", cfg.Addr)
-		if cfg.Required {
-			_ = client.Close()
-			panic("required redis connection failed: " + err.Error())
-		}
-		return &RedisAdapter{Client: client}
+		return adapter, fmt.Errorf("ping Redis at %s: %w", cfg.Addr, err)
 	}
 
 	slog.Info("Redis connected successfully", "addr", cfg.Addr)
-	return &RedisAdapter{Client: client}
+	return adapter, nil
+}
+
+// NewRedisAdapter creates a Redis adapter using the legacy panic/fail-open policy.
+// Deprecated: use OpenRedisAdapter to handle startup errors explicitly.
+func NewRedisAdapter(cfg *RedisConfig) *RedisAdapter {
+	adapter, err := OpenRedisAdapter(cfg)
+	if err == nil {
+		return adapter
+	}
+	addr := ""
+	required := false
+	if cfg != nil {
+		addr = cfg.Addr
+		required = cfg.Required
+	}
+	slog.Error("Failed to connect to Redis", "error", err, "addr", addr)
+	if required {
+		if adapter != nil && adapter.Client != nil {
+			_ = adapter.Client.Close()
+		}
+		panic("required redis connection failed: " + err.Error())
+	}
+	return adapter
 }
 
 // CacheUtil 缓存操作工具类

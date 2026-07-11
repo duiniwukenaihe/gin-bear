@@ -168,15 +168,18 @@ type AuthConfig struct {
 }
 
 type DBConfig struct {
-	Enabled            bool   `yaml:"enabled" json:"enabled"`
-	Type               string `yaml:"type" json:"type"`         // mysql, postgres (default: mysql)
-	DSN                string `yaml:"dsn" json:"dsn"`           // 直接指定 DSN
-	Host               string `yaml:"host" json:"host"`         // 主机
-	User               string `yaml:"user" json:"user"`         // 用户名
-	Password           string `yaml:"password" json:"password"` // 密码
-	DBName             string `yaml:"dbname" json:"dbname"`     // 数据库名
-	Port               string `yaml:"port" json:"port"`         // 端口
-	SSLMode            string `yaml:"sslmode" json:"sslmode"`   // SSL 模式
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	Type            string `yaml:"type" json:"type"`         // mysql, postgres (default: mysql)
+	DSN             string `yaml:"dsn" json:"dsn"`           // 直接指定 DSN
+	Host            string `yaml:"host" json:"host"`         // 主机
+	User            string `yaml:"user" json:"user"`         // 用户名
+	Password        string `yaml:"password" json:"password"` // 密码
+	DBName          string `yaml:"dbname" json:"dbname"`     // 数据库名
+	Port            string `yaml:"port" json:"port"`         // 端口
+	PostgresSSLMode string `yaml:"postgres_sslmode" json:"postgres_sslmode"`
+	TLS             string `yaml:"tls" json:"tls"` // MySQL driver TLS mode or registered config name
+	// Deprecated: use PostgresSSLMode for PostgreSQL or TLS for MySQL.
+	SSLMode            string `yaml:"sslmode" json:"sslmode"`
 	MaxIdleConns       int    `yaml:"max_idle_conns" json:"max_idle_conns"`
 	MaxOpenConns       int    `yaml:"max_open_conns" json:"max_open_conns"`
 	ConnMaxLifetime    int    `yaml:"conn_max_lifetime_minutes" json:"conn_max_lifetime_minutes"`
@@ -365,6 +368,14 @@ func (c *SysConfig) validateSemantic() error {
 			return fmt.Errorf("auth.jwt_clock_skew must be between 0 and 5m")
 		}
 	}
+	if c.DB != nil {
+		dbType := strings.ToLower(strings.TrimSpace(c.DB.Type))
+		if dbType == "postgres" || dbType == "postgresql" {
+			if _, err := effectivePostgresSSLMode(c.DB); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -412,6 +423,11 @@ func (c *SysConfig) compatibilityWarnings() []string {
 	add(c.Schema != nil && c.Schema.Enabled, "schema is compatibility-only and is not loaded")
 	add(c.CircuitBreaker != nil && c.CircuitBreaker.Enabled, "circuit_breaker is compatibility-only and is not started")
 	add(c.ConfigCenter != nil && c.ConfigCenter.Enabled, "config_center is compatibility-only and is not loaded")
+	if c.DB != nil {
+		dbType := strings.ToLower(strings.TrimSpace(c.DB.Type))
+		add((dbType == "" || dbType == "mysql") && strings.TrimSpace(c.DB.SSLMode) != "",
+			"database.sslmode is ignored for MySQL; migrate to database.tls")
+	}
 
 	return warnings
 }
@@ -449,7 +465,7 @@ func NewSysConfig() *SysConfig {
 			TokenExpireHours: 24,
 			PublicPaths:      []string{"/health", "/live", "/ready", "/version", "/swagger/*", "/login"},
 		},
-		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root", SSLMode: "disable"},
+		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root"},
 		Redis:  &RedisConfig{Addr: "localhost:6379", Password: "", DB: 0},
 		Casbin: &CasbinConfig{},
 		CORS: &CORSConfig{
