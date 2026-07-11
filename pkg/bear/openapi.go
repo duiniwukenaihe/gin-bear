@@ -2,6 +2,7 @@ package bear
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -86,8 +87,25 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 		}
 	}
 
+	seenRoutes := make(map[string]RouteMetadata)
+	seenOperationIDs := make(map[string]RouteMetadata)
 	// 遍历路由元数据
 	for _, route := range b.routeRegistry {
+		method := strings.ToLower(strings.TrimSpace(route.Method))
+		if method == "" {
+			return nil, fmt.Errorf("openapi route %q missing method", route.Path)
+		}
+		if !openAPIMethodAllowed(method) {
+			return nil, fmt.Errorf("openapi route %q has unsupported method %q", route.Path, route.Method)
+		}
+		if strings.TrimSpace(route.Path) == "" {
+			return nil, fmt.Errorf("openapi route %q missing path", route.HandlerName)
+		}
+		baseOperationID := strings.TrimSpace(route.HandlerName)
+		if baseOperationID == "" {
+			return nil, fmt.Errorf("openapi route %s %s missing operationId", route.Method, route.Path)
+		}
+
 		path := route.Path
 		if route.GroupName != "" && !strings.HasPrefix(path, "/"+route.GroupName) {
 			path = "/" + route.GroupName + path
@@ -96,13 +114,23 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 		path = strings.ReplaceAll(path, "//", "/")
 		publicRoute := openAPIRouteIsPublic(path, config)
 		path = toOpenAPIPath(path)
+		routeKey := method + " " + path
+		if previous, exists := seenRoutes[routeKey]; exists {
+			return nil, fmt.Errorf("duplicate route %s %s for %q and %q", strings.ToUpper(method), path, previous.HandlerName, route.HandlerName)
+		}
+		seenRoutes[routeKey] = route
+		operationID, err := openAPIOperationID(route, method, path, seenOperationIDs)
+		if err != nil {
+			return nil, err
+		}
+		seenOperationIDs[operationID] = route
 
 		if _, exists := schema.Paths[path]; !exists {
 			schema.Paths[path] = make(map[string]interface{})
 		}
 
 		op := map[string]interface{}{
-			"operationId": route.HandlerName,
+			"operationId": operationID,
 			"responses": map[string]interface{}{
 				"200": map[string]interface{}{
 					"description": "OK",
@@ -127,10 +155,53 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 			}
 		}
 
-		schema.Paths[path].(map[string]interface{})[strings.ToLower(route.Method)] = op
+		schema.Paths[path].(map[string]interface{})[method] = op
 	}
 
 	return json.MarshalIndent(schema, "", "  ")
+}
+
+func openAPIOperationID(route RouteMetadata, method, path string, seen map[string]RouteMetadata) (string, error) {
+	operationID := strings.TrimSpace(route.HandlerName)
+	if previous, exists := seen[operationID]; exists {
+		if !openAPIGeneratedOperationID(operationID) {
+			return "", fmt.Errorf("duplicate operationId %q for %s %s and %s %s", operationID, previous.Method, previous.Path, route.Method, route.Path)
+		}
+		operationID = operationID + "_" + openAPIRouteOperationSuffix(method, path)
+		if previous, exists := seen[operationID]; exists {
+			return "", fmt.Errorf("duplicate operationId %q for %s %s and %s %s", operationID, previous.Method, previous.Path, route.Method, route.Path)
+		}
+	}
+	return operationID, nil
+}
+
+func openAPIGeneratedOperationID(operationID string) bool {
+	return strings.HasPrefix(operationID, "func(") || strings.Contains(operationID, "/") || strings.Contains(operationID, "-fm")
+}
+
+func openAPIRouteOperationSuffix(method, path string) string {
+	replacer := strings.NewReplacer(
+		"/", "_",
+		"{", "",
+		"}", "",
+		":", "",
+		"*", "",
+		"-", "_",
+	)
+	suffix := strings.Trim(replacer.Replace(strings.ToLower(method)+"_"+path), "_")
+	if suffix == "" {
+		return "root"
+	}
+	return suffix
+}
+
+func openAPIMethodAllowed(method string) bool {
+	switch method {
+	case "get", "put", "post", "delete", "options", "head", "patch", "trace":
+		return true
+	default:
+		return false
+	}
 }
 
 func addStandardOpenAPIErrorResponses(op map[string]interface{}, includeUnauthorized bool) {
@@ -143,6 +214,8 @@ func addStandardOpenAPIErrorResponses(op map[string]interface{}, includeUnauthor
 	if includeUnauthorized {
 		responses["401"] = openAPIErrorResponse("Unauthorized")
 	}
+	responses["403"] = openAPIErrorResponse("Forbidden")
+	responses["404"] = openAPIErrorResponse("Not Found")
 	responses["500"] = openAPIErrorResponse("Internal Server Error")
 }
 

@@ -98,7 +98,7 @@ middleware:
   slow_request_threshold: "1s"
 
 metrics:
-  enabled: true
+  enabled: false
   path: "/metrics"
 
 plugins:

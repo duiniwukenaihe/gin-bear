@@ -2,7 +2,10 @@ package bear
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -50,25 +53,35 @@ func (h *HealthController) ready(ctx *gin.Context) {
 		container = GetInjector()
 		config = Resolve[*SysConfig](container)
 	}
-	checkCtx, cancel := context.WithTimeout(ctx.Request.Context(), readinessTimeout(config))
+	timeout := readinessTimeout(config)
+	checkCtx, cancel := context.WithTimeout(ctx.Request.Context(), timeout)
 	defer cancel()
 
-	checks := make(map[string]string)
-	ready := true
+	checkers := make([]ReadinessChecker, 0)
 	for _, bean := range container.orderedBeans() {
 		checker, ok := bean.(ReadinessChecker)
 		if !ok {
 			continue
 		}
-		name := checker.Name()
-		if err := checker.CheckReady(checkCtx); err != nil {
+		checkers = append(checkers, checker)
+	}
+	results := runReadinessChecks(checkCtx, timeout, checkers)
+
+	logger := readinessLogger(runtime)
+	checks := make(map[string]string, len(results))
+	ready := true
+	for _, result := range results {
+		if result.Err != nil {
 			ready = false
-			checks[name] = err.Error()
+			checks[result.Name] = "failed"
+			logger.WarnContext(ctx.Request.Context(), "Readiness check failed",
+				"check", result.Name,
+				"error", result.Err,
+			)
 			continue
 		}
-		checks[name] = "ok"
+		checks[result.Name] = "ok"
 	}
-
 	if !ready {
 		ctx.JSON(http.StatusServiceUnavailable, gin.H{
 			"status": "not_ready",
@@ -81,6 +94,45 @@ func (h *HealthController) ready(ctx *gin.Context) {
 		"status": "ready",
 		"checks": checks,
 	})
+}
+
+type readinessResult struct {
+	Name string
+	Err  error
+}
+
+func runReadinessChecks(parent context.Context, timeout time.Duration, checkers []ReadinessChecker) []readinessResult {
+	if len(checkers) == 0 {
+		return nil
+	}
+	sort.Slice(checkers, func(i, j int) bool {
+		return checkers[i].Name() < checkers[j].Name()
+	})
+
+	results := make([]readinessResult, len(checkers))
+	var wg sync.WaitGroup
+	wg.Add(len(checkers))
+	for i, checker := range checkers {
+		i, checker := i, checker
+		go func() {
+			defer wg.Done()
+			childCtx, cancel := context.WithTimeout(parent, timeout)
+			defer cancel()
+			results[i] = readinessResult{
+				Name: checker.Name(),
+				Err:  checker.CheckReady(childCtx),
+			}
+		}()
+	}
+	wg.Wait()
+	return results
+}
+
+func readinessLogger(runtime *Runtime) *slog.Logger {
+	if runtime != nil && runtime.Logger != nil {
+		return runtime.Logger
+	}
+	return slog.Default()
 }
 
 func readinessTimeout(config *SysConfig) time.Duration {

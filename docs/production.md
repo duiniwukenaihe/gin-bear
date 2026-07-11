@@ -119,6 +119,9 @@ Use `log.level` for file-based configuration and `LOG_LEVEL=debug` locally when 
 - `/version` exposes build metadata for the running binary.
 
 Use `/ready` for load balancer readiness and rollout gates.
+Readiness responses expose only `ok` or `failed` per dependency; detailed
+causes are kept in structured logs. Checks run concurrently, each with the
+configured readiness timeout.
 
 Tune readiness checks and graceful shutdown for the service profile:
 
@@ -152,7 +155,8 @@ When building a generated application, target the generated module path in linke
 
 ## Metrics
 
-Enable the built-in Prometheus text endpoint with:
+Production examples keep metrics disabled until explicitly enabled. Enable the
+built-in Prometheus endpoint with:
 
 ```yaml
 metrics:
@@ -169,6 +173,8 @@ metrics:
 - `gin_bear_http_request_duration_seconds_count`
 
 Request metrics are labeled by `method`, Gin route pattern, and `status`.
+Each `Bear` runtime owns an isolated Prometheus registry with Go and process
+collectors, so tests and colocated runtimes do not share HTTP metric state.
 `/metrics` is no longer in the default authentication public-path list. Expose
 it through a separately protected listener, network policy, or an explicit
 `auth.public_paths` entry only when that is intentional.
@@ -186,7 +192,7 @@ tracing:
   sample_rate: 1.0
 ```
 
-Call `app.EnableTracing(ctx)` during startup. The HTTP middleware extracts W3C `traceparent` headers, creates server spans named like `GET /users/:id`, and records method, route, status, client address, request id, and Gin errors. Supported exporters are `stdout`, `otlp`, and `none`.
+Call `app.EnableTracing(ctx)` during startup. The HTTP middleware extracts W3C `traceparent` headers, creates server spans named like `GET /users/:id`, and records method, route, status, client address, generated request id, service version, and Gin errors. Raw query strings are not recorded. Supported exporters are `stdout`, `otlp`, and `none`.
 
 ## OpenAPI And Swagger
 
@@ -206,9 +212,16 @@ The generator uses route metadata and handler function signatures to infer:
 - `json` tags as request body fields.
 - the first non-error handler return value as the `200` response schema.
 
-When auth config is present, the document includes a JWT bearer `BearerAuth` security scheme and top-level security requirement.
+When auth config is present, the document includes a JWT bearer `BearerAuth`
+security scheme and top-level security requirement. Public routes explicitly
+override security with an empty requirement, and generated operations include
+standard JSON error responses for `400`, `403`, `404`, and `500`; authenticated
+private routes also include `401`.
 
-This is a best-effort contract generator. For externally consumed APIs, review the generated document in code review and add explicit documentation around business errors, public-route exceptions, pagination, and non-200 responses.
+Generation fails on invalid route metadata, duplicate method/path entries, and
+duplicate explicit operation IDs. For externally consumed APIs, review the
+generated document in code review and add explicit documentation around
+business errors and pagination.
 
 ## Database Migrations
 

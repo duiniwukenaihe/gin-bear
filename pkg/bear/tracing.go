@@ -39,9 +39,9 @@ func TracingMiddleware(provider oteltrace.TracerProvider, propagator propagation
 			oteltrace.WithAttributes(
 				attribute.String("http.request.method", c.Request.Method),
 				attribute.String("url.path", c.Request.URL.Path),
-				attribute.String("url.query", c.Request.URL.RawQuery),
 				attribute.String("http.route", route),
 				attribute.String("client.address", c.ClientIP()),
+				attribute.String("service.version", Version),
 			),
 		)
 		c.Request = c.Request.WithContext(ctx)
@@ -56,7 +56,7 @@ func TracingMiddleware(provider oteltrace.TracerProvider, propagator propagation
 		}
 		status := c.Writer.Status()
 		span.SetAttributes(attribute.Int("http.response.status_code", status))
-		if requestID := c.GetHeader("X-Request-ID"); requestID != "" {
+		if requestID := traceRequestID(c); requestID != "" {
 			span.SetAttributes(attribute.String("gin_bear.request_id", requestID))
 		}
 		if status >= http.StatusInternalServerError {
@@ -66,6 +66,26 @@ func TracingMiddleware(provider oteltrace.TracerProvider, propagator propagation
 			span.AddEvent("gin.error", oteltrace.WithAttributes(attribute.String("error.message", ginErr.Error())))
 		}
 	}
+}
+
+func traceRequestID(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if value, ok := c.Get(RequestIDKey); ok {
+		if requestID, ok := value.(string); ok && requestID != "" {
+			return requestID
+		}
+	}
+	if c.Request != nil {
+		if requestID, ok := c.Request.Context().Value(RequestIDKey).(string); ok && requestID != "" {
+			return requestID
+		}
+		if requestID := c.GetHeader("X-Request-ID"); requestID != "" {
+			return requestID
+		}
+	}
+	return ""
 }
 
 func tracingRoute(c *gin.Context) string {
@@ -95,7 +115,10 @@ func newTracerProvider(ctx context.Context, cfg *TracingConfig) (*sdktrace.Trace
 	}
 	options := []sdktrace.TracerProviderOption{
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(sampleRate))),
-		sdktrace.WithResource(resource.NewWithAttributes("", attribute.String("service.name", serviceName))),
+		sdktrace.WithResource(resource.NewWithAttributes("",
+			attribute.String("service.name", serviceName),
+			attribute.String("service.version", Version),
+		)),
 	}
 
 	switch strings.ToLower(strings.TrimSpace(cfg.Exporter)) {
