@@ -644,6 +644,9 @@ func applyEnvOverrides(config *SysConfig) {
 		if addr := os.Getenv("REDIS_ADDR"); addr != "" {
 			config.Redis.Addr = addr
 		}
+		if password := os.Getenv("REDIS_PASSWORD"); password != "" {
+			config.Redis.Password = password
+		}
 		if required := os.Getenv("REDIS_REQUIRED"); required != "" {
 			if v, err := strconv.ParseBool(required); err == nil {
 				config.Redis.Required = v

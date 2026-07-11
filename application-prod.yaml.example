@@ -81,7 +81,7 @@ websocket:
 
 auth:
   storage_type: "redis"
-  jwt_secret: "set-with-JWT_SECRET-32-plus-random-chars"
+  jwt_secret: "" # Required via JWT_SECRET.
   jwt_issuer: "https://auth.example.com"
   jwt_audience: "gin-bear-api"
   jwt_clock_skew: "30s"

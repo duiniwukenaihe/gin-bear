@@ -14,7 +14,10 @@ import (
 
 	"github.com/duiniwukenaihe/gin-bear/internal/atomicdir"
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/modfile"
 )
+
+const decimalModuleVersion = "v1.4.0"
 
 type resourceOptions struct {
 	Kind      string
@@ -152,7 +155,54 @@ func generateResource(ctx context.Context, opts resourceOptions) (string, error)
 		return "", fmt.Errorf("publish resource package: %w", err)
 	}
 	published = true
+	if err := pinResourceDependencies(opts.Directory, fields); err != nil {
+		if removeErr := os.RemoveAll(target); removeErr != nil {
+			return "", fmt.Errorf("pin generated dependencies: %w (rollback resource: %v)", err, removeErr)
+		}
+		return "", fmt.Errorf("pin generated dependencies: %w", err)
+	}
 	return filepath.Join("internal", packageName), nil
+}
+
+func pinResourceDependencies(directory string, fields []field) error {
+	needsDecimal := false
+	for _, item := range fields {
+		if item.GoType == "decimal.Decimal" {
+			needsDecimal = true
+			break
+		}
+	}
+	if !needsDecimal {
+		return nil
+	}
+
+	path := filepath.Join(directory, "go.mod")
+	contents, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read go.mod: %w", err)
+	}
+	file, err := modfile.Parse(path, contents, nil)
+	if err != nil {
+		return fmt.Errorf("parse go.mod: %w", err)
+	}
+	if err := file.AddRequire("github.com/shopspring/decimal", decimalModuleVersion); err != nil {
+		return fmt.Errorf("add decimal requirement: %w", err)
+	}
+	formatted, err := file.Format()
+	if err != nil {
+		return fmt.Errorf("format go.mod: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("inspect go.mod: %w", err)
+	}
+	if err := os.WriteFile(path, formatted, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("write go.mod: %w", err)
+	}
+	return nil
 }
 
 func templatesForKind(kind string) (map[string]string, error) {
@@ -385,6 +435,7 @@ func (q *{{.Title}}QueryDTO) Normalize() {
 }
 
 type {{.Title}}Response struct {
+	ID uint ` + "`json:\"id\"`" + `
 	{{- range .Fields}}
 	{{.Name}} {{.GoType}} ` + "`json:\"{{.JSONName}}\"`" + `
 	{{- end}}
@@ -400,13 +451,23 @@ const repositoryTemplate = `package {{.PackageName}}
 
 import (
 	"context"
+	"errors"
 
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
-type {{.Title}}Repository struct { *bear.Repository[{{.Title}}Model] }
+type {{.Title}}Repository struct {
+	*bear.Repository[{{.Title}}Model]
+	Adapter *bear.GormAdapter ` + "`inject:\"-\"`" + `
+}
 
 func (r *{{.Title}}Repository) Name() string { return "{{.Title}}Repository" }
+
+func (r *{{.Title}}Repository) Init(_ context.Context) error {
+	if r.Adapter == nil { return errors.New("{{.Title}}Repository requires GormAdapter") }
+	r.Repository = bear.NewRepository[{{.Title}}Model](r.Adapter)
+	return nil
+}
 
 func (r *{{.Title}}Repository) FindByID(ctx context.Context, id int64) (*{{.Title}}Model, error) {
 	return r.FindOne(ctx, map[string]interface{}{"id": id})
@@ -416,7 +477,9 @@ func (r *{{.Title}}Repository) FindByCondition(ctx context.Context, query *{{.Ti
 	if query == nil { query = &{{.Title}}QueryDTO{} }
 	query.Normalize()
 	db := r.DB(ctx).Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize)
-	return r.FindList(ctx, db)
+	var list []*{{.Title}}Model
+	err := db.Find(&list).Error
+	return list, err
 }
 
 func (r *{{.Title}}Repository) Count(ctx context.Context, query *{{.Title}}QueryDTO) (int64, error) {
@@ -487,6 +550,7 @@ func (s *{{.Title}}Service) Delete(ctx context.Context, id int64) error { return
 
 func (s *{{.Title}}Service) toResponse(model *{{.Title}}Model) *{{.Title}}Response {
 	return &{{.Title}}Response{
+		ID: model.ID,
 		{{- range .Fields}}
 		{{.Name}}: model.{{.Name}},
 		{{- end}}
@@ -554,16 +618,23 @@ const moduleTemplate = `package {{.PackageName}}
 
 import "github.com/duiniwukenaihe/gin-bear/pkg/bear"
 
-type {{.Title}}Module struct{}
+type {{.Title}}Module struct {
+	controller *{{.Title}}Controller
+	service *{{.Title}}Service
+	repository *{{.Title}}Repository
+}
 
 func (m *{{.Title}}Module) Name() string { return "{{.Title}}Module" }
 
 func (m *{{.Title}}Module) Beans() []bear.Bean {
-	return []bear.Bean{&{{.Title}}Service{}, &{{.Title}}Repository{}}
+	if m.repository == nil { m.repository = &{{.Title}}Repository{} }
+	if m.service == nil { m.service = &{{.Title}}Service{} }
+	if m.controller == nil { m.controller = &{{.Title}}Controller{} }
+	return []bear.Bean{m.repository, m.service, m.controller}
 }
 
 func (m *{{.Title}}Module) Build(b *bear.Bear) {
-	b.Mount("/api/v1", &{{.Title}}Controller{})
+	b.Mount("/api/v1", m.controller)
 }
 `
 

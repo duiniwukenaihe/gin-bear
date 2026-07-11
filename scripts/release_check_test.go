@@ -1,6 +1,8 @@
 package scripts
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,6 +78,35 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 	}
 }
 
+func TestAllCICheckoutAndSetupGoActionsUseReleasePins(t *testing.T) {
+	ci := readTestFile(t, "../.github/workflows/ci.yml")
+	checkout := "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"
+	setupGo := "actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0"
+	if count := strings.Count(ci, checkout); count != 3 {
+		t.Fatalf("CI checkout pin count=%d, want 3:\n%s", count, ci)
+	}
+	if count := strings.Count(ci, setupGo); count != 3 {
+		t.Fatalf("CI setup-go pin count=%d, want 3:\n%s", count, ci)
+	}
+	for _, mutable := range []string{"actions/checkout@v", "actions/setup-go@v"} {
+		if strings.Contains(ci, mutable) {
+			t.Fatalf("CI retains mutable action reference %q", mutable)
+		}
+	}
+}
+
+func TestReleaseExpectedVersionMatchesScaffoldDefault(t *testing.T) {
+	const version = "v0.10.0-rc.1"
+	cli := readTestFile(t, "../internal/cli/new.go")
+	if !strings.Contains(cli, `const defaultFrameworkVersion = "`+version+`"`) {
+		t.Fatalf("scaffold default does not match release version %s:\n%s", version, cli)
+	}
+	workflow := readTestFile(t, "../.github/workflows/release.yml")
+	if !strings.Contains(workflow, "RC_EXPECTED_VERSION: "+version) {
+		t.Fatalf("release workflow does not enforce version %s:\n%s", version, workflow)
+	}
+}
+
 func TestRepositoryDependencyChecksDoNotCreateUpdateBranches(t *testing.T) {
 	content, err := os.ReadFile("release-check.sh")
 	if err != nil {
@@ -139,6 +170,25 @@ func TestReleaseCheckOwnsOnlyImplicitCoverageProfile(t *testing.T) {
 				t.Fatalf("release check did not use non-mutating tidy check:\n%s", goCalls)
 			}
 		})
+	}
+}
+
+func TestReleaseCheckForcesNonDowngradableCoverageThresholds(t *testing.T) {
+	repository, state := fakeReleaseRepository(t)
+	command := exec.Command("./scripts/release-check.sh")
+	command.Dir = repository
+	command.Env = append(os.Environ(),
+		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RELEASE_TEST_STATE="+state,
+		"COVERAGE_MINIMUM=1",
+		"CRITICAL_COVERAGE_MINIMUM=1",
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("release check failed: %v\n%s", err, output)
+	}
+	thresholds := strings.TrimSpace(readTestFile(t, filepath.Join(state, "coverage-thresholds")))
+	if thresholds != "70.0 80.0" {
+		t.Fatalf("release coverage thresholds=%q, want enforced 70.0 80.0", thresholds)
 	}
 }
 
@@ -256,6 +306,71 @@ func TestVerifyRCRejectsMissingBaseRefClearly(t *testing.T) {
 	}
 }
 
+func TestVerifyRCRejectsBaseThatIsNotHEADAncestor(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	output, err := runFakeRC(repository, artifact, state, "RC_TEST_BASE_NOT_ANCESTOR=1")
+	if err == nil {
+		t.Fatalf("verify-rc.sh accepted a non-ancestor base:\n%s", output)
+	}
+	if !strings.Contains(string(output), "must be an ancestor of HEAD") {
+		t.Fatalf("non-ancestor failure is not actionable:\n%s", output)
+	}
+}
+
+func TestVerifyRCValidatesAnnotatedReleaseTagAndRecordsSignatureBoundary(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	output, err := runFakeRC(repository, artifact, state,
+		"RC_RELEASE_TAG=v0.10.0-rc.1",
+		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+		"RC_VERIFY_TAG_SIGNATURE=false",
+	)
+	if err != nil {
+		t.Fatalf("verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	metadata := readTestFile(t, filepath.Join(artifact, "metadata.txt"))
+	for _, want := range []string{
+		"release_tag=v0.10.0-rc.1",
+		"release_tag_type=tag",
+		"release_tag_target=fixture-commit",
+		"tag_signature_verification=skipped-no-trusted-keyring",
+		"coverage_minimum=70.0",
+		"critical_coverage_minimum=80.0",
+	} {
+		if !strings.Contains(metadata, want) {
+			t.Fatalf("release metadata missing %q:\n%s", want, metadata)
+		}
+	}
+}
+
+func TestVerifyRCRejectsInvalidReleaseTagContracts(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		env   []string
+		match string
+	}{
+		{name: "lightweight", env: []string{"RC_TEST_TAG_TYPE=commit"}, match: "must be annotated"},
+		{name: "wrong target", env: []string{"RC_TEST_TAG_TARGET=other-commit"}, match: "must target HEAD"},
+		{name: "version mismatch", env: []string{"RC_EXPECTED_VERSION=v0.10.0"}, match: "does not match release version"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository, artifact, state := fakeRCRepository(t)
+			environment := []string{
+				"RC_RELEASE_TAG=v0.10.0-rc.1",
+				"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+				"RC_VERIFY_TAG_SIGNATURE=false",
+			}
+			environment = append(environment, test.env...)
+			output, err := runFakeRC(repository, artifact, state, environment...)
+			if err == nil {
+				t.Fatalf("verify-rc.sh accepted invalid tag contract:\n%s", output)
+			}
+			if !strings.Contains(string(output), test.match) {
+				t.Fatalf("tag contract failure missing %q:\n%s", test.match, output)
+			}
+		})
+	}
+}
+
 func TestVerifyRCHygieneRejectsUnexpectedLocalBranch(t *testing.T) {
 	repository, artifact, state := fakeRCRepository(t)
 	branches := "main,codex/production-baseline,codex/production-framework-v010,codex/unreviewed"
@@ -292,6 +407,8 @@ func TestAPICompatibilityGateUsesCommittedV091ModuleManifest(t *testing.T) {
 		"golang.org/x/exp/cmd/apidiff@",
 		"-m",
 		"api/v0.9.1.txt",
+		"api/v0.9.1.txt.sha256",
+		"sha256",
 		"github.com/duiniwukenaihe/gin-bear",
 	} {
 		if !strings.Contains(script, want) {
@@ -310,6 +427,36 @@ func TestAPICompatibilityGateUsesCommittedV091ModuleManifest(t *testing.T) {
 	} {
 		if !strings.Contains(manifest, packagePath) {
 			t.Fatalf("v0.9.1 API manifest missing public package %q", packagePath)
+		}
+	}
+}
+
+func TestAPICompatibilityBaselineMatchesCommittedSHA256(t *testing.T) {
+	baseline, err := os.ReadFile("api/v0.9.1.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checksum := strings.Fields(readTestFile(t, "api/v0.9.1.txt.sha256"))
+	if len(checksum) != 2 || checksum[1] != "v0.9.1.txt" {
+		t.Fatalf("invalid checksum file: %q", checksum)
+	}
+	want := strings.ToLower(checksum[0])
+	got := sha256.Sum256(baseline)
+	if actual := fmt.Sprintf("%x", got); actual != want {
+		t.Fatalf("baseline SHA256=%s, want %s", actual, want)
+	}
+}
+
+func TestAPICompatibilityGateOffersModuleCacheRebuildWithoutGitHistory(t *testing.T) {
+	script := readTestFile(t, "check-api-compat.sh")
+	for _, want := range []string{"API_BASELINE_REBUILD", "go mod download -json", `baseline_version="v0.9.1"`, `"${module}@${baseline_version}"`} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("API compatibility rebuild missing %q:\n%s", want, script)
+		}
+	}
+	for _, forbidden := range []string{"git clone", "--depth", "git fetch"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("API compatibility rebuild depends on repository history via %q", forbidden)
 		}
 	}
 }
@@ -340,6 +487,11 @@ func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *test
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(filepath.Join(directory, "api", "v0.9.1.txt"), []byte("fixture"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			fixtureHash := sha256.Sum256([]byte("fixture"))
+			checksum := fmt.Sprintf("%x  v0.9.1.txt\n", fixtureHash)
+			if err := os.WriteFile(filepath.Join(directory, "api", "v0.9.1.txt.sha256"), []byte(checksum), 0644); err != nil {
 				t.Fatal(err)
 			}
 			fakeGo := "#!/usr/bin/env bash\nprintf '%s' \"${FAKE_APIDIFF_OUTPUT:-}\"\n"
@@ -415,7 +567,7 @@ func fakeReleaseRepository(t *testing.T) (string, string) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(repository, "scripts", "check-coverage.sh"), []byte("#!/usr/bin/env bash\nset -euo pipefail\ntest -s \"$1\"\n"), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(repository, "scripts", "check-coverage.sh"), []byte("#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s %s\\n' \"${COVERAGE_MINIMUM:-}\" \"${CRITICAL_COVERAGE_MINIMUM:-}\" > \"${RELEASE_TEST_STATE}/coverage-thresholds\"\ntest -s \"$1\"\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(repository, "scripts", "check-api-compat.sh"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0755); err != nil {
@@ -504,9 +656,20 @@ case "${1:-}" in
 		elif [[ "${2:-}" == "--verify" ]]; then
 			if [[ "${RC_TEST_BASE_MISSING:-0}" == "1" ]]; then exit 1; fi
 			printf '%s\n' fixture-base
+		elif [[ "${2:-}" == *'^{commit}' ]]; then printf '%s\n' "${RC_TEST_TAG_TARGET:-fixture-commit}"
 		fi
 		;;
-	merge-base) printf '%s\n' fixture-merge-base ;;
+	merge-base)
+		if [[ "${2:-}" == "--is-ancestor" ]]; then
+			if [[ "${RC_TEST_BASE_NOT_ANCESTOR:-0}" == "1" ]]; then exit 1; fi
+		else
+			printf '%s\n' fixture-merge-base
+		fi
+		;;
+	cat-file)
+		printf '%s\n' "${RC_TEST_TAG_TYPE:-tag}"
+		;;
+	verify-tag) ;;
 	for-each-ref)
 		branches="${RC_TEST_LOCAL_BRANCHES:-main,codex/production-baseline,codex/production-framework-v010}"
 		printf '%s\n' "${branches}" | tr ',' '\n'

@@ -12,9 +12,9 @@ database:
   host: "postgres"
   port: "5432"
   user: "gin_bear"
-  password: "change-me"
+  password: "" # Set with POSTGRES_PASSWORD.
   dbname: "gin_bear"
-  sslmode: "require"
+  sslmode: "verify-full"
 
 tracing:
   enabled: false
@@ -24,7 +24,7 @@ tracing:
   sample_rate: 1.0
 
 auth:
-  jwt_secret: "replace-with-at-least-32-random-characters"
+  jwt_secret: "" # Required via JWT_SECRET.
   token_expire_hours: 24
   public_paths:
     - "/health"

@@ -5,6 +5,9 @@ export GOSUMDB=sum.golang.org
 export GOTOOLCHAIN=go1.25.12
 export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
 
+release_coverage_minimum="70.0"
+release_critical_coverage_minimum="80.0"
+
 BUILD_DIR=""
 coverage_profile=""
 coverage_profile_owned=false
@@ -57,7 +60,9 @@ go test ./... -count=1
 
 echo "==> Measuring repository and critical-chain coverage"
 go test ./... -count=1 -coverprofile="${coverage_profile}"
-scripts/check-coverage.sh "${coverage_profile}"
+printf '==> Enforcing release coverage thresholds: total %s%%, critical %s%%\n' "${release_coverage_minimum}" "${release_critical_coverage_minimum}"
+env COVERAGE_MINIMUM="${release_coverage_minimum}" CRITICAL_COVERAGE_MINIMUM="${release_critical_coverage_minimum}" \
+	scripts/check-coverage.sh "${coverage_profile}"
 
 echo "==> Checking v0.9.1 public API compatibility"
 scripts/check-api-compat.sh

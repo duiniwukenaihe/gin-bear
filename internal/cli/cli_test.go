@@ -93,6 +93,31 @@ func TestExecuteGenPublishesResourceInCurrentProject(t *testing.T) {
 	}
 }
 
+func TestGenerateDecimalResourcePinsDependencyVersion(t *testing.T) {
+	project := t.TempDir()
+	goModPath := filepath.Join(project, "go.mod")
+	if err := os.WriteFile(goModPath, []byte("module example.com/invoice\n\ngo 1.25.12\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := generateResource(context.Background(), resourceOptions{
+		Kind:      "api",
+		Name:      "invoice",
+		Fields:    "amount:decimal",
+		Directory: project,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	goMod, err := os.ReadFile(goModPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(goMod), "github.com/shopspring/decimal v1.4.0") {
+		t.Fatalf("generated decimal dependency is not pinned:\n%s", goMod)
+	}
+}
+
 func TestGenerateResourceCoversKindsAndRejectsUnsafeInputs(t *testing.T) {
 	project := t.TempDir()
 	fields := strings.Join([]string{

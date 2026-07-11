@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 	"gopkg.in/yaml.v2"
 )
 
@@ -356,6 +357,188 @@ func TestResourceGenerationUsesInternalPackagesDecimalAndAtomicWrites(t *testing
 	}
 	if got := readFile(t, marker); got != "keep" {
 		t.Fatalf("existing package was modified: %q", got)
+	}
+}
+
+func TestGeneratedAPIHandlesRealCRUDRequestsWithSQLite(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "crud-api")
+	if err := Generate(context.Background(), Options{
+		Name:             "crud-api",
+		Module:           "example.com/crud-api",
+		Directory:        project,
+		FrameworkVersion: "v0.10.0-rc.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bearBinary := buildCLI(t, "./cmd/bear", "bear")
+	stdout, stderr, code := runCommand(t, project, bearBinary, "gen", "api", "invoice", "--fields", "name:string,email:email")
+	if code != 0 {
+		t.Fatalf("resource generation failed (%d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	runGo(t, project, "mod", "edit", "-replace", "github.com/duiniwukenaihe/gin-bear="+repoRoot(t))
+	runGo(t, project, "mod", "edit", "-require", "github.com/glebarez/sqlite@v1.7.0")
+	fixture := `package crud_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"example.com/crud-api/internal/invoice"
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+)
+
+func TestGeneratedCRUD(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil { t.Fatal(err) }
+	if err := db.AutoMigrate(&invoice.InvoiceModel{}); err != nil { t.Fatal(err) }
+
+	config := bear.NewSysConfig()
+	config.DB.Enabled = false
+	application := bear.Ignite(config)
+	application.Beans(&bear.GormAdapter{DB: db})
+	application.AddModule(&invoice.InvoiceModule{})
+	if err := application.ApplyAll(context.Background()); err != nil { t.Fatal(err) }
+	server := httptest.NewServer(application.Engine)
+	defer server.Close()
+
+	request := func(method, path, body string, wantStatus int) map[string]any {
+		t.Helper()
+		var reader io.Reader
+		if body != "" { reader = bytes.NewBufferString(body) }
+		req, err := http.NewRequest(method, server.URL+path, reader)
+		if err != nil { t.Fatal(err) }
+		if body != "" { req.Header.Set("Content-Type", "application/json") }
+		response, err := http.DefaultClient.Do(req)
+		if err != nil { t.Fatal(err) }
+		defer response.Body.Close()
+		payload, err := io.ReadAll(response.Body)
+		if err != nil { t.Fatal(err) }
+		if response.StatusCode != wantStatus {
+			t.Fatalf("%s %s status=%d want=%d body=%s", method, path, response.StatusCode, wantStatus, payload)
+		}
+		if len(payload) == 0 { return nil }
+		var result map[string]any
+		if err := json.Unmarshal(payload, &result); err != nil { t.Fatalf("decode %s: %v", payload, err) }
+		return result
+	}
+
+	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"first","email":"first@example.com"}` + "`" + `, http.StatusOK)
+	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"invalid","email":"not-an-email"}` + "`" + `, http.StatusBadRequest)
+
+	list := request(http.MethodGet, "/api/v1/invoice?page=1&page_size=10", "", http.StatusOK)
+	if list["total"] != float64(1) { t.Fatalf("list total=%v payload=%v", list["total"], list) }
+	item := request(http.MethodGet, "/api/v1/invoice/1", "", http.StatusOK)
+	if item["id"] != float64(1) || item["name"] != "first" { t.Fatalf("get payload=%v", item) }
+
+	request(http.MethodPut, "/api/v1/invoice/1", ` + "`" + `{"name":"updated"}` + "`" + `, http.StatusOK)
+	updated := request(http.MethodGet, "/api/v1/invoice/1", "", http.StatusOK)
+	if updated["name"] != "updated" || updated["email"] != "first@example.com" { t.Fatalf("updated payload=%v", updated) }
+
+	request(http.MethodDelete, "/api/v1/invoice/1", "", http.StatusOK)
+	empty := request(http.MethodGet, "/api/v1/invoice", "", http.StatusOK)
+	if empty["total"] != float64(0) { t.Fatalf("delete list payload=%v", empty) }
+}
+`
+	if err := os.WriteFile(filepath.Join(project, "crud_e2e_test.go"), []byte(fixture), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGo(t, project, "mod", "tidy")
+	runGo(t, project, "test", ".", "-run", "^TestGeneratedCRUD$", "-count=1")
+}
+
+func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "secure-api")
+	if err := Generate(context.Background(), Options{
+		Name:             "secure-api",
+		Module:           "example.com/secure-api",
+		Directory:        project,
+		FrameworkVersion: "v0.10.0-rc.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runGo(t, project, "mod", "edit", "-replace", "github.com/duiniwukenaihe/gin-bear="+repoRoot(t))
+	runGo(t, project, "mod", "tidy")
+
+	serverBinary := filepath.Join(t.TempDir(), "secure-server")
+	runGo(t, project, "build", "-o", serverBinary, "./cmd/server")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, serverBinary)
+	cmd.Dir = project
+	cmd.Env = append(os.Environ(), "BEAR_ENV=production", fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "JWT_SECRET=", "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("generated production server started without JWT_SECRET:\n%s", output)
+	}
+	if ctx.Err() != nil || !strings.Contains(string(output), "weak jwt secret") {
+		t.Fatalf("generated production startup did not fail closed: context=%v err=%v\n%s", ctx.Err(), err, output)
+	}
+}
+
+func TestProductionExamplesShareSecretFreeTLSContract(t *testing.T) {
+	type productionConfig struct {
+		Database struct {
+			Password string `yaml:"password"`
+			SSLMode  string `yaml:"sslmode"`
+		} `yaml:"database"`
+		Auth struct {
+			JWTSecret string `yaml:"jwt_secret"`
+		} `yaml:"auth"`
+	}
+
+	paths := []string{
+		filepath.Join(repoRoot(t), "application-prod.yaml.example"),
+		filepath.Join(repoRoot(t), "internal", "scaffold", "template", "application-prod.yaml.example.tmpl"),
+	}
+	for _, path := range paths {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config productionConfig
+		if err := yaml.Unmarshal(contents, &config); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		if config.Database.Password != "" {
+			t.Errorf("%s embeds database password %q", path, config.Database.Password)
+		}
+		if config.Database.SSLMode != "verify-full" {
+			t.Errorf("%s sslmode=%q", path, config.Database.SSLMode)
+		}
+		if config.Auth.JWTSecret != "" {
+			t.Errorf("%s embeds JWT secret placeholder %q", path, config.Auth.JWTSecret)
+		}
+	}
+}
+
+func TestRedisPasswordEnvironmentOverridesYAML(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "application.yaml")
+	if err := os.WriteFile(configPath, []byte("redis:\n  password: yaml-secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REDIS_PASSWORD", "environment-secret")
+	config, err := bear.LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Redis.Password != "environment-secret" {
+		t.Fatalf("redis password=%q, want environment override", config.Redis.Password)
 	}
 }
 

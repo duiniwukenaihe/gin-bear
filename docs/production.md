@@ -374,7 +374,7 @@ redis:
   required: true
 ```
 
-Use `redis.required` for file-based configuration. `REDIS_REQUIRED=true` applies the same behavior through environment configuration.
+Use `redis.required` for file-based configuration. `REDIS_REQUIRED=true` applies the same behavior through environment configuration. Keep Redis credentials out of YAML and set `REDIS_PASSWORD` at process startup; it overrides `redis.password`.
 
 ## Code Generation
 
@@ -385,6 +385,20 @@ bear gen api user-profile --fields "name:string,email:email,age:int,birthday:dat
 ```
 
 Generated query DTOs default to page `1`, page size `20`, and cap page size at `100`.
+An API module owns one repository, service, and controller bean set. Register the
+generated module from the scaffold extension point before `ApplyAll` runs:
+
+```go
+import "my-app/internal/userprofile"
+
+func configure(application *bear.Bear) {
+    application.AddModule(&userprofile.UserProfileModule{})
+}
+```
+
+The generated repository requires the application's `GormAdapter`. Decimal
+fields add `github.com/shopspring/decimal v1.4.0` to `go.mod` so generation does
+not resolve a floating dependency version.
 
 ## Request Binding
 
