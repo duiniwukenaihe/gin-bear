@@ -10,12 +10,63 @@ apidiff="golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597"
 
 network_flag="${API_COMPAT_ALLOW_NETWORK-0}"
 case "${network_flag}" in
-0 | 1) ;;
+0)
+	network_mode="offline"
+	export GOPROXY=off
+	export GOSUMDB=off
+	export GOTOOLCHAIN=local
+	;;
+1)
+	network_mode="online-opt-in"
+	export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
+	;;
 *)
 	printf 'API_COMPAT_ALLOW_NETWORK must be 0 or 1\n' >&2
 	exit 1
 	;;
 esac
+
+rebuild_flag="${API_BASELINE_REBUILD-0}"
+case "${rebuild_flag}" in
+0) rebuild_mode="disabled" ;;
+1) rebuild_mode="enabled" ;;
+*)
+	printf 'API_BASELINE_REBUILD must be 0 or 1\n' >&2
+	exit 1
+	;;
+esac
+
+apidiff_command=()
+if [[ -n "${APIDIFF_BIN:-}" ]]; then
+	if [[ ! -x "${APIDIFF_BIN}" ]]; then
+		printf 'APIDIFF_BIN must name an executable file: %s\n' "${APIDIFF_BIN}" >&2
+		exit 1
+	fi
+	apidiff_command=("${APIDIFF_BIN}")
+	apidiff_source="controlled-path"
+elif [[ "${network_flag}" == "1" ]]; then
+	apidiff_command=(go run "${apidiff}")
+	apidiff_source="pinned-go-run"
+else
+	printf 'APIDIFF_BIN is required for offline API compatibility checks; set API_COMPAT_ALLOW_NETWORK=1 for the pinned fallback\n' >&2
+	exit 1
+fi
+
+record_mode() {
+	local line
+	for line in \
+		"api_compat_network=${network_mode}" \
+		"api_compat_network_opt_in=${network_flag}" \
+		"api_baseline_rebuild=${rebuild_mode}" \
+		"api_baseline_rebuild_opt_in=${rebuild_flag}" \
+		"apidiff_source=${apidiff_source}"; do
+		printf '%s\n' "${line}"
+		if [[ -n "${API_COMPAT_METADATA:-}" ]]; then
+			printf '%s\n' "${line}" >>"${API_COMPAT_METADATA}"
+		fi
+	done
+}
+record_mode
 
 if [[ ! -f "${baseline}" ]]; then
 	printf 'v0.9.1 API manifest not found: %s\n' "${baseline}" >&2
@@ -58,7 +109,7 @@ rebuild_baseline() {
 	find "${temporary}/module" -type f -name '*.bak' -delete
 	(
 		cd "${temporary}/module"
-		GOWORK=off go run "${apidiff}" -m -w "${rebuilt}" "${module}"
+		GOWORK=off "${apidiff_command[@]}" -m -w "${rebuilt}" "${module}"
 	)
 	if ! cmp -s "${baseline}" "${rebuilt}"; then
 		printf 'public %s@%s rebuild does not match committed API baseline\n' "${module}" "${baseline_version}" >&2
@@ -69,27 +120,10 @@ rebuild_baseline() {
 	printf 'v0.9.1 API baseline reproducibly rebuilt from the public module cache\n'
 }
 
-rebuild_flag="${API_BASELINE_REBUILD-0}"
 case "${rebuild_flag}" in
 0) ;;
 1) rebuild_baseline ;;
-*)
-	printf 'API_BASELINE_REBUILD must be 0 or 1\n' >&2
-	exit 1
-	;;
 esac
-
-apidiff_command=()
-if [[ -n "${APIDIFF_BIN:-}" ]]; then
-	apidiff_command=("${APIDIFF_BIN}")
-elif apidiff_bin="$(command -v apidiff)"; then
-	apidiff_command=("${apidiff_bin}")
-elif [[ "${network_flag}" == "1" ]]; then
-	apidiff_command=(go run "${apidiff}")
-else
-	printf 'apidiff is required for offline API compatibility checks; install it or set API_COMPAT_ALLOW_NETWORK=1\n' >&2
-	exit 1
-fi
 
 if ! incompatible="$("${apidiff_command[@]}" -m -incompatible "${baseline}" "${module}")"; then
 	printf 'v0.9.1 API compatibility analysis failed\n' >&2

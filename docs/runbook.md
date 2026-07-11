@@ -10,10 +10,11 @@
    GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
    ```
 3. Before an RC or tag, run the complete audited gate with an explicit shuffle
-   seed:
+   seed. The default is offline and therefore requires preinstalled tools, a
+   populated module cache, and a local govulncheck database:
 
    ```bash
-   SHUFFLE_SEED=20260711 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify-rc
+   SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff make verify-rc
    ```
 4. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
 5. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
@@ -44,19 +45,33 @@ and grants `contents: write` only to the release job. CI resolves
 The pushed release tag must be annotated, match the dynamic
 `RC_EXPECTED_VERSION` supplied from `github.ref_name`, and target the exact
 candidate HEAD. This permits later RC and final tags without editing a pinned
-workflow version.
+workflow version. GoReleaser injects its normalized dynamic `.Version` into
+`pkg/bear.Version`; the CLI derives the scaffold dependency from that value and
+restores the leading `v`, while local `dev` builds retain the development
+default.
 
 GitHub-hosted CI has no project trust keyring, so it records
-`tag_signature_verification=skipped-no-trusted-keyring`; this is not signature
-verification. A local release operator with the trusted signing keys must run:
+`signature_policy=false` and
+`tag_signature_verification=explicitly-exempted`; this is an explicit release
+workflow exemption, not signature verification. A local release operator with
+an isolated trusted `GNUPGHOME` must run:
 
 ```bash
-RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.10.0-rc.1 RC_EXPECTED_VERSION=v0.10.0-rc.1 RC_VERIFY_TAG_SIGNATURE=true SHUFFLE_SEED=20260711 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify-rc
+RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.10.0-rc.1 RC_EXPECTED_VERSION=v0.10.0-rc.1 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff make verify-rc
 ```
 
-When `RC_VERIFY_TAG_SIGNATURE` is set, it must be exactly `true` or `false` and
-`RC_RELEASE_TAG` must also be set. Omitting the signature variable and release
-tag is the only non-release, not-applicable combination.
+When `RC_RELEASE_TAG` is non-empty, `RC_VERIFY_TAG_SIGNATURE` is mandatory and
+must be exactly `true` or `false`. `true` also requires
+`RC_TRUSTED_KEYRING` to name an isolated `GNUPGHOME`; verification must emit
+both `VALIDSIG` and `TRUST_FULLY` or `TRUST_ULTIMATE`. `false` is recorded as an
+explicit exemption. Supplying the signature variable without a release tag is
+invalid.
+
+The workflow installs pinned `staticcheck`, `govulncheck`, and `apidiff`
+binaries before the gate. It explicitly sets `RC_ALLOW_NETWORK=1`, recorded as
+`network_mode=online-opt-in`, because govulncheck refreshes vulnerability data.
+The API gate still receives the controlled `APIDIFF_BIN` and leaves
+`API_COMPAT_ALLOW_NETWORK=0`.
 
 The RC path always enforces total coverage `70.0` and every critical group
 `80.0`; lower caller-provided environment values do not reduce these gates.
@@ -101,26 +116,32 @@ critical coverage scaffold 82.9%
 Public API compatibility is checked without repository history or local tags:
 
 ```bash
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/check-api-compat.sh
+APIDIFF_BIN=/opt/gin-bear/bin/apidiff scripts/check-api-compat.sh
 ```
 
 The committed `scripts/api/v0.9.1.txt` module manifest covers every public Go
 package from v0.9.1. The pinned official `apidiff` gate permits additions and
 rejects removals or incompatible changes; the separate v0.9 consumer fixture is
 also compiled by `go test ./...`. The gate first checks the committed SHA-256
-sidecar. The default path uses an installed `apidiff` binary and does not invoke
-`go run module@version`; set `API_COMPAT_ALLOW_NETWORK=1` to opt into that pinned
-fallback. Set `API_BASELINE_REBUILD=1` to rebuild the manifest from the public
+sidecar. The default path requires the controlled `APIDIFF_BIN` and never trusts
+an arbitrary PATH binary or invokes `go run module@version`; set
+`API_COMPAT_ALLOW_NETWORK=1` to opt into the pinned fallback. Set
+`API_BASELINE_REBUILD=1` to rebuild the manifest from the public
 `v0.9.1` Go module cache and compare it byte for byte; this path does not use a
 local tag, clone, or shallow repository history. Reconstruction is an explicit
 manual or independent audit and is not required by the default offline gate,
 which checks only the committed hash and additive API compatibility. The release
-workflow prepares the pinned binary before invoking that offline gate.
+workflow prepares the pinned binary before invoking that offline gate. The
+network switch, rebuild switch, and tool source are printed to stdout and
+appended to `API_COMPAT_METADATA` when that path is provided.
 
 Remote branch hygiene is also offline by default. Set `RC_REMOTE_HYGIENE=1` to
-opt into `git ls-remote --heads origin`. Both network switches accept only `0`
-or `1`. When `SHUFFLE_SEED` is omitted, `verify-rc` derives a stable seed from
-the candidate commit and tree.
+opt into `git ls-remote --heads origin`. `RC_ALLOW_NETWORK=1` separately opts
+the full RC gate into an online Go proxy, tool fallback, and vulnerability DB;
+the default forces `GOPROXY=off`, `GOSUMDB=off`, and `GOTOOLCHAIN=local`.
+Offline mode does not promise to populate an empty `GOMODCACHE`. All switches
+accept only `0` or `1`. When `SHUFFLE_SEED` is omitted, `verify-rc` derives a
+stable seed from the candidate commit and tree.
 
 Run the release-only compatibility test once with:
 
@@ -141,7 +162,7 @@ pinned tool versions, shuffle seed `20260711`, each command and exit code, and
 clean before/after worktree status:
 
 ```bash
-SHUFFLE_SEED=20260711 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify-rc
+SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff make verify-rc
 ```
 
 By default logs are retained in a `mktemp` directory outside the repository;

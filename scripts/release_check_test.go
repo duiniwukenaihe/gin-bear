@@ -97,6 +97,7 @@ func TestAllCICheckoutAndSetupGoActionsUseReleasePins(t *testing.T) {
 
 func TestReleaseExpectedVersionComesFromPushedTag(t *testing.T) {
 	workflow := readTestFile(t, "../.github/workflows/release.yml")
+	releaseConfig := readTestFile(t, "../.goreleaser.yml")
 	if !strings.Contains(workflow, "RC_EXPECTED_VERSION: ${{ github.ref_name }}") {
 		t.Fatalf("release workflow does not pass the pushed tag as the expected module version:\n%s", workflow)
 	}
@@ -109,6 +110,9 @@ func TestReleaseExpectedVersionComesFromPushedTag(t *testing.T) {
 	}
 	if strings.Contains(workflow, "API_COMPAT_ALLOW_NETWORK:") {
 		t.Fatalf("release verification gate enables API network fallback:\n%s", workflow)
+	}
+	if !strings.Contains(releaseConfig, "pkg/bear.Version={{ .Version }}") || !strings.Contains(readTestFile(t, "../internal/cli/new.go"), "bear.Version") {
+		t.Fatalf("released CLI does not derive its scaffold default from the GoReleaser-injected version:\n%s", releaseConfig)
 	}
 }
 
@@ -335,6 +339,36 @@ func TestVerifyRCRemoteHygieneIsExplicitOptIn(t *testing.T) {
 	}
 }
 
+func TestVerifyRCDefaultModeUsesLocalToolsWithoutNetworkCommands(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	if output, err := runFakeRC(repository, artifact, state); err != nil {
+		t.Fatalf("offline verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	goCalls := readTestFile(t, filepath.Join(state, "go-calls"))
+	if strings.Contains(goCalls, " run ") || strings.Contains(goCalls, "GOPROXY=https://") {
+		t.Fatalf("default RC verification attempted a network-capable command:\n%s", goCalls)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(goCalls), "\n") {
+		if !strings.HasPrefix(line, "GOPROXY=off ") {
+			t.Fatalf("default RC Go command was not forced offline: %q\n%s", line, goCalls)
+		}
+	}
+	metadata := readTestFile(t, filepath.Join(artifact, "metadata.txt"))
+	for _, want := range []string{
+		"network_mode=offline",
+		"GOPROXY=off",
+		"staticcheck_source=local-binary",
+		"govulncheck_source=local-binary",
+	} {
+		if !strings.Contains(metadata, want) {
+			t.Fatalf("offline metadata missing %q:\n%s", want, metadata)
+		}
+	}
+	if calls := readTestFile(t, filepath.Join(state, "govulncheck-calls")); !strings.Contains(calls, "-db ") {
+		t.Fatalf("offline govulncheck did not use the controlled local database:\n%s", calls)
+	}
+}
+
 func TestVerifyRCRejectsInvalidRemoteHygieneFlag(t *testing.T) {
 	repository, artifact, state := fakeRCRepository(t)
 	output, err := runFakeRC(repository, artifact, state, "RC_REMOTE_HYGIENE=banana")
@@ -383,12 +417,86 @@ func TestVerifyRCValidatesAnnotatedReleaseTagAndRecordsSignatureBoundary(t *test
 		"release_tag=v0.10.0-rc.1",
 		"release_tag_type=tag",
 		"release_tag_target=fixture-commit",
-		"tag_signature_verification=skipped-no-trusted-keyring",
+		"signature_policy=false",
+		"tag_signature_verification=explicitly-exempted",
 		"coverage_minimum=70.0",
 		"critical_coverage_minimum=80.0",
 	} {
 		if !strings.Contains(metadata, want) {
 			t.Fatalf("release metadata missing %q:\n%s", want, metadata)
+		}
+	}
+}
+
+func TestVerifyRCRequiresExplicitSignaturePolicyForReleaseTags(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	output, err := runFakeRC(repository, artifact, state,
+		"RC_RELEASE_TAG=v0.10.0-rc.1",
+		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+	)
+	if err == nil {
+		t.Fatalf("verify-rc.sh accepted a release tag without an explicit signature policy:\n%s", output)
+	}
+	if !strings.Contains(string(output), "RC_VERIFY_TAG_SIGNATURE must be explicitly set to true or false when RC_RELEASE_TAG is set") {
+		t.Fatalf("missing signature policy failure is not actionable:\n%s", output)
+	}
+}
+
+func TestVerifyRCSignatureVerificationRequiresTrustedKeyring(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	output, err := runFakeRC(repository, artifact, state,
+		"RC_RELEASE_TAG=v0.10.0-rc.1",
+		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+		"RC_VERIFY_TAG_SIGNATURE=true",
+	)
+	if err == nil {
+		t.Fatalf("verify-rc.sh verified a release tag without a trusted keyring:\n%s", output)
+	}
+	if !strings.Contains(string(output), "RC_TRUSTED_KEYRING") {
+		t.Fatalf("missing trusted keyring failure is not actionable:\n%s", output)
+	}
+}
+
+func TestVerifyRCSignatureVerificationRequiresTrustedStatus(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	keyring := filepath.Join(repository, "trusted-gnupg")
+	if err := os.MkdirAll(keyring, 0700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runFakeRC(repository, artifact, state,
+		"RC_RELEASE_TAG=v0.10.0-rc.1",
+		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+		"RC_VERIFY_TAG_SIGNATURE=true",
+		"RC_TRUSTED_KEYRING="+keyring,
+		"RC_TEST_SIGNATURE_UNTRUSTED=1",
+	)
+	if err == nil {
+		t.Fatalf("verify-rc.sh accepted a valid but untrusted tag signature:\n%s", output)
+	}
+	if !strings.Contains(string(output), "not trusted by RC_TRUSTED_KEYRING") {
+		t.Fatalf("untrusted signature failure is not actionable:\n%s", output)
+	}
+}
+
+func TestVerifyRCRecordsTrustedSignatureVerification(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	keyring := filepath.Join(repository, "trusted-gnupg")
+	if err := os.MkdirAll(keyring, 0700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runFakeRC(repository, artifact, state,
+		"RC_RELEASE_TAG=v0.10.0-rc.1",
+		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+		"RC_VERIFY_TAG_SIGNATURE=true",
+		"RC_TRUSTED_KEYRING="+keyring,
+	)
+	if err != nil {
+		t.Fatalf("trusted signature fixture failed: %v\n%s", err, output)
+	}
+	metadata := readTestFile(t, filepath.Join(artifact, "metadata.txt"))
+	for _, want := range []string{"signature_policy=true", "tag_signature_verification=verified-with-trusted-keyring"} {
+		if !strings.Contains(metadata, want) {
+			t.Fatalf("trusted signature metadata missing %q:\n%s", want, metadata)
 		}
 	}
 }
@@ -574,6 +682,101 @@ func TestAPICompatibilityGateRejectsInvalidNetworkFlag(t *testing.T) {
 	}
 }
 
+func TestAPICompatibilityGateRejectsUncontrolledPathAPIDiff(t *testing.T) {
+	directory, bin := fakeAPICompatibilityDirectory(t)
+	command := exec.Command("./check-api-compat.sh")
+	command.Dir = directory
+	command.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_API_STATE="+directory,
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("API gate accepted an arbitrary PATH apidiff binary:\n%s", output)
+	}
+	if !strings.Contains(string(output), "APIDIFF_BIN") {
+		t.Fatalf("uncontrolled apidiff failure is not actionable:\n%s", output)
+	}
+}
+
+func TestAPICompatibilityGateRecordsControlledOfflineMode(t *testing.T) {
+	directory, bin := fakeAPICompatibilityDirectory(t)
+	metadata := filepath.Join(directory, "metadata.txt")
+	command := exec.Command("./check-api-compat.sh")
+	command.Dir = directory
+	command.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_API_STATE="+directory,
+		"APIDIFF_BIN="+filepath.Join(bin, "apidiff"),
+		"API_COMPAT_METADATA="+metadata,
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("controlled offline API gate failed: %v\n%s", err, output)
+	}
+	for _, evidence := range []string{string(output), readTestFile(t, metadata)} {
+		for _, want := range []string{
+			"api_compat_network=offline",
+			"api_baseline_rebuild=disabled",
+			"apidiff_source=controlled-path",
+		} {
+			if !strings.Contains(evidence, want) {
+				t.Fatalf("API compatibility evidence missing %q:\n%s", want, evidence)
+			}
+		}
+	}
+}
+
+func TestAPICompatibilityGateRecordsPinnedOnlineFallback(t *testing.T) {
+	directory, bin := fakeAPICompatibilityDirectory(t)
+	metadata := filepath.Join(directory, "metadata.txt")
+	command := exec.Command("./check-api-compat.sh")
+	command.Dir = directory
+	command.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_API_STATE="+directory,
+		"API_COMPAT_ALLOW_NETWORK=1",
+		"API_COMPAT_METADATA="+metadata,
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pinned online API fallback failed: %v\n%s", err, output)
+	}
+	for _, evidence := range []string{string(output), readTestFile(t, metadata)} {
+		for _, want := range []string{"api_compat_network=online-opt-in", "apidiff_source=pinned-go-run"} {
+			if !strings.Contains(evidence, want) {
+				t.Fatalf("online API compatibility evidence missing %q:\n%s", want, evidence)
+			}
+		}
+	}
+	if calls := readTestFile(t, filepath.Join(directory, "go-calls")); !strings.Contains(calls, "run golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597") {
+		t.Fatalf("online fallback did not use the pinned apidiff module:\n%s", calls)
+	}
+}
+
+func TestAPICompatibilityGateRecordsOptInBaselineRebuild(t *testing.T) {
+	directory, bin := fakeAPICompatibilityDirectory(t)
+	metadata := filepath.Join(directory, "metadata.txt")
+	command := exec.Command("./check-api-compat.sh")
+	command.Dir = directory
+	command.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_API_STATE="+directory,
+		"APIDIFF_BIN="+filepath.Join(bin, "apidiff"),
+		"API_COMPAT_METADATA="+metadata,
+		"API_BASELINE_REBUILD=1",
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("baseline rebuild fixture unexpectedly completed:\n%s", output)
+	}
+	for _, evidence := range []string{string(output), readTestFile(t, metadata)} {
+		if !strings.Contains(evidence, "api_baseline_rebuild=enabled") {
+			t.Fatalf("baseline rebuild mode was not recorded:\n%s", evidence)
+		}
+	}
+}
+
 func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -584,40 +787,10 @@ func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *test
 		{name: "removal is incompatible", output: "- ./pkg/bear.LegacyExport: removed\n", wantFailed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			directory := t.TempDir()
-			bin := filepath.Join(directory, "bin")
-			if err := os.MkdirAll(filepath.Join(directory, "api"), 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(bin, 0755); err != nil {
-				t.Fatal(err)
-			}
-			script, err := os.ReadFile("check-api-compat.sh")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(directory, "check-api-compat.sh"), script, 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(directory, "api", "v0.9.1.txt"), []byte("fixture"), 0644); err != nil {
-				t.Fatal(err)
-			}
-			fixtureHash := sha256.Sum256([]byte("fixture"))
-			checksum := fmt.Sprintf("%x  v0.9.1.txt\n", fixtureHash)
-			if err := os.WriteFile(filepath.Join(directory, "api", "v0.9.1.txt.sha256"), []byte(checksum), 0644); err != nil {
-				t.Fatal(err)
-			}
-			fakeGo := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${FAKE_API_STATE}/go-calls\"\nexit 99\n"
-			if err := os.WriteFile(filepath.Join(bin, "go"), []byte(fakeGo), 0755); err != nil {
-				t.Fatal(err)
-			}
-			fakeAPIDiff := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${FAKE_API_STATE}/apidiff-calls\"\nprintf '%s' \"${FAKE_APIDIFF_OUTPUT:-}\"\n"
-			if err := os.WriteFile(filepath.Join(bin, "apidiff"), []byte(fakeAPIDiff), 0755); err != nil {
-				t.Fatal(err)
-			}
+			directory, bin := fakeAPICompatibilityDirectory(t)
 			command := exec.Command("./check-api-compat.sh")
 			command.Dir = directory
-			command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_API_STATE="+directory, "FAKE_APIDIFF_OUTPUT="+test.output)
+			command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_API_STATE="+directory, "FAKE_APIDIFF_OUTPUT="+test.output, "APIDIFF_BIN="+filepath.Join(bin, "apidiff"))
 			output, err := command.CombinedOutput()
 			if test.wantFailed && err == nil {
 				t.Fatalf("API gate accepted incompatible output:\n%s", output)
@@ -630,6 +803,42 @@ func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *test
 			}
 		})
 	}
+}
+
+func fakeAPICompatibilityDirectory(t *testing.T) (string, string) {
+	t.Helper()
+	directory := t.TempDir()
+	bin := filepath.Join(directory, "bin")
+	if err := os.MkdirAll(filepath.Join(directory, "api"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(bin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile("check-api-compat.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "check-api-compat.sh"), script, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "api", "v0.9.1.txt"), []byte("fixture"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fixtureHash := sha256.Sum256([]byte("fixture"))
+	checksum := fmt.Sprintf("%x  v0.9.1.txt\n", fixtureHash)
+	if err := os.WriteFile(filepath.Join(directory, "api", "v0.9.1.txt.sha256"), []byte(checksum), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fakeGo := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${FAKE_API_STATE}/go-calls\"\nif [[ \"${1:-}\" == \"run\" ]]; then printf '%s' \"${FAKE_APIDIFF_OUTPUT:-}\"; exit 0; fi\nexit 99\n"
+	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(fakeGo), 0755); err != nil {
+		t.Fatal(err)
+	}
+	fakeAPIDiff := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${FAKE_API_STATE}/apidiff-calls\"\nprintf '%s' \"${FAKE_APIDIFF_OUTPUT:-}\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "apidiff"), []byte(fakeAPIDiff), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return directory, bin
 }
 
 func TestGeneratedReleaseE2EUsesPublicCLIAndPreservesGeneratedApp(t *testing.T) {
@@ -674,6 +883,11 @@ func fakeReleaseRepository(t *testing.T) (string, string) {
 			t.Fatal(err)
 		}
 	}
+	vulnDB := filepath.Join(repository, "vulndb")
+	if err := os.MkdirAll(vulnDB, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVULNCHECK_DB", "file://"+vulnDB)
 	for _, name := range []string{"release-check.sh", "check-coverage.sh", "critical-coverage-files.txt"} {
 		contents, err := os.ReadFile(name)
 		if err != nil {
@@ -726,7 +940,8 @@ set -euo pipefail
 if [[ "${1:-}" == "rev-parse" ]]; then printf '%s\n' deadbee; fi
 exit 0
 `
-	for name, contents := range map[string]string{"go": fakeGo, "git": fakeGit} {
+	fakeTool := "#!/usr/bin/env bash\nexit 0\n"
+	for name, contents := range map[string]string{"go": fakeGo, "git": fakeGit, "staticcheck": fakeTool, "govulncheck": fakeTool} {
 		if err := os.WriteFile(filepath.Join(repository, "bin", name), []byte(contents), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -745,6 +960,9 @@ func fakeRCRepository(t *testing.T) (string, string, string) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.MkdirAll(filepath.Join(repository, "vulndb"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	verifyScript, err := os.ReadFile("verify-rc.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -757,11 +975,19 @@ func fakeRCRepository(t *testing.T) (string, string, string) {
 	}
 	fakeGo := `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >> "${RC_TEST_STATE}/go-calls"
+printf 'GOPROXY=%s %s\n' "${GOPROXY:-}" "$*" >> "${RC_TEST_STATE}/go-calls"
 if [[ "${1:-}" == "version" ]]; then printf '%s\n' 'go version go1.25.12 fixture'; fi
 if [[ "${1:-} ${2:-} ${3:-}" == "run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -version" ]]; then printf '%s\n' 'staticcheck fixture'; fi
 if [[ "${1:-} ${2:-} ${3:-}" == "run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -version" ]]; then printf '%s\n' 'govulncheck fixture'; fi
 exit 0
+`
+	fakeStaticcheck := `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${RC_TEST_STATE}/staticcheck-calls"
+if [[ "${1:-}" == "-version" ]]; then printf '%s\n' 'staticcheck 2026.1 (0.7.0)'; fi
+`
+	fakeGovulncheck := `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${RC_TEST_STATE}/govulncheck-calls"
+if [[ "${1:-}" == "-version" ]]; then printf '%s\n' 'Go: go1.25.12 Scanner: govulncheck@v1.6.0'; fi
 `
 	fakeGit := `#!/usr/bin/env bash
 set -euo pipefail
@@ -789,7 +1015,12 @@ case "${1:-}" in
 	cat-file)
 		printf '%s\n' "${RC_TEST_TAG_TYPE:-tag}"
 		;;
-	verify-tag) ;;
+	verify-tag)
+		printf '%s\n' '[GNUPG:] VALIDSIG fixture' >&2
+		if [[ "${RC_TEST_SIGNATURE_UNTRUSTED:-0}" != "1" ]]; then
+			printf '%s\n' '[GNUPG:] TRUST_ULTIMATE 0 pgp' >&2
+		fi
+		;;
 	for-each-ref)
 		branches="${RC_TEST_LOCAL_BRANCHES:-main,codex/production-baseline,codex/production-framework-v010}"
 		printf '%s\n' "${branches}" | tr ',' '\n'
@@ -808,7 +1039,7 @@ exit 0
 	fakeDate := `#!/usr/bin/env bash
 printf '%s\n' "${RC_TEST_DATE:-123}"
 `
-	for name, contents := range map[string]string{"go": fakeGo, "git": fakeGit, "date": fakeDate} {
+	for name, contents := range map[string]string{"go": fakeGo, "git": fakeGit, "date": fakeDate, "staticcheck": fakeStaticcheck, "govulncheck": fakeGovulncheck} {
 		if err := os.WriteFile(filepath.Join(repository, "bin", name), []byte(contents), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -824,6 +1055,7 @@ func runFakeRC(repository, artifact, state string, extraEnvironment ...string) (
 		"RC_ARTIFACT_DIR="+artifact,
 		"RC_TEST_STATE="+state,
 		"RC_BASE_REF=main",
+		"GOVULNCHECK_DB=file://"+filepath.Join(repository, "vulndb"),
 	)
 	command.Env = append(command.Env, extraEnvironment...)
 	return command.CombinedOutput()

@@ -3,12 +3,25 @@ package cli
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/duiniwukenaihe/gin-bear/internal/scaffold"
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 	"github.com/spf13/cobra"
 )
 
-const defaultFrameworkVersion = "v0.10.0-rc.1"
+const developmentFrameworkVersion = "v0.10.0-rc.1"
+
+func defaultFrameworkVersion() string {
+	version := strings.TrimSpace(bear.Version)
+	if version == "" || version == "dev" {
+		return developmentFrameworkVersion
+	}
+	if !strings.HasPrefix(version, "v") {
+		version = "v" + version
+	}
+	return version
+}
 
 func newCommand() *cobra.Command {
 	var module string
@@ -46,6 +59,6 @@ func newCommand() *cobra.Command {
 	}
 	command.Flags().StringVar(&module, "module", "", "Go module path (defaults to project name)")
 	command.Flags().StringVarP(&directory, "directory", "d", "", "destination directory (defaults to project name)")
-	command.Flags().StringVar(&frameworkVersion, "framework-version", defaultFrameworkVersion, "gin-bear framework version")
+	command.Flags().StringVar(&frameworkVersion, "framework-version", defaultFrameworkVersion(), "gin-bear framework version")
 	return command
 }

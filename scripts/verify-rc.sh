@@ -1,8 +1,73 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-export GOSUMDB=sum.golang.org
-export GOTOOLCHAIN=go1.25.12
+network_flag="${RC_ALLOW_NETWORK-0}"
+case "${network_flag}" in
+0)
+	network_mode="offline"
+	export GOPROXY=off
+	export GOSUMDB=off
+	export GOTOOLCHAIN=local
+	;;
+1)
+	network_mode="online-opt-in"
+	export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
+	export GOSUMDB="${GOSUMDB:-sum.golang.org}"
+	export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.25.12}"
+	;;
+*)
+	printf 'RC_ALLOW_NETWORK must be 0 or 1\n' >&2
+	exit 1
+	;;
+esac
+
+resolve_tool() {
+	local env_name="$1"
+	local command_name="$2"
+	local pinned_module="$3"
+	local configured="${!env_name:-}"
+	if [[ -n "${configured}" ]]; then
+		if [[ ! -x "${configured}" ]]; then
+			printf '%s must name an executable file: %s\n' "${env_name}" "${configured}" >&2
+			return 1
+		fi
+		resolved_command=("${configured}")
+		resolved_source="controlled-path"
+		return 0
+	fi
+	local installed
+	if installed="$(command -v "${command_name}")"; then
+		resolved_command=("${installed}")
+		resolved_source="local-binary"
+		return 0
+	fi
+	if [[ "${network_flag}" == "1" ]]; then
+		resolved_command=(go run "${pinned_module}")
+		resolved_source="pinned-go-run"
+		return 0
+	fi
+	printf '%s is required in offline mode; preinstall it or set %s to an executable path\n' "${command_name}" "${env_name}" >&2
+	return 1
+}
+
+resolved_command=()
+resolved_source=""
+resolve_tool STATICCHECK_BIN staticcheck honnef.co/go/tools/cmd/staticcheck@v0.7.0 || exit $?
+staticcheck_command=("${resolved_command[@]}")
+staticcheck_source="${resolved_source}"
+resolve_tool GOVULNCHECK_BIN govulncheck golang.org/x/vuln/cmd/govulncheck@v1.6.0 || exit $?
+govulncheck_command=("${resolved_command[@]}")
+govulncheck_source="${resolved_source}"
+
+govulncheck_scan_args=()
+if [[ "${network_flag}" == "0" ]]; then
+	if [[ -z "${GOVULNCHECK_DB:-}" ]]; then
+		printf 'GOVULNCHECK_DB is required in offline mode and must point to a local vulnerability database\n' >&2
+		exit 1
+	fi
+	govulncheck_scan_args=(-db "${GOVULNCHECK_DB}")
+fi
+export RC_ALLOW_NETWORK="${network_flag}"
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repository_root}"
@@ -51,7 +116,7 @@ release_tag="${RC_RELEASE_TAG:-}"
 release_tag_type="not-applicable"
 release_tag_target="not-applicable"
 tag_signature_verification="not-applicable"
-signature_policy="false"
+signature_policy="not-applicable"
 if [[ "${RC_VERIFY_TAG_SIGNATURE+x}" == "x" ]]; then
 	case "${RC_VERIFY_TAG_SIGNATURE}" in
 	true | false) signature_policy="${RC_VERIFY_TAG_SIGNATURE}" ;;
@@ -67,6 +132,10 @@ if [[ "${RC_VERIFY_TAG_SIGNATURE+x}" == "x" ]]; then
 fi
 
 if [[ -n "${release_tag}" ]]; then
+	if [[ "${RC_VERIFY_TAG_SIGNATURE+x}" != "x" ]]; then
+		printf 'RC_VERIFY_TAG_SIGNATURE must be explicitly set to true or false when RC_RELEASE_TAG is set\n' >&2
+		exit 1
+	fi
 	expected_version="${RC_EXPECTED_VERSION:-}"
 	if [[ -z "${expected_version}" ]]; then
 		printf 'RC_EXPECTED_VERSION is required when RC_RELEASE_TAG is set\n' >&2
@@ -91,15 +160,27 @@ if [[ -n "${release_tag}" ]]; then
 	fi
 	case "${signature_policy}" in
 	true)
-		if ! git verify-tag "${release_tag}" >"${artifact_dir}/tag-signature.log" 2>&1; then
+		trusted_keyring="${RC_TRUSTED_KEYRING:-}"
+		if [[ -z "${trusted_keyring}" || ! -d "${trusted_keyring}" ]]; then
+			printf 'RC_TRUSTED_KEYRING must name a trusted GNUPGHOME directory when signature verification is true\n' >&2
+			exit 1
+		fi
+		if ! GNUPGHOME="${trusted_keyring}" git verify-tag --raw "${release_tag}" >"${artifact_dir}/tag-signature.log" 2>&1; then
 			cat "${artifact_dir}/tag-signature.log" >&2
 			printf 'release tag signature verification failed: %s\n' "${release_tag}" >&2
 			exit 1
 		fi
-		tag_signature_verification="verified-with-local-trust-store"
+		if ! grep -q '\[GNUPG:\] VALIDSIG ' "${artifact_dir}/tag-signature.log" ||
+			! grep -Eq '\[GNUPG:\] TRUST_(FULLY|ULTIMATE) ' "${artifact_dir}/tag-signature.log"; then
+			cat "${artifact_dir}/tag-signature.log" >&2
+			printf 'release tag signature is valid but not trusted by RC_TRUSTED_KEYRING: %s\n' "${release_tag}" >&2
+			exit 1
+		fi
+		tag_signature_verification="verified-with-trusted-keyring"
 		;;
 	false)
-		tag_signature_verification="skipped-no-trusted-keyring"
+		tag_signature_verification="explicitly-exempted"
+		printf 'Release tag signature verification explicitly exempted by RC_VERIFY_TAG_SIGNATURE=false\n'
 		;;
 	esac
 fi
@@ -127,18 +208,24 @@ capture_version() {
 	printf 'release_tag=%s\n' "${release_tag:-not-applicable}"
 	printf 'release_tag_type=%s\n' "${release_tag_type}"
 	printf 'release_tag_target=%s\n' "${release_tag_target}"
+	printf 'signature_policy=%s\n' "${signature_policy}"
 	printf 'tag_signature_verification=%s\n' "${tag_signature_verification}"
 	printf 'coverage_minimum=%s\n' "${coverage_minimum}"
 	printf 'critical_coverage_minimum=%s\n' "${critical_coverage_minimum}"
 	printf 'shuffle_seed=%s\n' "${shuffle_seed}"
 	printf 'remote_hygiene=%s\n' "${remote_hygiene}"
+	printf 'network_mode=%s\n' "${network_mode}"
+	printf 'network_opt_in=%s\n' "${network_flag}"
+	printf 'staticcheck_source=%s\n' "${staticcheck_source}"
+	printf 'govulncheck_source=%s\n' "${govulncheck_source}"
 	printf 'artifact_dir=%s\n' "${artifact_dir}"
+	printf 'GOPROXY=%s\n' "${GOPROXY}"
 	printf 'GOSUMDB=%s\n' "${GOSUMDB}"
 	printf 'GOTOOLCHAIN=%s\n' "${GOTOOLCHAIN}"
 } >"${metadata}"
 capture_version go go version || exit $?
-capture_version staticcheck go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -version || exit $?
-capture_version govulncheck go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -version || exit $?
+capture_version staticcheck "${staticcheck_command[@]}" -version || exit $?
+capture_version govulncheck "${govulncheck_command[@]}" -version || exit $?
 
 printf 'RC commit: %s\n' "${commit}"
 printf 'RC tree: %s\n' "${tree}"
@@ -235,8 +322,8 @@ run_step count1 go test ./... -count=1 || exit $?
 run_step shuffle20 go test ./... -shuffle="${shuffle_seed}" -count=20 -timeout=30m || exit $?
 run_step race3 go test -race ./... -count=3 || exit $?
 run_step vet go vet ./... || exit $?
-run_step staticcheck go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./... || exit $?
-run_step govulncheck go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./... || exit $?
-run_step release-check env COVERAGE_MINIMUM="${coverage_minimum}" CRITICAL_COVERAGE_MINIMUM="${critical_coverage_minimum}" scripts/release-check.sh || exit $?
+run_step staticcheck "${staticcheck_command[@]}" ./... || exit $?
+run_step govulncheck "${govulncheck_command[@]}" "${govulncheck_scan_args[@]}" ./... || exit $?
+run_step release-check env COVERAGE_MINIMUM="${coverage_minimum}" CRITICAL_COVERAGE_MINIMUM="${critical_coverage_minimum}" API_COMPAT_METADATA="${metadata}" scripts/release-check.sh || exit $?
 run_step diff-check check_candidate_diff || exit $?
 run_step hygiene check_repository_hygiene || exit $?

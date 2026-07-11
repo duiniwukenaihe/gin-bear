@@ -1,9 +1,61 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export GOSUMDB=sum.golang.org
-export GOTOOLCHAIN=go1.25.12
-export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
+network_flag="${RC_ALLOW_NETWORK-0}"
+case "${network_flag}" in
+0)
+	export GOPROXY=off
+	export GOSUMDB=off
+	export GOTOOLCHAIN=local
+	;;
+1)
+	export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
+	export GOSUMDB="${GOSUMDB:-sum.golang.org}"
+	export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.25.12}"
+	;;
+*)
+	printf 'RC_ALLOW_NETWORK must be 0 or 1\n' >&2
+	exit 1
+	;;
+esac
+
+tool_command() {
+	local env_name="$1"
+	local command_name="$2"
+	local pinned_module="$3"
+	local configured="${!env_name:-}"
+	if [[ -n "${configured}" ]]; then
+		if [[ ! -x "${configured}" ]]; then
+			printf '%s must name an executable file: %s\n' "${env_name}" "${configured}" >&2
+			return 1
+		fi
+		resolved_command=("${configured}")
+		return 0
+	fi
+	local installed
+	if installed="$(command -v "${command_name}")"; then
+		resolved_command=("${installed}")
+	elif [[ "${network_flag}" == "1" ]]; then
+		resolved_command=(go run "${pinned_module}")
+	else
+		printf '%s is required in offline mode; preinstall it or set %s\n' "${command_name}" "${env_name}" >&2
+		return 1
+	fi
+}
+
+resolved_command=()
+tool_command STATICCHECK_BIN staticcheck honnef.co/go/tools/cmd/staticcheck@v0.7.0 || exit $?
+staticcheck_command=("${resolved_command[@]}")
+tool_command GOVULNCHECK_BIN govulncheck golang.org/x/vuln/cmd/govulncheck@v1.6.0 || exit $?
+govulncheck_command=("${resolved_command[@]}")
+govulncheck_scan_args=()
+if [[ "${network_flag}" == "0" ]]; then
+	if [[ -z "${GOVULNCHECK_DB:-}" ]]; then
+		printf 'GOVULNCHECK_DB is required in offline mode and must point to a local vulnerability database\n' >&2
+		exit 1
+	fi
+	govulncheck_scan_args=(-db "${GOVULNCHECK_DB}")
+fi
 
 release_coverage_minimum="70.0"
 release_critical_coverage_minimum="80.0"
@@ -77,7 +129,7 @@ echo "==> Running go vet"
 go vet ./...
 
 echo "==> Running staticcheck"
-go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+"${staticcheck_command[@]}" ./...
 
 echo "==> Running govulncheck"
-go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+"${govulncheck_command[@]}" "${govulncheck_scan_args[@]}" ./...

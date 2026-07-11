@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -67,6 +68,33 @@ func TestExecuteNewCreatesProjectAndPreservesExistingDestination(t *testing.T) {
 	}
 	if got, err := os.ReadFile(marker); err != nil || string(got) != "keep" {
 		t.Fatalf("duplicate generation changed destination: content=%q err=%v", got, err)
+	}
+}
+
+func TestReleasedCLIDefaultFrameworkVersionCanBeInjectedAtBuildTime(t *testing.T) {
+	const releaseTag = "v0.10.0-rc.2"
+	binary := filepath.Join(t.TempDir(), "bear")
+	build := exec.Command(
+		"go", "build",
+		"-ldflags=-X github.com/duiniwukenaihe/gin-bear/pkg/bear.Version=0.10.0-rc.2",
+		"-o", binary,
+		"../../cmd/bear",
+	)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build released CLI: %v\n%s", err, output)
+	}
+
+	destination := filepath.Join(t.TempDir(), "released-app")
+	command := exec.Command(binary, "new", "released-app", "--module", "example.com/released-app", "--directory", destination)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("run released CLI: %v\n%s", err, output)
+	}
+	goMod, err := os.ReadFile(filepath.Join(destination, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(goMod), "github.com/duiniwukenaihe/gin-bear "+releaseTag) {
+		t.Fatalf("released CLI did not use injected framework version %s:\n%s", releaseTag, goMod)
 	}
 }
 
