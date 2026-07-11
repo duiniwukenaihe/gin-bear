@@ -576,6 +576,7 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 	b.activeGroup().GET(relativePath, func(ctx *gin.Context) {
 		// 2. 触发 Fairing OnRequest (支持鉴权、限流等)
 		if err := b.fairingHandler.OnRequest(ctx); err != nil {
+			WriteError(ctx, err)
 			return
 		}
 
@@ -620,59 +621,56 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 	return b
 }
 
-// Handle 注册路由，支持 Responder 转换
+// Handle registers a compiled business handler and panics if its signature is
+// invalid. A standard gin.HandlerFunc is supported as an opaque response
+// writer: request Fairings run, but response Fairings cannot transform bytes it
+// writes directly. Use HandleE to receive construction errors instead.
 func (b *Bear) Handle(httpMethod, relativePath string, handler interface{}) *Bear {
-	if b.pluginMode {
-		// 如果处于插件模式，注册到动态分发器
-		if h, ok := handler.(func(*gin.Context)); ok {
-			b.pluginDispatcher.Register(httpMethod, relativePath, h)
-		} else if h := convertHandler(handler, b); h != nil {
-			b.pluginDispatcher.Register(httpMethod, relativePath, h)
-		}
-		return b
-	}
-
-	if h := convertHandler(handler, b); h != nil {
-		// 包装 handler 以支持全局 Fairing
-		wrappedHandler := b.wrapWithFairing(h)
-		b.activeGroup().Handle(httpMethod, relativePath, wrappedHandler)
-
-		// 记录路由元数据
-		b.routeRegistry = append(b.routeRegistry, RouteMetadata{
-			Method:      httpMethod,
-			Path:        relativePath,
-			GroupName:   b.currentGroup,
-			HandlerType: reflect.TypeOf(handler),
-			HandlerName: runtimeFuncName(handler),
-		})
+	if err := b.HandleE(httpMethod, relativePath, handler); err != nil {
+		panic(err)
 	}
 	return b
+}
+
+// HandleE registers a handler after validating and compiling its concrete
+// function value. It returns before mutating route state when construction
+// fails.
+func (b *Bear) HandleE(httpMethod, relativePath string, handler interface{}) error {
+	return b.registerHandler(httpMethod, relativePath, handler, nil)
 }
 
 // HandleWithFairing 注册路由并绑定路由级别的 Fairing
 // 路由级别的 Fairing 会在全局 Fairing 之前执行（OnRequest）
 // 在全局 Fairing 之后执行（OnResponse）
 func (b *Bear) HandleWithFairing(httpMethod, relativePath string, handler interface{}, fairings ...Fairing) *Bear {
-	// 1. 对 fairings 进行依赖注入
+	wrappedHandler, err := b.compilePipeline(handler, fairings)
+	if err != nil {
+		panic(err)
+	}
+
 	for _, f := range fairings {
 		b.runtime.Container.Apply(f)
 	}
-
-	// 2. 注册到路由树
 	b.routeTree.addRoute(httpMethod, relativePath, fairings)
+	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler)
+	return b
+}
 
-	// 3. 使用包装器处理请求，集成路由级别的 Fairing
-	wrappedHandler := b.wrapWithRouteFairing(handler, fairings)
-
-	if b.pluginMode {
-		// 插件模式下注册到动态分发器
-		b.pluginDispatcher.Register(httpMethod, relativePath, wrappedHandler)
-		return b
+func (b *Bear) registerHandler(httpMethod, relativePath string, handler interface{}, routeFairings []Fairing) error {
+	wrappedHandler, err := b.compilePipeline(handler, routeFairings)
+	if err != nil {
+		return err
 	}
+	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler)
+	return nil
+}
 
-	b.activeGroup().Handle(httpMethod, relativePath, wrappedHandler)
-
-	// 4. 记录路由元数据
+func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler interface{}, wrapped gin.HandlerFunc) {
+	if b.pluginMode {
+		b.pluginDispatcher.Register(httpMethod, relativePath, wrapped)
+		return
+	}
+	b.activeGroup().Handle(httpMethod, relativePath, wrapped)
 	b.routeRegistry = append(b.routeRegistry, RouteMetadata{
 		Method:      httpMethod,
 		Path:        relativePath,
@@ -680,8 +678,67 @@ func (b *Bear) HandleWithFairing(httpMethod, relativePath string, handler interf
 		HandlerType: reflect.TypeOf(handler),
 		HandlerName: runtimeFuncName(handler),
 	})
+}
 
-	return b
+func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gin.HandlerFunc, error) {
+	if opaque, ok := opaqueGinHandler(handler); ok {
+		return func(ctx *gin.Context) {
+			if err := b.runRequestFairings(ctx, routeFairings); err != nil {
+				WriteError(ctx, err)
+				return
+			}
+			if ctx.IsAborted() || ctx.Writer.Written() {
+				return
+			}
+			opaque(ctx)
+		}, nil
+	}
+
+	compiled, err := compileHandler(handler)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx *gin.Context) {
+		if err := b.runRequestFairings(ctx, routeFairings); err != nil {
+			WriteError(ctx, err)
+			return
+		}
+		if ctx.IsAborted() || ctx.Writer.Written() {
+			return
+		}
+
+		result, err := compiled(ctx)
+		if err != nil {
+			WriteError(ctx, err)
+			return
+		}
+		if ctx.IsAborted() || ctx.Writer.Written() {
+			return
+		}
+
+		result, err = b.fairingHandler.onResponse(result)
+		if err != nil {
+			WriteError(ctx, err)
+			return
+		}
+		for _, fairing := range routeFairings {
+			result, err = fairing.OnResponse(result)
+			if err != nil {
+				WriteError(ctx, err)
+				return
+			}
+		}
+		writeSuccess(ctx, result)
+	}, nil
+}
+
+func (b *Bear) runRequestFairings(ctx *gin.Context, routeFairings []Fairing) error {
+	for _, fairing := range routeFairings {
+		if err := fairing.OnRequest(ctx); err != nil {
+			return err
+		}
+	}
+	return b.fairingHandler.OnRequest(ctx)
 }
 
 func (b *Bear) activeGroup() *gin.RouterGroup {
@@ -703,64 +760,6 @@ func websocketOriginAllowed(config *SysConfig, r *http.Request) bool {
 		return true
 	}
 	return origin == "" || origin == "http://"+r.Host || origin == "https://"+r.Host
-}
-
-// wrapWithRouteFairing 包装 handler 以集成路由级别的 Fairing
-func (b *Bear) wrapWithRouteFairing(handler interface{}, fairings []Fairing) gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		// 1. 执行路由级别 Fairing 的 OnRequest
-		for _, f := range fairings {
-			if err := f.OnRequest(ctx); err != nil {
-				ctx.AbortWithStatusJSON(400, Response{
-					Code:    400,
-					Message: err.Error(),
-				})
-				return
-			}
-		}
-
-		// 2. 执行原始 handler 并捕获结果
-		var result interface{}
-		if h := convertHandler(handler, b); h != nil {
-			h(ctx)
-			// 从上下文获取处理后的结果（如果有）
-			if r, ok := ctx.Get("bear_handler_result"); ok {
-				result = r
-			}
-		} else if hf, ok := handler.(gin.HandlerFunc); ok {
-			hf(ctx)
-			if r, ok := ctx.Get("bear_handler_result"); ok {
-				result = r
-			}
-		}
-
-		// 3. 如果有结果，执行路由级别 Fairing 的 OnResponse
-		if result != nil {
-			for _, f := range fairings {
-				if res, err := f.OnResponse(result); err == nil {
-					result = res
-				}
-			}
-			// 将处理后的结果存回上下文，供后续全局 Fairing 使用
-			ctx.Set("bear_route_fairing_result", result)
-		}
-	}
-}
-
-// wrapWithFairing 包装 handler 以集成全局 Fairing
-func (b *Bear) wrapWithFairing(handler gin.HandlerFunc) gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		// 执行全局 Fairing 的 OnRequest
-		if err := b.fairingHandler.OnRequest(ctx); err != nil {
-			ctx.AbortWithStatusJSON(400, Response{
-				Code:    400,
-				Message: err.Error(),
-			})
-			return
-		}
-		// 执行原始 handler
-		handler(ctx)
-	}
 }
 
 func runtimeFuncName(i interface{}) string {
@@ -808,7 +807,7 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 				for _, f := range inter.Interceptors() {
 					b.g.Use(func(ctx *gin.Context) {
 						if err := f.OnRequest(ctx); err != nil {
-							ctx.AbortWithStatusJSON(400, gin.H{"error": err.Error()})
+							WriteError(ctx, err)
 							return
 						}
 						ctx.Next()
@@ -818,10 +817,6 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 			class.Build(b)
 		}
 	}
-
-	// 预热 Handler 缓存
-	WarmupHandlers(b.routeRegistry)
-	b.runtime.Logger.Info("Handler cache warmed up", "count", len(b.routeRegistry))
 
 	return nil
 }

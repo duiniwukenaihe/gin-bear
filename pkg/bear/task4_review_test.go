@@ -219,7 +219,7 @@ func TestAuthFairingUsesOwningRuntimePublicPaths(t *testing.T) {
 
 	response := httptest.NewRecorder()
 	a.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/shared", nil))
-	if response.Code != http.StatusBadRequest {
+	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("app a status = %d body = %s, want authentication rejection from app a policy", response.Code, response.Body.String())
 	}
 }

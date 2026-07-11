@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -32,7 +31,6 @@ import (
 
 func resetTestInjector() {
 	setDefaultInjector(NewBeanFactory())
-	handlerCache = sync.Map{}
 }
 
 func resetGinModeForTest(t *testing.T) {
@@ -1609,7 +1607,7 @@ func TestAuthFairingUsesConfiguredPublicPaths(t *testing.T) {
 	privateReq := httptest.NewRequest(http.MethodGet, "/private/ping", nil)
 	privateW := httptest.NewRecorder()
 	app.ServeHTTP(privateW, privateReq)
-	if privateW.Code != http.StatusBadRequest {
+	if privateW.Code != http.StatusUnauthorized {
 		t.Fatalf("private status = %d body = %s", privateW.Code, privateW.Body.String())
 	}
 }

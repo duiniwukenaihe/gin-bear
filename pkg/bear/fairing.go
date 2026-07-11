@@ -68,14 +68,25 @@ func (f *FairingHandler) OnRequest(ctx *gin.Context) error {
 }
 
 func (f *FairingHandler) OnResponse(result interface{}) interface{} {
-	var r = result
-	// 响应拦截器通常按注册顺序执行（或者倒序，取决于设计，这里保持顺序）
+	response := result
 	for i := 0; i < len(f.responseFairings); i++ {
-		if res, err := f.responseFairings[i].OnResponse(r); err == nil {
-			r = res
+		if transformed, err := f.responseFairings[i].OnResponse(response); err == nil {
+			response = transformed
 		}
 	}
-	return r
+	return response
+}
+
+func (f *FairingHandler) onResponse(result interface{}) (interface{}, error) {
+	response := result
+	for i := 0; i < len(f.responseFairings); i++ {
+		transformed, err := f.responseFairings[i].OnResponse(response)
+		if err != nil {
+			return nil, err
+		}
+		response = transformed
+	}
+	return response, nil
 }
 
 // OnRequestWithRoute 执行全局 OnRequest，然后执行路由级别的 OnRequest

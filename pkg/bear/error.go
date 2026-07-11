@@ -152,6 +152,12 @@ func NewError(code int, key string, args ...interface{}) *BearError {
 	return &BearError{Code: code, Key: key, Args: args}
 }
 
+// NewStatusError creates a business error with an explicit HTTP status and an
+// optional wrapped cause. WriteError logs cause and keeps it out of the body.
+func NewStatusError(status, code int, key string, cause error) *BearError {
+	return &BearError{Code: code, Status: status, Key: key, Err: cause}
+}
+
 // ToResponse 将业务错误转换为标准响应
 func (e *BearError) ToResponse() Response {
 	return Response{
