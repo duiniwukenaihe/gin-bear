@@ -1,13 +1,17 @@
 package bear
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
-	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/propagation"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // HTTPMetrics is the application-scoped HTTP metrics registry.
@@ -15,12 +19,16 @@ type HTTPMetrics = httpMetricsRegistry
 
 // Runtime contains state owned by one Bear application.
 type Runtime struct {
-	Config          *SysConfig
-	Logger          *slog.Logger
-	Container       *BeanFactory
-	Lifecycle       *Lifecycle
-	Metrics         *HTTPMetrics
-	readinessChecks *readinessCheckCoordinator
+	Config            *SysConfig
+	Logger            *slog.Logger
+	Container         *BeanFactory
+	Lifecycle         *Lifecycle
+	Metrics           *HTTPMetrics
+	TracerProvider    oteltrace.TracerProvider
+	TextMapPropagator propagation.TextMapPropagator
+	readinessChecks   *readinessCheckCoordinator
+	hijackedMu        sync.Mutex
+	hijacked          map[io.Closer]struct{}
 }
 
 type legacyFacade struct {
@@ -38,14 +46,57 @@ func newRuntime(config *SysConfig) *Runtime {
 	container := NewBeanFactory()
 	container.onSet = lifecycle.setBean
 	container.onRemove = lifecycle.removeBean
-	return &Runtime{
+	runtime := &Runtime{
 		Config:          config,
 		Logger:          newLogger(config),
 		Container:       container,
 		Lifecycle:       lifecycle,
-		Metrics:         newHTTPMetricsRegistry(defaultDurationBuckets),
 		readinessChecks: newReadinessCheckCoordinator(),
+		hijacked:        make(map[io.Closer]struct{}),
 	}
+	if config == nil || config.Metrics == nil || config.Metrics.Enabled {
+		runtime.Metrics = newHTTPMetricsRegistry(defaultDurationBuckets)
+	}
+	return runtime
+}
+
+func (r *Runtime) trackHijackedConnection(connection io.Closer) {
+	if r == nil || connection == nil {
+		return
+	}
+	r.hijackedMu.Lock()
+	r.hijacked[connection] = struct{}{}
+	r.hijackedMu.Unlock()
+}
+
+func (r *Runtime) untrackHijackedConnection(connection io.Closer) {
+	if r == nil || connection == nil {
+		return
+	}
+	r.hijackedMu.Lock()
+	delete(r.hijacked, connection)
+	r.hijackedMu.Unlock()
+}
+
+func (r *Runtime) closeHijackedConnections() error {
+	if r == nil {
+		return nil
+	}
+	r.hijackedMu.Lock()
+	connections := make([]io.Closer, 0, len(r.hijacked))
+	for connection := range r.hijacked {
+		connections = append(connections, connection)
+		delete(r.hijacked, connection)
+	}
+	r.hijackedMu.Unlock()
+
+	var closeErrors []error
+	for _, connection := range connections {
+		if err := connection.Close(); err != nil {
+			closeErrors = append(closeErrors, errors.New("hijacked connection close failed"))
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 func publishDefaultRuntime(runtime *Runtime) {
@@ -114,7 +165,9 @@ func runtimePerformanceMiddleware(runtime *Runtime) gin.HandlerFunc {
 		if status >= 400 {
 			atomic.AddInt64(&TotalErrors, 1)
 		}
-		runtime.Metrics.Record(ctx.Request.Method, metricRoute(ctx), status, latency)
+		if runtime.Metrics != nil {
+			runtime.Metrics.Record(ctx.Request.Method, metricRoute(ctx), status, latency)
+		}
 
 		isError := status >= 400
 		isSlow := latency > slowThreshold
@@ -128,7 +181,7 @@ func runtimePerformanceMiddleware(runtime *Runtime) gin.HandlerFunc {
 		}
 		runtime.Logger.Log(ctx.Request.Context(), currentLevel, "Request handled",
 			"method", ctx.Request.Method,
-			"path", ctx.Request.URL.Path,
+			"route", metricRoute(ctx),
 			"status", status,
 			"latency", latency.String(),
 			"client_ip", ctx.ClientIP(),
@@ -142,8 +195,9 @@ func runtimeRecoveryMiddleware(runtime *Runtime) gin.HandlerFunc {
 			if recovered := recover(); recovered != nil {
 				rid, _ := ctx.Get(RequestIDKey)
 				runtime.Logger.ErrorContext(ctx.Request.Context(), "Panic recovered",
-					"error", recovered,
-					"stack_trace", string(debug.Stack()),
+					"error_code", "BEAR_RUNTIME_PANIC",
+					"category", runtimePanicCategory(recovered),
+					"route", metricRoute(ctx),
 				)
 				ctx.AbortWithStatusJSON(500, Response{
 					Code:    500,
@@ -152,6 +206,17 @@ func runtimeRecoveryMiddleware(runtime *Runtime) gin.HandlerFunc {
 			}
 		}()
 		ctx.Next()
+	}
+}
+
+func runtimePanicCategory(recovered any) string {
+	switch recovered.(type) {
+	case error:
+		return "error_panic"
+	case string:
+		return "string_panic"
+	default:
+		return "value_panic"
 	}
 }
 

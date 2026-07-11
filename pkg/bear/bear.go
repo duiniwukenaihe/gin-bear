@@ -18,7 +18,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/grpc"
 )
@@ -80,13 +79,25 @@ type Bear struct {
 	mounts            []MountMetadata
 	modules           []Module
 	runtime           *Runtime
-	applied           atomic.Bool // 增加应用标记
+	applyMu           sync.Mutex
+	applyState        applyState
+	applyErr          error
+	applyDone         chan struct{}
 	pluginDispatcher  *PluginDispatcher
 	pluginManager     *PluginManager
 	pluginMode        bool // 标记当前是否处于插件加载模式
 	metricsRegistered atomic.Bool
 	tracingRegistered atomic.Bool
 }
+
+type applyState uint8
+
+const (
+	applyNotStarted applyState = iota
+	applyRunning
+	applySucceeded
+	applyFailed
+)
 
 // OnShutdown 注册服务关闭时的清理函数
 func (b *Bear) OnShutdown(f ...func()) {
@@ -203,12 +214,12 @@ func (b *Bear) EnableTracing(ctx context.Context) *Bear {
 	}
 	provider, err := newTracerProvider(ctx, config.Tracing)
 	if err != nil {
-		b.runtime.Logger.Error("Tracing initialization failed", "error", err)
+		b.runtime.Logger.Error("Tracing initialization failed", "error_code", "BEAR_TRACING_INIT")
 		return b
 	}
 	propagator := propagation.TraceContext{}
-	otel.SetTracerProvider(provider)
-	otel.SetTextMapPropagator(propagator)
+	b.runtime.TracerProvider = provider
+	b.runtime.TextMapPropagator = propagator
 	b.Use(TracingMiddleware(provider, propagator))
 	b.OnShutdown(shutdownTracerProvider(provider))
 	b.runtime.Logger.Info("Tracing enabled", "exporter", config.Tracing.Exporter, "service", config.Tracing.ServiceName)
@@ -224,6 +235,9 @@ func (b *Bear) EnableMetrics() *Bear {
 	if !b.metricsRegistered.CompareAndSwap(false, true) {
 		return b
 	}
+	if b.runtime.Metrics == nil {
+		return b
+	}
 	path := "/metrics"
 	if config != nil && config.Metrics != nil && config.Metrics.Path != "" {
 		path = config.Metrics.Path
@@ -237,6 +251,9 @@ func (b *Bear) EnableMetrics() *Bear {
 func (b *Bear) Launch(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := b.launchApplyError(); err != nil {
+		return err
 	}
 	config := b.runtime.Config
 	logger := b.runtime.Logger
@@ -306,7 +323,7 @@ func (b *Bear) Launch(ctx context.Context) error {
 
 	shutdownBudget := shutdownTimeout(config)
 	if err := runShutdownPhase(shutdownBudget, func(ctx context.Context) error {
-		return shutdownHTTPServer(ctx, server)
+		return errors.Join(b.runtime.closeHijackedConnections(), shutdownHTTPServer(ctx, server))
 	}); err != nil {
 		launchErrors = append(launchErrors, err)
 	}
@@ -355,7 +372,7 @@ func (b *Bear) cleanupLaunchFailure(config *SysConfig, cause error, listeners ..
 func runShutdownPhase(timeout time.Duration, phase func(context.Context) error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return phase(ctx)
+	return runShutdownWorker(ctx, func() error { return phase(ctx) })
 }
 
 func closeListener(name string, listener net.Listener) error {
@@ -505,8 +522,85 @@ func validateProductionSecurity(config *SysConfig) error {
 			return fmt.Errorf("weak jwt secret is not allowed in production")
 		}
 	}
+	if err := validateProductionTimeouts(config); err != nil {
+		return err
+	}
 	if config.WS != nil && !config.WS.CheckOrigin && len(config.WS.GetAllowedOrigins()) == 0 {
 		return fmt.Errorf("websocket origin check cannot be disabled in production without allowed origins")
+	}
+	return nil
+}
+
+func isPlaceholderJWTSecret(secret string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(secret))
+	if normalized == "" {
+		return true
+	}
+	normalized = strings.NewReplacer("_", "-", " ", "-", ".", "-").Replace(normalized)
+	for _, marker := range []string{
+		"bear-secret",
+		"your-secret-key",
+		"set-with-jwt-secret-32-plus-random-chars",
+		"replace-with-at-least-",
+		"change-me",
+		"changeme",
+		"placeholder",
+		"example-secret",
+		"default-secret",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateProductionTimeouts(config *SysConfig) error {
+	if config == nil {
+		return nil
+	}
+	timeouts := []struct {
+		name string
+		raw  string
+		max  time.Duration
+	}{
+		{name: "server.read_header_timeout", raw: configDuration(config, "read_header_timeout"), max: 30 * time.Second},
+		{name: "server.read_timeout", raw: configDuration(config, "read_timeout"), max: 5 * time.Minute},
+		{name: "server.write_timeout", raw: configDuration(config, "write_timeout"), max: 5 * time.Minute},
+		{name: "server.idle_timeout", raw: configDuration(config, "idle_timeout"), max: 10 * time.Minute},
+	}
+	if config.Server != nil {
+		timeouts = append(timeouts, struct {
+			name string
+			raw  string
+			max  time.Duration
+		}{name: "server.shutdown_timeout", raw: config.Server.ShutdownTimeout, max: time.Minute})
+	}
+	if config.Health != nil {
+		timeouts = append(timeouts, struct {
+			name string
+			raw  string
+			max  time.Duration
+		}{name: "health.readiness_timeout", raw: config.Health.ReadinessTimeout, max: time.Minute})
+	}
+	if config.Middleware != nil {
+		timeouts = append(timeouts, struct {
+			name string
+			raw  string
+			max  time.Duration
+		}{name: "middleware.slow_request_threshold", raw: config.Middleware.SlowRequestThreshold, max: 5 * time.Minute})
+	}
+	for _, timeout := range timeouts {
+		if strings.TrimSpace(timeout.raw) == "" {
+			continue
+		}
+		value, err := time.ParseDuration(timeout.raw)
+		if err != nil {
+			return fmt.Errorf("%s timeout is invalid: %w", timeout.name, err)
+		}
+		if value <= 0 || value > timeout.max {
+			return fmt.Errorf("%s timeout must be positive and at most %s", timeout.name, timeout.max)
+		}
 	}
 	return nil
 }
@@ -594,10 +688,25 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 
 		// 3. 获取 WS 配置并初始化升级程序
 		config := b.runtime.Config
+		policy := webSocketPolicyForConfig(config)
+		var wsConfig *WebSocketConfig
+		if config != nil {
+			wsConfig = config.WS
+		}
+		handshakeTimeout := 10 * time.Second
+		readBufferSize := 0
+		writeBufferSize := 0
+		if wsConfig != nil {
+			if wsConfig.HandshakeTimeout > 0 {
+				handshakeTimeout = time.Duration(wsConfig.HandshakeTimeout) * time.Millisecond
+			}
+			readBufferSize = wsConfig.ReadBufferSize
+			writeBufferSize = wsConfig.WriteBufferSize
+		}
 		upgrader := websocket.Upgrader{
-			HandshakeTimeout: time.Duration(config.WS.HandshakeTimeout) * time.Millisecond,
-			ReadBufferSize:   config.WS.ReadBufferSize,
-			WriteBufferSize:  config.WS.WriteBufferSize,
+			HandshakeTimeout: handshakeTimeout,
+			ReadBufferSize:   readBufferSize,
+			WriteBufferSize:  writeBufferSize,
 			CheckOrigin: func(r *http.Request) bool {
 				return websocketOriginAllowed(config, r)
 			},
@@ -606,27 +715,41 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 		// 4. 升级协议
 		conn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
 		if err != nil {
-			b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket upgrade failed", "error", err)
+			b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket upgrade failed", "error_code", "BEAR_WS_UPGRADE")
 			return
 		}
+		b.runtime.trackHijackedConnection(conn)
+		defer b.runtime.untrackHijackedConnection(conn)
 		defer conn.Close()
+		conn.SetReadLimit(policy.maxMessageBytes)
+		if err := conn.SetReadDeadline(time.Now().Add(policy.readTimeout)); err != nil {
+			b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket deadline setup failed", "error_code", "BEAR_WS_DEADLINE")
+			return
+		}
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(policy.readTimeout))
+		})
+		stopHeartbeat := startWebSocketHeartbeat(conn, policy)
+		defer stopHeartbeat()
 
 		// 5. 调用 OnConnect
+		_ = conn.SetWriteDeadline(time.Now().Add(policy.writeTimeout))
 		if err := handler.OnConnect(ctx, conn); err != nil {
-			b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket OnConnect failed", "error", err)
+			b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket OnConnect failed", "error_code", "BEAR_WS_CONNECT")
 			return
 		}
+		defer handler.OnClose(ctx, conn)
 
 		// 6. 消息处理循环
 		for {
 			messageType, p, err := conn.ReadMessage()
 			if err != nil {
-				b.runtime.Logger.InfoContext(ctx.Request.Context(), "WebSocket connection closed", "error", err)
-				handler.OnClose(ctx, conn)
+				b.runtime.Logger.InfoContext(ctx.Request.Context(), "WebSocket connection closed", "category", "connection_closed")
 				break
 			}
+			_ = conn.SetWriteDeadline(time.Now().Add(policy.writeTimeout))
 			if err := handler.OnMessage(ctx, conn, messageType, p); err != nil {
-				b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket OnMessage error", "error", err)
+				b.runtime.Logger.ErrorContext(ctx.Request.Context(), "WebSocket OnMessage error", "error_code", "BEAR_WS_MESSAGE")
 			}
 		}
 	})
@@ -807,10 +930,61 @@ func runtimeFuncName(i interface{}) string {
 // ApplyAll 应用依赖注入并执行初始化
 // ctx 用于控制初始化过程中的超时和取消操作
 func (b *Bear) ApplyAll(ctx context.Context) error {
-	if !b.applied.CompareAndSwap(false, true) {
-		b.runtime.Logger.Warn("ApplyAll already called, skipping redundant initialization")
-		return nil
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	b.applyMu.Lock()
+	switch b.applyState {
+	case applySucceeded:
+		b.applyMu.Unlock()
+		return nil
+	case applyFailed:
+		err := b.applyErr
+		b.applyMu.Unlock()
+		return err
+	case applyRunning:
+		done := b.applyDone
+		b.applyMu.Unlock()
+		select {
+		case <-done:
+			b.applyMu.Lock()
+			err := b.applyErr
+			b.applyMu.Unlock()
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	default:
+		b.applyState = applyRunning
+		b.applyDone = make(chan struct{})
+		b.applyMu.Unlock()
+	}
+
+	err := b.applyAll(ctx)
+	b.applyMu.Lock()
+	if err != nil {
+		b.applyState = applyFailed
+		b.applyErr = err
+	} else {
+		b.applyState = applySucceeded
+	}
+	close(b.applyDone)
+	b.applyMu.Unlock()
+	return err
+}
+
+func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			resultErr = fmt.Errorf("ApplyAll failed while building application: %v", recovered)
+		}
+		if resultErr != nil {
+			rollbackErr := runShutdownPhase(shutdownTimeout(b.runtime.Config), b.runtime.Lifecycle.Stop)
+			if rollbackErr != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("ApplyAll rollback failed: %w", rollbackErr))
+			}
+		}
+	}()
 	// 1. 第一遍遍历：执行字段注入
 	for _, bean := range b.runtime.Container.orderedBeans() {
 		v := reflect.ValueOf(bean)
@@ -844,6 +1018,25 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (b *Bear) launchApplyError() error {
+	b.applyMu.Lock()
+	defer b.applyMu.Unlock()
+	switch b.applyState {
+	case applyFailed:
+		return fmt.Errorf("launch blocked after ApplyAll failure: %w", b.applyErr)
+	case applyRunning:
+		return errors.New("launch blocked while ApplyAll is running")
+	default:
+		return nil
+	}
+}
+
+func (b *Bear) rejectsLateLifecycleRegistration() bool {
+	b.applyMu.Lock()
+	defer b.applyMu.Unlock()
+	return b.applyState != applyNotStarted
 }
 
 // Group 创建路由组 (自动感知当前的挂载点)，支持 IClass 接口的 Handler 自动构建路由

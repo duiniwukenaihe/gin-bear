@@ -30,26 +30,30 @@ const (
 
 // MemoryRateLimiter 基于内存的简单计数限流器 (演示用)
 type MemoryRateLimiter struct {
-	mu       sync.RWMutex
-	counts   map[string]int
-	limit    int
-	window   time.Duration
-	done     chan struct{}
-	stopOnce sync.Once
+	mu         sync.RWMutex
+	counts     map[string]int
+	limit      int
+	window     time.Duration
+	done       chan struct{}
+	workerDone chan struct{}
+	stopOnce   sync.Once
 }
 
 func NewMemoryRateLimiter(limit int, window time.Duration) *MemoryRateLimiter {
 	l := &MemoryRateLimiter{
-		counts: make(map[string]int),
-		limit:  limit,
-		window: window,
-		done:   make(chan struct{}),
+		counts:     make(map[string]int),
+		limit:      limit,
+		window:     window,
+		done:       make(chan struct{}),
+		workerDone: make(chan struct{}),
 	}
 	if l.Validate() != nil {
+		close(l.workerDone)
 		return l
 	}
 	// 定期清理计数器
 	go func() {
+		defer close(l.workerDone)
 		ticker := time.NewTicker(window)
 		defer ticker.Stop()
 		for {
@@ -91,9 +95,29 @@ func (l *MemoryRateLimiter) RetryAfter() time.Duration {
 }
 
 func (l *MemoryRateLimiter) Stop() {
+	_ = l.Shutdown()
+}
+
+func (l *MemoryRateLimiter) Shutdown() error {
+	return l.ShutdownContext(context.Background())
+}
+
+func (l *MemoryRateLimiter) ShutdownContext(ctx context.Context) error {
+	if l == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	l.stopOnce.Do(func() {
 		close(l.done)
 	})
+	select {
+	case <-l.workerDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (l *MemoryRateLimiter) Name() string {
@@ -200,6 +224,14 @@ func redisWindowMilliseconds(window time.Duration) int64 {
 
 func (l *RedisRateLimiter) Name() string {
 	return "RedisRateLimiter"
+}
+
+func (l *RedisRateLimiter) Shutdown() error {
+	return nil
+}
+
+func (l *RedisRateLimiter) ShutdownContext(context.Context) error {
+	return nil
 }
 
 // RateLimitMiddleware 限流中间件

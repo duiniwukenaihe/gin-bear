@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -47,7 +46,7 @@ func RequestIDMiddleware() gin.HandlerFunc {
 // CORSMiddleware 处理跨域请求
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cfg := GetByType[*SysConfig]()
+		cfg := corsConfigForRequest(c)
 		if cfg == nil || cfg.CORS == nil || !cfg.CORS.Enabled {
 			c.Next()
 			return
@@ -78,6 +77,18 @@ func CORSMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func corsConfigForRequest(c *gin.Context) *SysConfig {
+	if value, exists := c.Get(runtimeContextKey); exists {
+		runtime, _ := value.(*Runtime)
+		if runtime == nil {
+			return nil
+		}
+		return runtime.Config
+	}
+	// Compatibility for bare Gin engines that do not install Bear ownership.
+	return GetByType[*SysConfig]()
 }
 
 func corsOriginAllowed(origin string, allowedOrigins []string, allowCredentials bool) bool {
@@ -167,7 +178,7 @@ func PerformanceMiddleware() gin.HandlerFunc {
 			// 使用动态日志级别
 			slog.Log(c.Request.Context(), currentLevel, "Request handled",
 				"method", c.Request.Method,
-				"path", c.Request.URL.Path,
+				"route", metricRoute(c),
 				"status", status,
 				"latency", latency.String(),
 				"client_ip", c.ClientIP(),
@@ -182,10 +193,10 @@ func RecoveryMiddleware() gin.HandlerFunc {
 		defer func() {
 			if err := recover(); err != nil {
 				rid, _ := c.Get(RequestIDKey)
-				// 记录完整的堆栈信息，便于排查 Panic 根源
 				slog.ErrorContext(c.Request.Context(), "Panic recovered",
-					"error", err,
-					"stack_trace", string(debug.Stack()),
+					"error_code", "BEAR_RUNTIME_PANIC",
+					"category", runtimePanicCategory(err),
+					"route", metricRoute(c),
 				)
 				c.AbortWithStatusJSON(500, Response{
 					Code:    500,

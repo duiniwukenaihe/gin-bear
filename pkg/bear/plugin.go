@@ -120,15 +120,25 @@ func (p *PluginManager) Load(path string) error {
 
 	mod := getModule()
 	p.bear.runtime.Logger.Info("Loading dynamic module", "name", mod.Name(), "path", path)
-	p.registerModule(mod)
+	if err := p.registerModule(mod); err != nil {
+		return err
+	}
 
 	p.plugins[path] = &loadedPlugin{Module: mod, Symbol: sym}
 	return nil
 }
 
-func (p *PluginManager) registerModule(mod Module) {
+func (p *PluginManager) registerModule(mod Module) error {
+	beans := mod.Beans()
+	if p.bear.rejectsLateLifecycleRegistration() {
+		for _, bean := range beans {
+			if isLifecycleBean(bean) {
+				return fmt.Errorf("plugin %s lifecycle bean %s cannot be registered after ApplyAll", mod.Name(), bean.Name())
+			}
+		}
+	}
 	// 1. 注册 Beans 到主 IoC 容器
-	for _, bean := range mod.Beans() {
+	for _, bean := range beans {
 		p.bear.runtime.Container.Set(bean)
 		// 自动执行依赖注入
 		p.bear.runtime.Container.Apply(bean)
@@ -139,6 +149,21 @@ func (p *PluginManager) registerModule(mod Module) {
 	p.bear.pluginMode = true
 	defer func() { p.bear.pluginMode = false }()
 	mod.Build(p.bear)
+	return nil
+}
+
+func isLifecycleBean(bean any) bool {
+	if bean == nil {
+		return false
+	}
+	if _, ok := bean.(Initializer); ok {
+		return true
+	}
+	if _, ok := bean.(ContextShutdowner); ok {
+		return true
+	}
+	_, ok := bean.(Shutdowner)
+	return ok
 }
 
 func validatePluginPathForConfig(path string, config *SysConfig) error {

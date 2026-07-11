@@ -44,16 +44,29 @@ func (m *CronManager) Init(ctx context.Context) error {
 
 // Shutdown 实现 Shutdowner 接口，优雅停止
 func (m *CronManager) Shutdown() error {
-	m.logger.Info("Stopping cron scheduler...")
-	ctx := m.scheduler.Stop()
-	// 等待正在执行的任务完成
-	select {
-	case <-ctx.Done():
-		m.logger.Info("Cron scheduler stopped gracefully")
-	case <-time.After(5 * time.Second):
-		m.logger.Warn("Cron scheduler stop timeout")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return m.ShutdownContext(ctx)
+}
+
+// ShutdownContext stops scheduling and waits for active jobs within ctx.
+func (m *CronManager) ShutdownContext(ctx context.Context) error {
+	if m == nil || m.scheduler == nil {
+		return nil
 	}
-	return nil
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.logger.Info("Stopping cron scheduler...")
+	stopped := m.scheduler.Stop()
+	select {
+	case <-stopped.Done():
+		m.logger.Info("Cron scheduler stopped gracefully")
+		return nil
+	case <-ctx.Done():
+		m.logger.Warn("Cron scheduler stop timeout")
+		return fmt.Errorf("cron scheduler shutdown: %w", ctx.Err())
+	}
 }
 
 // AddFunc 添加普通任务 (单机执行，所有节点都会跑)

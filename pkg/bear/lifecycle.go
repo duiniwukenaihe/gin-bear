@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 )
 
 // ContextShutdowner allows components to honor the application's shutdown deadline.
@@ -42,7 +43,8 @@ const (
 )
 
 var errLifecycleStopped = errors.New("lifecycle cannot start after stop")
-var legacyShutdownSlot = make(chan struct{}, 1)
+
+const lifecycleRollbackTimeout = 5 * time.Second
 
 func newLifecycle() *Lifecycle {
 	return &Lifecycle{beanEntries: make(map[reflect.Type]*lifecycleEntry)}
@@ -146,7 +148,11 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 	l.mu.Lock()
 	switch l.state {
 	case lifecycleStopped, lifecycleStopping:
+		err := l.startErr
 		l.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return errLifecycleStopped
 	case lifecycleStarted:
 		err := l.startErr
@@ -171,11 +177,7 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 		}
 		if err := initializer.Init(ctx); err != nil {
 			startErr := fmt.Errorf("component initialization failed [%s]: %w", lifecycleComponentName(entry.component), err)
-			l.mu.Lock()
-			l.state = lifecycleStarted
-			l.startErr = startErr
-			l.mu.Unlock()
-			return startErr
+			return l.rollbackStart(startErr)
 		}
 		l.markStarted(entry)
 	}
@@ -183,6 +185,27 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 	l.state = lifecycleStarted
 	l.mu.Unlock()
 	return nil
+}
+
+func (l *Lifecycle) rollbackStart(startErr error) error {
+	l.mu.Lock()
+	components := make([]any, 0, len(l.components))
+	for _, entry := range l.components {
+		if entry.started && !entry.stopped {
+			entry.stopped = true
+			components = append(components, entry.component)
+		}
+	}
+	l.state = lifecycleStopped
+	l.startErr = startErr
+	l.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), lifecycleRollbackTimeout)
+	defer cancel()
+	if rollbackErr := stopLifecycleComponents(ctx, components); rollbackErr != nil {
+		return errors.Join(startErr, fmt.Errorf("lifecycle rollback failed: %w", rollbackErr))
+	}
+	return startErr
 }
 
 func (l *Lifecycle) markStarted(entry *lifecycleEntry) {
@@ -218,6 +241,10 @@ func (l *Lifecycle) Stop(ctx context.Context) error {
 	l.state = lifecycleStopped
 	l.mu.Unlock()
 
+	return stopLifecycleComponents(ctx, components)
+}
+
+func stopLifecycleComponents(ctx context.Context, components []any) error {
 	var shutdownErrors []error
 	for i := len(components) - 1; i >= 0; i-- {
 		component := components[i]
@@ -254,7 +281,7 @@ func stopLifecycleComponent(ctx context.Context, component any) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return component.ShutdownContext(ctx)
+		return runShutdownWorker(ctx, func() error { return component.ShutdownContext(ctx) })
 	case Shutdowner:
 		return runLegacyShutdown(ctx, component.Shutdown)
 	default:
@@ -263,18 +290,17 @@ func stopLifecycleComponent(ctx context.Context, component any) error {
 }
 
 func runLegacyShutdown(ctx context.Context, shutdown func() error) error {
-	select {
-	case legacyShutdownSlot <- struct{}{}:
-		return runAcquiredLegacyShutdown(ctx, shutdown)
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return runShutdownWorker(ctx, shutdown)
 }
 
-func runAcquiredLegacyShutdown(ctx context.Context, shutdown func() error) error {
+func runShutdownWorker(ctx context.Context, shutdown func() error) error {
 	done := make(chan error, 1)
 	go func() {
-		defer func() { <-legacyShutdownSlot }()
+		defer func() {
+			if recover() != nil {
+				done <- errors.New("component shutdown panic")
+			}
+		}()
 		done <- shutdown()
 	}()
 	select {
@@ -294,6 +320,11 @@ func lifecycleComponentName(component any) string {
 
 type shutdownHook struct {
 	fn func()
+}
+
+func (h shutdownHook) ShutdownContext(context.Context) error {
+	h.fn()
+	return nil
 }
 
 func (h shutdownHook) Shutdown() error {

@@ -78,7 +78,8 @@ func (h *HealthController) ready(ctx *gin.Context) {
 			checks[result.Name] = "failed"
 			logger.WarnContext(ctx.Request.Context(), "Readiness check failed",
 				"check", result.Name,
-				"error", result.Err,
+				"error_code", "BEAR_READINESS_FAILED",
+				"category", readinessFailureCategory(result.Err),
 			)
 			continue
 		}
@@ -98,12 +99,28 @@ func (h *HealthController) ready(ctx *gin.Context) {
 	})
 }
 
+func readinessFailureCategory(err error) string {
+	switch {
+	case errors.Is(err, errReadinessCheckPanic):
+		return "panic"
+	case errors.Is(err, errReadinessCheckBusy):
+		return "busy"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "dependency"
+	}
+}
+
 type readinessResult struct {
 	Name string
 	Err  error
 }
 
 var errReadinessCheckBusy = errors.New("readiness check already in progress")
+var errReadinessCheckPanic = errors.New("readiness check failed unexpectedly")
 
 type readinessCheckerKey struct {
 	typ     reflect.Type
@@ -138,7 +155,16 @@ func runReadinessChecksWithCoordinator(parent context.Context, timeout time.Dura
 	if coordinator == nil {
 		coordinator = newReadinessCheckCoordinator()
 	}
-	ordered := append([]ReadinessChecker(nil), checkers...)
+	ordered := make([]ReadinessChecker, 0, len(checkers))
+	seen := make(map[readinessCheckerKey]struct{}, len(checkers))
+	for _, checker := range checkers {
+		key := readinessCheckerIdentity(checker)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		ordered = append(ordered, checker)
+	}
 	sort.Slice(ordered, func(i, j int) bool {
 		return ordered[i].Name() < ordered[j].Name()
 	})
@@ -154,9 +180,15 @@ func runReadinessChecksWithCoordinator(parent context.Context, timeout time.Dura
 		if coordinator.start(checker) {
 			i, checker := i, checker
 			go func() {
-				result := readinessResult{Name: checker.Name(), Err: checker.CheckReady(deadlineCtx)}
-				coordinator.finish(checker)
-				completed <- indexedResult{index: i, readinessResult: result}
+				result := indexedResult{index: i, readinessResult: readinessResult{Name: checker.Name()}}
+				defer func() {
+					if recover() != nil {
+						result.Err = errReadinessCheckPanic
+					}
+					coordinator.finish(checker)
+					completed <- result
+				}()
+				result.Err = checker.CheckReady(deadlineCtx)
 			}()
 			continue
 		}

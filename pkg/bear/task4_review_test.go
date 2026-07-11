@@ -291,7 +291,9 @@ func TestPluginModuleRegistrationUsesOwningRuntime(t *testing.T) {
 	b := Ignite(NewSysConfig())
 	bean := &runtimePluginBean{}
 
-	a.pluginManager.registerModule(&runtimePluginModule{bean: bean})
+	if err := a.pluginManager.registerModule(&runtimePluginModule{bean: bean}); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := Resolve[*runtimePluginBean](a.Runtime().Container); got != bean {
 		t.Fatalf("app a plugin bean = %p, want %p", got, bean)
@@ -468,7 +470,7 @@ func TestShutdownPhasesHaveIndependentTimeouts(t *testing.T) {
 	}
 }
 
-func TestBlockingLegacyHooksLeaveBoundedWork(t *testing.T) {
+func TestBlockingLegacyHooksAreScopedPerLifecycle(t *testing.T) {
 	const hookCount = 12
 	release := make(chan struct{})
 	var started atomic.Int32
@@ -496,18 +498,11 @@ func TestBlockingLegacyHooksLeaveBoundedWork(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if got := started.Load(); got > 1 {
+	if got := started.Load(); got != hookCount {
 		close(release)
-		t.Fatalf("started %d blocking legacy hooks, want at most one in-flight call", got)
+		t.Fatalf("started %d blocking legacy hooks, want one per lifecycle", got)
 	}
 	close(release)
-	deadline := time.Now().Add(time.Second)
-	for len(legacyShutdownSlot) != 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if len(legacyShutdownSlot) != 0 {
-		t.Fatal("legacy shutdown slot was not released")
-	}
 }
 
 func TestLaunchRegistersSignalContextBeforeServing(t *testing.T) {
