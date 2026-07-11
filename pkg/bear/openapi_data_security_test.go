@@ -15,6 +15,35 @@ import (
 
 type openAPIMetadataController struct{}
 
+type mountedOpenAPIMetadataController struct {
+	controllerAuth Fairing
+	routeAuth      Fairing
+}
+
+func (c *mountedOpenAPIMetadataController) Name() string { return "MountedOpenAPIMetadataController" }
+
+func (c *mountedOpenAPIMetadataController) Build(b *Bear) {
+	b.Handle(http.MethodGet, "/controller-private", func() string { return "controller" })
+	b.HandleWithFairing(http.MethodGet, "/route-private", func() string { return "route" }, c.routeAuth)
+}
+
+func (c *mountedOpenAPIMetadataController) Interceptors() []Fairing {
+	return []Fairing{c.controllerAuth}
+}
+
+func (c *mountedOpenAPIMetadataController) OpenAPI() map[string]OpenAPIInfo {
+	return map[string]OpenAPIInfo{
+		"/controller-private": {
+			Summary:     "controller auth summary",
+			Description: "controller auth description",
+		},
+		"/route-private": {
+			Summary:     "route auth summary",
+			Description: "route auth description",
+		},
+	}
+}
+
 func (c *openAPIMetadataController) Name() string { return "OpenAPIMetadataController" }
 
 func (c *openAPIMetadataController) Build(b *Bear) {
@@ -38,7 +67,14 @@ type nilOpenAPIProvider struct {
 }
 
 type groupedOpenAPIController struct {
+	name    string
 	summary string
+}
+
+func (c *groupedOpenAPIController) Name() string { return c.name }
+
+func (c *groupedOpenAPIController) Build(b *Bear) {
+	b.Handle(http.MethodGet, "/item", func() string { return "ok" })
 }
 
 func (c *groupedOpenAPIController) OpenAPI() map[string]OpenAPIInfo {
@@ -105,8 +141,6 @@ func TestGenerateOpenAPISecuritySupportsRouteAuthFairing(t *testing.T) {
 	app.Handle(http.MethodGet, "/public", func() string { return "public" })
 	auth := NewAuthFairing()
 	app.HandleWithFairing(http.MethodGet, "/private", func() string { return "private" }, auth)
-	privateRoute := app.routeRegistry[len(app.routeRegistry)-1]
-	app.setOpenAPIRouteMetadata(privateRoute, "/private", nil, auth)
 
 	spec := decodeOpenAPIDocument(t, app)
 	if _, ok := spec["security"]; ok {
@@ -124,54 +158,65 @@ func TestGenerateOpenAPISecuritySupportsRouteAuthFairing(t *testing.T) {
 	}
 }
 
-func TestGenerateOpenAPIRouteSecurityUsesEffectiveFairingsMetadata(t *testing.T) {
-	app := &Bear{routeRegistry: []RouteMetadata{
-		{
-			Method:      http.MethodGet,
-			Path:        "/public",
-			GroupName:   "/api",
-			HandlerType: reflect.TypeOf(func() string { return "public" }),
-			HandlerName: "publicHandler",
-		},
-		{
-			Method:      http.MethodGet,
-			Path:        "/private",
-			GroupName:   "/api",
-			HandlerType: reflect.TypeOf(func() string { return "private" }),
-			HandlerName: "privateHandler",
-		},
-	}}
-	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/api/public", nil)
-	app.setOpenAPIRouteMetadata(app.routeRegistry[1], "/api/private", nil, NewAuthFairing())
+func TestGenerateOpenAPIUsesMetadataCapturedByMountedRouteRegistration(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	app := Ignite(cfg)
+	controller := &mountedOpenAPIMetadataController{
+		controllerAuth: NewAuthFairing(),
+		routeAuth:      NewAuthFairing(),
+	}
+	app.Mount("/api", controller)
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("apply mounted controller: %v", err)
+	}
+	if len(app.routeRegistry) != 2 {
+		t.Fatalf("mounted route count = %d, want 2", len(app.routeRegistry))
+	}
+	for index, want := range []struct {
+		path     string
+		fairings []Fairing
+	}{
+		{path: "/api/controller-private", fairings: []Fairing{controller.controllerAuth}},
+		{path: "/api/route-private", fairings: []Fairing{controller.controllerAuth, controller.routeAuth}},
+	} {
+		metadata, ok := app.openAPIRouteMetadata(app.routeRegistry[index])
+		if !ok {
+			t.Fatalf("mounted route %d did not capture private OpenAPI metadata", index)
+		}
+		if metadata.fullPath != want.path {
+			t.Fatalf("mounted route %d full path = %q, want %q", index, metadata.fullPath, want.path)
+		}
+		if metadata.controller != controller {
+			t.Fatalf("mounted route %d controller = %p, want %p", index, metadata.controller, controller)
+		}
+		if !reflect.DeepEqual(metadata.fairings, want.fairings) {
+			t.Fatalf("mounted route %d fairings = %#v, want %#v", index, metadata.fairings, want.fairings)
+		}
+	}
 
 	spec := decodeOpenAPIDocument(t, app)
 	paths := spec["paths"].(map[string]interface{})
-	if _, ok := paths["/api/public"].(map[string]interface{})["get"].(map[string]interface{})["security"]; ok {
-		t.Fatal("route without effective AuthFairing declared security")
-	}
-	private := paths["/api/private"].(map[string]interface{})["get"].(map[string]interface{})
-	if security, ok := private["security"].([]interface{}); !ok || len(security) != 1 {
-		t.Fatalf("effective AuthFairing security = %#v", private["security"])
-	}
-}
-
-func TestGenerateOpenAPIDoesNotInferEffectiveFairingsFromRouteTree(t *testing.T) {
-	resetTestInjector()
-	resetGinModeForTest(t)
-	app := newOpenAPITestApp()
-	app.HandleWithFairing(http.MethodGet, "/missing-effective-metadata", func() string { return "private" }, NewAuthFairing())
-
-	spec := decodeOpenAPIDocument(t, app)
-	if _, ok := spec["security"]; ok {
-		t.Fatalf("routeTree fairing was guessed as global security: %#v", spec["security"])
-	}
-	components := spec["components"].(map[string]interface{})
-	if _, ok := components["securitySchemes"]; ok {
-		t.Fatalf("routeTree fairing was guessed without effective metadata: %#v", components)
-	}
-	op := spec["paths"].(map[string]interface{})["/missing-effective-metadata"].(map[string]interface{})["get"].(map[string]interface{})
-	if _, ok := op["security"]; ok {
-		t.Fatalf("routeTree fairing was guessed on operation: %#v", op)
+	for path, wantSummary := range map[string]string{
+		"/api/controller-private": "controller auth summary",
+		"/api/route-private":      "route auth summary",
+	} {
+		op, ok := paths[path].(map[string]interface{})["get"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("mounted route %s missing from OpenAPI paths: %#v", path, paths)
+		}
+		if got := op["summary"]; got != wantSummary {
+			t.Fatalf("mounted route %s summary = %v, want %q", path, got, wantSummary)
+		}
+		if _, ok := op["description"].(string); !ok {
+			t.Fatalf("mounted route %s description missing: %#v", path, op)
+		}
+		security, ok := op["security"].([]interface{})
+		if !ok || len(security) != 1 {
+			t.Fatalf("mounted route %s security = %#v, want BearerAuth requirement", path, op["security"])
+		}
 	}
 }
 
@@ -186,8 +231,6 @@ func TestGenerateOpenAPIFindsControllerMetadataByControllerBean(t *testing.T) {
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("apply controller: %v", err)
 	}
-	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/api/metadata", controller)
-
 	spec := decodeOpenAPIDocument(t, app)
 	op := spec["paths"].(map[string]interface{})["/api/metadata"].(map[string]interface{})["get"].(map[string]interface{})
 	if op["summary"] != "metadata summary" || op["description"] != "metadata description" {
@@ -196,29 +239,16 @@ func TestGenerateOpenAPIFindsControllerMetadataByControllerBean(t *testing.T) {
 }
 
 func TestGenerateOpenAPIUsesControllerIdentityForSameRelativePath(t *testing.T) {
-	controllerA := &groupedOpenAPIController{summary: "group-a"}
-	controllerB := &groupedOpenAPIController{summary: "group-b"}
-	handlerType := reflect.TypeOf(func() string { return "ok" })
-	app := &Bear{
-		routeRegistry: []RouteMetadata{
-			{
-				Method:      http.MethodGet,
-				Path:        "/item",
-				GroupName:   "/a",
-				HandlerType: handlerType,
-				HandlerName: "groupAItem",
-			},
-			{
-				Method:      http.MethodGet,
-				Path:        "/item",
-				GroupName:   "/b",
-				HandlerType: handlerType,
-				HandlerName: "groupBItem",
-			},
-		},
+	resetTestInjector()
+	resetGinModeForTest(t)
+	app := newOpenAPITestApp()
+	controllerA := &groupedOpenAPIController{name: "group-a-controller", summary: "group-a"}
+	controllerB := &groupedOpenAPIController{name: "group-b-controller", summary: "group-b"}
+	app.Mount("/a", controllerA)
+	app.Mount("/b", controllerB)
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("apply grouped controllers: %v", err)
 	}
-	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/a/item", controllerA)
-	app.setOpenAPIRouteMetadata(app.routeRegistry[1], "/b/item", controllerB)
 
 	spec := decodeOpenAPIDocument(t, app)
 	paths := spec["paths"].(map[string]interface{})
@@ -240,7 +270,6 @@ func TestGenerateOpenAPIOmitsControllerMetadataWithoutIdentity(t *testing.T) {
 			HandlerName: "anonymousItem",
 		}},
 	}
-	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/anonymous/item", nil)
 
 	spec := decodeOpenAPIDocument(t, app)
 	op := spec["paths"].(map[string]interface{})["/anonymous/item"].(map[string]interface{})["get"].(map[string]interface{})
@@ -444,17 +473,14 @@ func TestOpenAPISchemaBuilderKeepsReservedComponentName(t *testing.T) {
 
 func TestGenerateOpenAPISkipsTypedNilMetadataProvider(t *testing.T) {
 	var provider *nilOpenAPIProvider
-	app := &Bear{
-		routeRegistry: []RouteMetadata{{
-			Method:      http.MethodGet,
-			Path:        "/nil-provider",
-			HandlerType: reflect.TypeOf(func() string { return "ok" }),
-			HandlerName: "nilProviderHandler",
-		}},
+	route := RouteMetadata{
+		Method:      http.MethodGet,
+		Path:        "/nil-provider",
+		HandlerType: reflect.TypeOf(func() string { return "ok" }),
+		HandlerName: "nilProviderHandler",
 	}
-	app.setOpenAPIRouteMetadata(app.routeRegistry[0], "/nil-provider", provider)
-	if _, err := app.GenerateOpenAPI(); err != nil {
-		t.Fatalf("typed nil metadata provider should be ignored: %v", err)
+	if info, ok := openAPIControllerInfo(openAPIRouteMetadata{controller: provider}, route, route.Path); ok {
+		t.Fatalf("typed nil metadata provider returned info: %#v", info)
 	}
 }
 

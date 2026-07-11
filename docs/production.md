@@ -238,15 +238,13 @@ authentication requirement with an empty requirement. Generated operations
 include standard JSON error responses for `400`, `403`, `404`, and `500`;
 authenticated private routes also include `401`.
 
-Accurate controller metadata and route-level authentication require framework
-route registration to write private per-`Bear` metadata containing the full
-path, concrete controller instance, and combined route/controller fairings.
+`Handle`, `HandleWithFairing`, and mounted controller registration automatically
+write private per-`Bear` metadata containing the final full path, concrete
+`IOpenAPI` controller instance, and combined route/controller fairings.
 `RouteMetadata` retains its original five-field public shape. Missing private
 identity is handled conservatively: the generator does not search unrelated
 controller beans by relative path and does not guess controller metadata or
-interceptor authentication. Custom registration cannot inject this internal
-metadata through the public struct; framework integrations must use the
-package-private registration helper.
+interceptor authentication.
 
 Generation fails on invalid route metadata, duplicate method/path entries, and
 duplicate explicit operation IDs. For externally consumed APIs, review the
@@ -290,6 +288,13 @@ runner := bear.NewMigrationRunnerWithDialect(sqlDB, bear.MigrationDialectPostgre
 return runner.Up(context.Background(), migrations)
 ```
 
+Configure deployment-specific history and lock tables on the explicit runner:
+
+```go
+runner := bear.NewMigrationRunnerWithDialect(sqlDB, bear.MigrationDialectPostgreSQL).
+    ConfigureTables("tenant_schema_migrations", "tenant_schema_migration_locks")
+```
+
 Use `MigrationDialectSQLite`, `MigrationDialectMySQL`, or
 `MigrationDialectPostgreSQL` for an explicit deployment contract. The explicit
 constructor returns an independent dialect runner; creating another runner for
@@ -301,24 +306,46 @@ Unknown or wrapped drivers fail closed with guidance to use
 
 Applied versions are recorded in `schema_migrations`, and rerunning `Up` skips
 versions that have already been applied. SQLite and PostgreSQL execute each
-migration and its history update in one transaction. MySQL DDL is not
-transactional, so the runner first persists a `dirty` history row, executes the
-SQL, and clears the dirty flag only after the final history update succeeds.
+migration and its history update in one transaction by default. MySQL DDL is
+not transactional, so the runner first persists a `dirty` history row, executes
+the SQL, and clears the dirty flag only after the final history update succeeds.
 `Up` and `Down` refuse to continue while any dirty version exists.
 
-After a MySQL failure, inspect the actual schema before resolving the state.
-Recovery is intentionally available only on the explicit dialect runner.
-If the migration completed, keep the history row and mark it applied:
+PostgreSQL statements that cannot run in a transaction, such as `CREATE INDEX
+CONCURRENTLY` and `DROP INDEX CONCURRENTLY`, must opt in per direction. Put this
+exact directive on the first non-empty line of the corresponding `.up.sql` or
+`.down.sql` file:
+
+```sql
+-- gin-bear:non-transactional
+CREATE INDEX CONCURRENTLY users_email_idx ON users (email);
+```
+
+The runner does not infer this mode from SQL text. Marked PostgreSQL directions
+use the same dirty-state protocol as MySQL.
+
+After a MySQL or marked PostgreSQL `Up` failure, inspect the actual schema before
+resolving the state. Recovery is intentionally available only on the explicit
+dialect runner. If `Up` completed, keep the history row and mark it applied:
 
 ```go
 return runner.ForceMigrationState(ctx, "002", true)
 ```
 
-If it did not complete and is safe to run again, remove the dirty history row:
+If `Up` did not complete and is safe to run again, remove the dirty history row:
 
 ```go
 return runner.ForceMigrationState(ctx, "002", false)
 ```
+
+For non-transactional `Down`, the recovery direction is the inverse because the
+history row describes the pre-Down applied state:
+
+- If `Down` SQL failed, the migration is still applied. Restore the dirty row to
+  a clean applied row with `ForceMigrationState(ctx, version, true)`.
+- If `Down` SQL succeeded but deleting the history row failed, the migration is
+  no longer applied. Remove the dirty row with
+  `ForceMigrationState(ctx, version, false)`.
 
 This force operation never executes migration SQL and never decides which
 state the database reached. That decision belongs to the operator. Legacy

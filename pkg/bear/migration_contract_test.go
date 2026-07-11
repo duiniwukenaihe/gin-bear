@@ -95,6 +95,29 @@ func TestNewMigrationRunnerWithDialectKeepsDialectOutsidePublicStruct(t *testing
 	}
 }
 
+func TestDialectMigrationRunnerConfiguresCustomHistoryAndLockTables(t *testing.T) {
+	db := newMigrationTestDB(t)
+	runner := NewMigrationRunnerWithDialect(db, MigrationDialectSQLite).
+		ConfigureTables("tenant_schema_migrations", "tenant_schema_migration_locks")
+	migration := Migration{Version: "001", Name: "custom_tables", UpSQL: "CREATE TABLE custom_table_target (id INTEGER PRIMARY KEY)"}
+
+	if err := runner.Up(context.Background(), []Migration{migration}); err != nil {
+		t.Fatalf("apply migration with custom tables: %v", err)
+	}
+	for _, table := range []string{"tenant_schema_migrations", "tenant_schema_migration_locks"} {
+		var count int
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+			table,
+		).Scan(&count); err != nil {
+			t.Fatalf("look up custom table %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("custom table %s count = %d, want 1", table, count)
+		}
+	}
+}
+
 func TestLegacyRunnerInfersKnownDatabaseDrivers(t *testing.T) {
 	mysqlDB := sql.OpenDB(migrationDialectTestConnector{driver: mysqlInferenceDriver{}})
 	t.Cleanup(func() { _ = mysqlDB.Close() })

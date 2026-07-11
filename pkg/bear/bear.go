@@ -62,22 +62,24 @@ var ginRuntimeMu sync.Mutex
 // Bear 是核心框架引擎
 type Bear struct {
 	*gin.Engine
-	g                 *gin.RouterGroup
-	exprData          map[string]interface{}
-	currentGroup      string
-	fairingHandler    *FairingHandler
-	routeTree         *RouteTree // 路由树，用于存储路由级别的 Fairing
-	routeRegistry     []RouteMetadata
-	grpcServices      []GRPCService
-	mounts            []MountMetadata
-	modules           []Module
-	runtime           *Runtime
-	applied           atomic.Bool // 增加应用标记
-	pluginDispatcher  *PluginDispatcher
-	pluginManager     *PluginManager
-	pluginMode        bool // 标记当前是否处于插件加载模式
-	metricsRegistered atomic.Bool
-	tracingRegistered atomic.Bool
+	g                  *gin.RouterGroup
+	exprData           map[string]interface{}
+	currentGroup       string
+	fairingHandler     *FairingHandler
+	routeTree          *RouteTree // 路由树，用于存储路由级别的 Fairing
+	routeRegistry      []RouteMetadata
+	openAPIController  IOpenAPI
+	controllerFairings []Fairing
+	grpcServices       []GRPCService
+	mounts             []MountMetadata
+	modules            []Module
+	runtime            *Runtime
+	applied            atomic.Bool // 增加应用标记
+	pluginDispatcher   *PluginDispatcher
+	pluginManager      *PluginManager
+	pluginMode         bool // 标记当前是否处于插件加载模式
+	metricsRegistered  atomic.Bool
+	tracingRegistered  atomic.Bool
 }
 
 // OnShutdown 注册服务关闭时的清理函数
@@ -656,7 +658,7 @@ func (b *Bear) HandleWithFairing(httpMethod, relativePath string, handler interf
 		b.runtime.Container.Apply(f)
 	}
 	b.routeTree.addRoute(httpMethod, relativePath, fairings)
-	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler)
+	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler, fairings)
 	return b
 }
 
@@ -665,23 +667,35 @@ func (b *Bear) registerHandler(httpMethod, relativePath string, handler interfac
 	if err != nil {
 		return err
 	}
-	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler)
+	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler, routeFairings)
 	return nil
 }
 
-func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler interface{}, wrapped gin.HandlerFunc) {
+func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler interface{}, wrapped gin.HandlerFunc, routeFairings []Fairing) {
 	if b.pluginMode {
 		b.pluginDispatcher.Register(httpMethod, relativePath, wrapped)
 		return
 	}
-	b.activeGroup().Handle(httpMethod, relativePath, wrapped)
-	b.routeRegistry = append(b.routeRegistry, RouteMetadata{
+	group := b.activeGroup()
+	group.Handle(httpMethod, relativePath, wrapped)
+	route := RouteMetadata{
 		Method:      httpMethod,
 		Path:        relativePath,
 		GroupName:   b.currentGroup,
 		HandlerType: reflect.TypeOf(handler),
 		HandlerName: runtimeFuncName(handler),
-	})
+	}
+	b.routeRegistry = append(b.routeRegistry, route)
+	effectiveFairings := append([]Fairing(nil), b.controllerFairings...)
+	effectiveFairings = append(effectiveFairings, routeFairings...)
+	b.setOpenAPIRouteMetadata(route, joinRoutePath(group.BasePath(), relativePath), b.openAPIController, effectiveFairings...)
+}
+
+func joinRoutePath(basePath, relativePath string) string {
+	if basePath == "/" {
+		basePath = ""
+	}
+	return "/" + strings.TrimPrefix(strings.TrimSuffix(basePath, "/")+"/"+strings.TrimPrefix(relativePath, "/"), "/")
 }
 
 func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gin.HandlerFunc, error) {
@@ -808,9 +822,12 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 		b.g = b.Engine.Group(m.Group)
 		for _, class := range m.Classes {
 			b.currentGroup = m.Group
+			b.openAPIController, _ = class.(IOpenAPI)
+			b.controllerFairings = nil
 			// 检查是否有控制器级别的拦截器
 			if inter, ok := class.(IInterceptors); ok {
-				for _, f := range inter.Interceptors() {
+				b.controllerFairings = append([]Fairing(nil), inter.Interceptors()...)
+				for _, f := range b.controllerFairings {
 					b.g.Use(func(ctx *gin.Context) {
 						if err := f.OnRequest(ctx); err != nil {
 							WriteError(ctx, err)
@@ -821,6 +838,8 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 				}
 			}
 			class.Build(b)
+			b.openAPIController = nil
+			b.controllerFairings = nil
 		}
 	}
 
