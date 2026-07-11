@@ -81,7 +81,7 @@ func TestLoadConfigStrictPolicyByEnvironment(t *testing.T) {
 
 func TestLoadConfigPreservesProductionEnvironmentFilename(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
-	t.Setenv("JWT_SECRET", "test-production-secret-with-32-characters")
+	t.Setenv("JWT_SECRET", randomProductionJWTKey(t))
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestUppercaseProductionEnvironmentUsesRawOverlayAndProductionSafeguards(t *
 	if err := os.WriteFile(filepath.Join(directory, "application-PRODUCTION.yaml"), []byte("server:\n  name: uppercase-production-file\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("JWT_SECRET", "test-production-secret-with-32-characters")
+	t.Setenv("JWT_SECRET", randomProductionJWTKey(t))
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
@@ -627,7 +627,7 @@ func TestLoadConfigRejectsWhitespaceProductionSecret(t *testing.T) {
 	}
 }
 
-func TestSysConfigValidateRejectsKnownProductionJWTPlaceholders(t *testing.T) {
+func TestSysConfigValidateRejectsKnownProductionJWTSecrets(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")
 
@@ -636,13 +636,36 @@ func TestSysConfigValidateRejectsKnownProductionJWTPlaceholders(t *testing.T) {
 		"your-secret-key",
 		"set-with-JWT_SECRET-32-plus-random-chars",
 		"replace-with-at-least-32-random-characters",
+		"test-only-jwt-key-with-32-random-characters",
+		"release-e2e-jwt-secret-1234567890",
+		"test-production-secret-with-32-characters",
+		"production-secret-with-at-least-32-characters",
+		"env-secret-with-at-least-32-characters",
 	} {
-		cfg := NewSysConfig()
-		cfg.Auth.JWTSecret = placeholder
+		placeholder := placeholder
+		t.Run(placeholder, func(t *testing.T) {
+			cfg := NewSysConfig()
+			cfg.Auth.JWTSecret = placeholder
 
-		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
-			t.Fatalf("SysConfig.Validate accepted known JWT placeholder %q: %v", placeholder, err)
-		}
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
+				t.Fatalf("SysConfig.Validate accepted known JWT placeholder %q: %v", placeholder, err)
+			}
+		})
+	}
+}
+
+func TestSysConfigValidateAccepts32ByteJWTSecretWithBoundaryWhitespace(t *testing.T) {
+	t.Setenv("BEAR_ENV", "production")
+	t.Setenv("GIN_MODE", "")
+	secret := " " + strings.Repeat("k", 30) + " "
+	if len(secret) != 32 {
+		t.Fatalf("test JWT secret length = %d", len(secret))
+	}
+
+	cfg := NewSysConfig()
+	cfg.Auth.JWTSecret = secret
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("SysConfig.Validate rejected 32-byte JWT secret with boundary whitespace: %v", err)
 	}
 }
 

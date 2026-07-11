@@ -425,7 +425,9 @@ func (c *SysConfig) validateSemantic() error {
 }
 
 func isWeakProductionJWTSecret(secret string) bool {
-	secret = strings.TrimSpace(secret)
+	if strings.TrimSpace(secret) == "" {
+		return true
+	}
 	if len(secret) < 32 {
 		return true
 	}
@@ -433,7 +435,12 @@ func isWeakProductionJWTSecret(secret string) bool {
 	case "bear-secret",
 		"your-secret-key",
 		"set-with-JWT_SECRET-32-plus-random-chars",
-		"replace-with-at-least-32-random-characters":
+		"replace-with-at-least-32-random-characters",
+		"test-only-jwt-key-with-32-random-characters",
+		"release-e2e-jwt-secret-1234567890",
+		"test-production-secret-with-32-characters",
+		"production-secret-with-at-least-32-characters",
+		"env-secret-with-at-least-32-characters":
 		return true
 	default:
 		return false

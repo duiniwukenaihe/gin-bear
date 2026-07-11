@@ -4,6 +4,8 @@ package releasee2e
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -240,6 +242,7 @@ type runningApplication struct {
 func startApplication(t *testing.T, binary, directory string) (*runningApplication, string, *http.Client) {
 	t.Helper()
 	client := &http.Client{Timeout: 2 * time.Second}
+	jwtSecret := randomJWTSecret(t)
 	var failures []string
 	for attempt := 1; attempt <= 3; attempt++ {
 		port := reservePort(t)
@@ -254,6 +257,7 @@ func startApplication(t *testing.T, binary, directory string) (*runningApplicati
 			"BEAR_E2E_PORT":    strconv.Itoa(port),
 			"BEAR_ENV":         "test",
 			"GIN_MODE":         "release",
+			"JWT_SECRET":       jwtSecret,
 		})
 		running.command.Stdout = running.stdout
 		running.command.Stderr = running.stderr
@@ -273,6 +277,15 @@ func startApplication(t *testing.T, binary, directory string) (*runningApplicati
 	}
 	t.Fatalf("application failed to start after 3 complete attempts:\n%s", strings.Join(failures, "\n"))
 	return nil, "", nil
+}
+
+func randomJWTSecret(t *testing.T) string {
+	t.Helper()
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatalf("generate release JWT secret: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
 type processWait struct {
@@ -520,7 +533,7 @@ func main() {
 	config := bear.NewSysConfig()
 	config.Server.Port = int32(port)
 	config.DB.Enabled = false
-	config.Auth.JWTSecret = "release-e2e-jwt-secret-1234567890"
+	config.Auth.JWTSecret = os.Getenv("JWT_SECRET")
 	publicPaths := []string{"/live", "/ready", "/success", "/validate"}
 	config.Auth.PublicPaths = &publicPaths
 	config.Tracing.Enabled = true
@@ -570,7 +583,7 @@ tracing:
   sample_rate: 1.0
 
 auth:
-  jwt_secret: "release-e2e-jwt-secret-1234567890"
+  jwt_secret: "replace-with-at-least-32-random-characters"
   token_expire_hours: 24
   public_paths:
     - "/live"

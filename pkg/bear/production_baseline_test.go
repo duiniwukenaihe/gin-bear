@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -29,7 +31,14 @@ import (
 	"gorm.io/gorm"
 )
 
-const productionTestJWTKey = "test-only-jwt-key-with-32-random-characters"
+func randomProductionJWTKey(t *testing.T) string {
+	t.Helper()
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatalf("generate production JWT test key: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
 
 func resetTestInjector() {
 	setDefaultInjector(NewBeanFactory())
@@ -989,7 +998,7 @@ func TestIgniteConfiguresGinReleaseMode(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
-	cfg.Auth.JWTSecret = productionTestJWTKey
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	Ignite(cfg)
 
@@ -1047,7 +1056,7 @@ func TestIgniteUsesBearEnvProductionMode(t *testing.T) {
 	t.Setenv("GIN_MODE", "")
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.JWTSecret = productionTestJWTKey
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	Ignite(cfg)
 
@@ -1418,7 +1427,7 @@ func TestGenerateOpenAPIIncludesJWTSecurityScheme(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Name = "secure-openapi-test"
-	cfg.Auth.JWTSecret = productionTestJWTKey
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	app := Ignite(cfg)
 	app.Mount("/api", &openAPITestController{})
@@ -1636,7 +1645,7 @@ func TestAuthFairingUsesConfiguredPublicPaths(t *testing.T) {
 }
 
 func TestJWTUtilRejectsUnexpectedSigningMethod(t *testing.T) {
-	util := NewJWTUtil(productionTestJWTKey, 24)
+	util := NewJWTUtil(randomProductionJWTKey(t), 24)
 	token := jwt.NewWithClaims(jwt.SigningMethodHS512, CustomClaims{
 		UserID: 1,
 		Email:  "a@example.com",
@@ -1796,7 +1805,7 @@ func TestIgniteRejectsDisabledWebSocketOriginCheckInProduction(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
-	cfg.Auth.JWTSecret = productionTestJWTKey
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 	cfg.WS.CheckOrigin = false
 
 	defer func() {
@@ -2130,7 +2139,8 @@ func TestBuildGormConfigAppliesSlowQueryLogger(t *testing.T) {
 
 func TestApplyEnvOverridesProductionSecretsAndDependencies(t *testing.T) {
 	cfg := NewSysConfig()
-	t.Setenv("JWT_SECRET", "env-secret-with-at-least-32-characters")
+	jwtSecret := randomProductionJWTKey(t)
+	t.Setenv("JWT_SECRET", jwtSecret)
 	t.Setenv("REDIS_ADDR", "redis.example:6379")
 	t.Setenv("REDIS_REQUIRED", "true")
 	t.Setenv("POSTGRES_HOST", "db.example")
@@ -2146,7 +2156,7 @@ func TestApplyEnvOverridesProductionSecretsAndDependencies(t *testing.T) {
 
 	applyEnvOverrides(cfg)
 
-	if cfg.Auth.JWTSecret != "env-secret-with-at-least-32-characters" {
+	if cfg.Auth.JWTSecret != jwtSecret {
 		t.Fatalf("jwt secret = %q", cfg.Auth.JWTSecret)
 	}
 	if cfg.Redis.Addr != "redis.example:6379" {

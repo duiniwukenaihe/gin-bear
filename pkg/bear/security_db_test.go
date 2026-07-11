@@ -231,7 +231,7 @@ func TestSysConfigValidateEnforcesProductionDBTLS(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")
 	cfg := NewSysConfig()
-	cfg.Auth.JWTSecret = productionTestJWTKey
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 	cfg.DB.Enabled = true
 	cfg.DB.Type = "postgres"
 	cfg.DB.DSN = "postgres://user:validate-secret@db.example/app?sslmode=disable"
@@ -253,14 +253,12 @@ func TestSysConfigValidateEnforcesProductionDBTLS(t *testing.T) {
 func TestLoadConfigEnforcesProductionDBTLSFromYAML(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")
+	t.Setenv("JWT_SECRET", randomProductionJWTKey(t))
 	path := writeConfig(t, "production-insecure-db.yaml", `
 database:
   enabled: true
   type: postgres
   dsn: postgres://user:yaml-secret@db.example/app?sslmode=disable
-auth:
-  jwt_secret: production-secret-with-at-least-32-characters
-  token_expire_hours: 24
 `)
 
 	_, err := LoadConfig(path)
@@ -336,7 +334,7 @@ func TestProductionMySQLTLSFailsAtAllStartupBoundaries(t *testing.T) {
 
 	t.Run("Validate", func(t *testing.T) {
 		cfg := NewSysConfig()
-		cfg.Auth.JWTSecret = productionTestJWTKey
+		cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 		cfg.DB.Enabled = true
 		cfg.DB.Type = "mysql"
 		cfg.DB.DSN = dsn
@@ -344,14 +342,12 @@ func TestProductionMySQLTLSFailsAtAllStartupBoundaries(t *testing.T) {
 	})
 
 	t.Run("LoadConfig", func(t *testing.T) {
+		t.Setenv("JWT_SECRET", randomProductionJWTKey(t))
 		path := writeConfig(t, "production-insecure-mysql.yaml", `
 database:
   enabled: true
   type: mysql
   dsn: app:mysql-path-secret@tcp(db.example:3306)/app?tls=false
-auth:
-  jwt_secret: production-secret-with-at-least-32-characters
-  token_expire_hours: 24
 `)
 		_, err := LoadConfig(path)
 		assertMySQLProductionTLSFailure(t, err)
