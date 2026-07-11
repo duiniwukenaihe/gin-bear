@@ -1,6 +1,7 @@
 package bear
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/gin-gonic/gin"
 )
 
@@ -138,6 +140,7 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 			},
 		}
 		enrichOpenAPIOperation(op, route.HandlerType)
+		ensureOpenAPIPathParameters(op, path)
 		if publicRoute {
 			op["security"] = []map[string][]string{}
 		}
@@ -158,16 +161,56 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 		schema.Paths[path].(map[string]interface{})[method] = op
 	}
 
-	return json.MarshalIndent(schema, "", "  ")
+	document, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal generated OpenAPI document: %w", err)
+	}
+	loader := openapi3.NewLoader()
+	parsed, err := loader.LoadFromData(document)
+	if err != nil {
+		return nil, fmt.Errorf("parse generated OpenAPI document: %w", err)
+	}
+	if err := parsed.Validate(context.Background()); err != nil {
+		return nil, fmt.Errorf("validate generated OpenAPI document: %w", err)
+	}
+	return document, nil
+}
+
+func ensureOpenAPIPathParameters(op map[string]interface{}, path string) {
+	parameters, _ := op["parameters"].([]interface{})
+	existing := make(map[string]struct{}, len(parameters))
+	for _, parameter := range parameters {
+		definition, ok := parameter.(map[string]interface{})
+		if !ok || definition["in"] != "path" {
+			continue
+		}
+		if name, ok := definition["name"].(string); ok {
+			existing[name] = struct{}{}
+		}
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if len(segment) < 3 || segment[0] != '{' || segment[len(segment)-1] != '}' {
+			continue
+		}
+		name := segment[1 : len(segment)-1]
+		if _, ok := existing[name]; ok {
+			continue
+		}
+		parameters = append(parameters, openAPIParameter(name, "path", true, reflect.TypeOf("")))
+		existing[name] = struct{}{}
+	}
+	if len(parameters) > 0 {
+		op["parameters"] = parameters
+	}
 }
 
 func openAPIOperationID(route RouteMetadata, method, path string, seen map[string]RouteMetadata) (string, error) {
 	operationID := strings.TrimSpace(route.HandlerName)
 	if previous, exists := seen[operationID]; exists {
-		if !openAPIGeneratedOperationID(operationID) {
+		if !openAPIGeneratedOperationID(route) {
 			return "", fmt.Errorf("duplicate operationId %q for %s %s and %s %s", operationID, previous.Method, previous.Path, route.Method, route.Path)
 		}
-		operationID = operationID + "_" + openAPIRouteOperationSuffix(method, path)
+		operationID += "_" + openAPIRouteOperationSuffix(method, path)
 		if previous, exists := seen[operationID]; exists {
 			return "", fmt.Errorf("duplicate operationId %q for %s %s and %s %s", operationID, previous.Method, previous.Path, route.Method, route.Path)
 		}
@@ -175,8 +218,10 @@ func openAPIOperationID(route RouteMetadata, method, path string, seen map[strin
 	return operationID, nil
 }
 
-func openAPIGeneratedOperationID(operationID string) bool {
-	return strings.HasPrefix(operationID, "func(") || strings.Contains(operationID, "/") || strings.Contains(operationID, "-fm")
+func openAPIGeneratedOperationID(route RouteMetadata) bool {
+	return route.HandlerType != nil &&
+		route.HandlerType.Kind() == reflect.Func &&
+		strings.TrimSpace(route.HandlerName) == route.HandlerType.String()
 }
 
 func openAPIRouteOperationSuffix(method, path string) string {

@@ -38,7 +38,6 @@ func TracingMiddleware(provider oteltrace.TracerProvider, propagator propagation
 			oteltrace.WithSpanKind(oteltrace.SpanKindServer),
 			oteltrace.WithAttributes(
 				attribute.String("http.request.method", c.Request.Method),
-				attribute.String("url.path", c.Request.URL.Path),
 				attribute.String("http.route", route),
 				attribute.String("client.address", c.ClientIP()),
 				attribute.String("service.version", Version),
@@ -92,10 +91,7 @@ func tracingRoute(c *gin.Context) string {
 	if route := c.FullPath(); route != "" {
 		return route
 	}
-	if c.Request != nil && c.Request.URL != nil && c.Request.URL.Path != "" {
-		return c.Request.URL.Path
-	}
-	return "/"
+	return "unmatched"
 }
 
 func newTracerProvider(ctx context.Context, cfg *TracingConfig) (*sdktrace.TracerProvider, error) {

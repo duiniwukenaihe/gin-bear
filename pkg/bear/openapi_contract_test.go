@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/gin-gonic/gin"
 )
 
 type contractController struct{}
@@ -23,6 +24,8 @@ type contractResponse struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
 }
+
+func legacyOpenAPIHandler() string { return "ok" }
 
 func (c *contractController) Name() string {
 	return "ContractController"
@@ -159,6 +162,108 @@ func TestGenerateOpenAPIRejectsDuplicateContracts(t *testing.T) {
 				t.Fatalf("GenerateOpenAPI error = %v, want substring %q", err, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestGenerateOpenAPIAddsPathParametersForOpaqueHandlers(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	app.routeRegistry = []RouteMetadata{{
+		Method:      http.MethodGet,
+		Path:        "/opaque/:id",
+		HandlerType: reflect.TypeOf(gin.HandlerFunc(func(*gin.Context) {})),
+		HandlerName: "legacyOpaqueHandler",
+	}}
+
+	doc, err := app.GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("GenerateOpenAPI returned error for opaque path route: %v", err)
+	}
+	validateStrictOpenAPI(t, doc)
+
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v", err)
+	}
+	op := spec["paths"].(map[string]interface{})["/opaque/{id}"].(map[string]interface{})["get"].(map[string]interface{})
+	parameters, ok := op["parameters"].([]interface{})
+	if !ok || !openAPIHasParameter(parameters, "id", "path", "string") {
+		t.Fatalf("opaque operation path parameters = %#v, want required string id", op["parameters"])
+	}
+}
+
+func TestGenerateOpenAPIRejectsInvalidGeneratedDocument(t *testing.T) {
+	type mismatchedPathRequest struct {
+		Other string `uri:"other" binding:"required"`
+	}
+	app := Ignite(NewSysConfig())
+	app.routeRegistry = []RouteMetadata{{
+		Method:      http.MethodGet,
+		Path:        "/opaque/:id",
+		HandlerType: reflect.TypeOf(func(*mismatchedPathRequest) {}),
+		HandlerName: "invalidOpaqueRoute",
+	}}
+
+	_, err := app.GenerateOpenAPI()
+	if err == nil {
+		t.Fatal("GenerateOpenAPI returned an invalid document")
+	}
+	if !strings.Contains(err.Error(), "validate generated OpenAPI document") {
+		t.Fatalf("GenerateOpenAPI error = %v, want generated document validation error", err)
+	}
+}
+
+func TestGenerateOpenAPIPreservesLegacyFunctionOperationID(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	app.Handle(http.MethodGet, "/legacy-operation", legacyOpenAPIHandler)
+
+	doc, err := app.GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("GenerateOpenAPI returned error: %v", err)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v", err)
+	}
+	op := spec["paths"].(map[string]interface{})["/legacy-operation"].(map[string]interface{})["get"].(map[string]interface{})
+	if got, want := op["operationId"], reflect.TypeOf(legacyOpenAPIHandler).String(); got != want {
+		t.Fatalf("operationId = %q, want legacy value %q", got, want)
+	}
+}
+
+func TestGenerateOpenAPIDisambiguatesRepeatedLegacyFunctionOperationIDs(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	app.Handle(http.MethodGet, "/legacy-one", legacyOpenAPIHandler)
+	app.Handle(http.MethodPost, "/legacy-two", legacyOpenAPIHandler)
+
+	doc, err := app.GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("GenerateOpenAPI returned error: %v", err)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v", err)
+	}
+	paths := spec["paths"].(map[string]interface{})
+	first := paths["/legacy-one"].(map[string]interface{})["get"].(map[string]interface{})["operationId"]
+	second := paths["/legacy-two"].(map[string]interface{})["post"].(map[string]interface{})["operationId"]
+	if first != "func() string" || second == first {
+		t.Fatalf("operation IDs = %q and %q, want legacy first value and unique generated duplicate", first, second)
+	}
+}
+
+func TestGenerateOpenAPIRejectsGeneratedOperationIDCollision(t *testing.T) {
+	handlerType := reflect.TypeOf(legacyOpenAPIHandler)
+	baseID := handlerType.String()
+	app := Ignite(NewSysConfig())
+	app.routeRegistry = []RouteMetadata{
+		{Method: http.MethodGet, Path: "/explicit", HandlerType: handlerType, HandlerName: baseID + "_get__foo_bar"},
+		{Method: http.MethodGet, Path: "/legacy-one", HandlerType: handlerType, HandlerName: baseID},
+		{Method: http.MethodGet, Path: "/foo-bar", HandlerType: handlerType, HandlerName: baseID},
+	}
+
+	_, err := app.GenerateOpenAPI()
+	if err == nil || !strings.Contains(err.Error(), "duplicate operationId") {
+		t.Fatalf("GenerateOpenAPI error = %v, want generated operationId collision", err)
 	}
 }
 

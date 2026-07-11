@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -771,12 +770,6 @@ func websocketOriginAllowed(config *SysConfig, r *http.Request) bool {
 }
 
 func runtimeFuncName(i interface{}) string {
-	value := reflect.ValueOf(i)
-	if value.IsValid() && value.Kind() == reflect.Func {
-		if fn := runtime.FuncForPC(value.Pointer()); fn != nil {
-			return fn.Name()
-		}
-	}
 	return reflect.TypeOf(i).String()
 }
 

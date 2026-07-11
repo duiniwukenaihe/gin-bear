@@ -76,12 +76,38 @@ func (r *httpMetricsRegistry) Record(method, route string, status int, latency t
 	if r == nil {
 		return
 	}
+	method = metricMethod(method)
 	statusLabel := strconv.Itoa(status)
 	r.requests.WithLabelValues(method, route, statusLabel).Inc()
 	if status >= http.StatusBadRequest {
 		r.errors.WithLabelValues(method, route, statusLabel).Inc()
 	}
 	r.duration.WithLabelValues(method, route, statusLabel).Observe(latency.Seconds())
+}
+
+func metricMethod(method string) string {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodConnect:
+		return http.MethodConnect
+	case http.MethodDelete:
+		return http.MethodDelete
+	case http.MethodGet:
+		return http.MethodGet
+	case http.MethodHead:
+		return http.MethodHead
+	case http.MethodOptions:
+		return http.MethodOptions
+	case http.MethodPatch:
+		return http.MethodPatch
+	case http.MethodPost:
+		return http.MethodPost
+	case http.MethodPut:
+		return http.MethodPut
+	case http.MethodTrace:
+		return http.MethodTrace
+	default:
+		return "OTHER"
+	}
 }
 
 func (r *httpMetricsRegistry) RenderPrometheus() string {

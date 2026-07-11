@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -105,26 +104,50 @@ func runReadinessChecks(parent context.Context, timeout time.Duration, checkers 
 	if len(checkers) == 0 {
 		return nil
 	}
-	sort.Slice(checkers, func(i, j int) bool {
-		return checkers[i].Name() < checkers[j].Name()
+	ordered := append([]ReadinessChecker(nil), checkers...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Name() < ordered[j].Name()
 	})
 
-	results := make([]readinessResult, len(checkers))
-	var wg sync.WaitGroup
-	wg.Add(len(checkers))
-	for i, checker := range checkers {
+	deadlineCtx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	type indexedResult struct {
+		index int
+		readinessResult
+	}
+	completed := make(chan indexedResult, len(ordered))
+	for i, checker := range ordered {
 		i, checker := i, checker
 		go func() {
-			defer wg.Done()
-			childCtx, cancel := context.WithTimeout(parent, timeout)
-			defer cancel()
-			results[i] = readinessResult{
-				Name: checker.Name(),
-				Err:  checker.CheckReady(childCtx),
+			completed <- indexedResult{
+				index: i,
+				readinessResult: readinessResult{
+					Name: checker.Name(),
+					Err:  checker.CheckReady(deadlineCtx),
+				},
 			}
 		}()
 	}
-	wg.Wait()
+
+	results := make([]readinessResult, len(ordered))
+	finished := make([]bool, len(ordered))
+	for remaining := len(ordered); remaining > 0; {
+		select {
+		case result := <-completed:
+			if !finished[result.index] {
+				results[result.index] = result.readinessResult
+				finished[result.index] = true
+				remaining--
+			}
+		case <-deadlineCtx.Done():
+			for i, checker := range ordered {
+				if !finished[i] {
+					results[i] = readinessResult{Name: checker.Name(), Err: deadlineCtx.Err()}
+				}
+			}
+			return results
+		}
+	}
 	return results
 }
 
