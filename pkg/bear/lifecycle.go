@@ -16,13 +16,13 @@ type ContextShutdowner interface {
 
 // Lifecycle owns component startup and shutdown order for one application.
 type Lifecycle struct {
-	opMu        sync.Mutex
-	mu          sync.Mutex
-	components  []*lifecycleEntry
-	beanEntries map[reflect.Type]*lifecycleEntry
-	state       lifecycleState
-	startErr    error
-	stopErr     error
+	mu            sync.Mutex
+	components    []*lifecycleEntry
+	beanEntries   map[reflect.Type]*lifecycleEntry
+	state         lifecycleState
+	operationDone chan struct{}
+	startErr      error
+	stopErr       error
 }
 
 type lifecycleEntry struct {
@@ -43,7 +43,12 @@ const (
 	lifecycleStopped
 )
 
-var errLifecycleStopped = errors.New("lifecycle cannot start after stop")
+var (
+	errLifecycleStopped = errors.New("lifecycle cannot start after stop")
+
+	// ErrLifecycleRegistrationClosed reports registration after startup begins.
+	ErrLifecycleRegistrationClosed = errors.New("lifecycle registration closed after startup begins")
+)
 
 const lifecycleRollbackTimeout = 5 * time.Second
 
@@ -132,17 +137,27 @@ func (l *Lifecycle) retireUnregisteredEntry(entry *lifecycleEntry) {
 	}
 }
 
-// Add appends a component to the lifecycle in registration order.
-func (l *Lifecycle) Add(component any) {
+// Add appends a component in registration order. Registration closes as soon
+// as startup begins so every accepted component has a defined lifecycle.
+func (l *Lifecycle) Add(component any) error {
 	if l == nil || component == nil {
-		return
+		return nil
 	}
+	return l.add(component)
+}
+
+func (l *Lifecycle) add(components ...any) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.state == lifecycleStopping || l.state == lifecycleStopped {
-		return
+	if l.state != lifecycleNew {
+		return ErrLifecycleRegistrationClosed
 	}
-	l.components = append(l.components, &lifecycleEntry{component: component, active: true})
+	for _, component := range components {
+		if component != nil {
+			l.components = append(l.components, &lifecycleEntry{component: component, active: true})
+		}
+	}
+	return nil
 }
 
 // Start initializes components in registration order.
@@ -154,26 +169,38 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	l.opMu.Lock()
-	defer l.opMu.Unlock()
-	l.mu.Lock()
-	switch l.state {
-	case lifecycleStopped, lifecycleStopping:
-		err := l.startErr
-		l.mu.Unlock()
-		if err != nil {
+	for {
+		l.mu.Lock()
+		switch l.state {
+		case lifecycleStopped:
+			err := l.startErr
+			l.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			return errLifecycleStopped
+		case lifecycleStarted:
+			err := l.startErr
+			l.mu.Unlock()
 			return err
+		case lifecycleStarting, lifecycleStopping:
+			done := l.operationDone
+			l.mu.Unlock()
+			if err := waitLifecycleOperation(ctx, done); err != nil {
+				return err
+			}
+			continue
+		default:
+			l.state = lifecycleStarting
+			l.operationDone = make(chan struct{})
+			components := append([]*lifecycleEntry(nil), l.components...)
+			l.mu.Unlock()
+			return l.startComponents(ctx, components)
 		}
-		return errLifecycleStopped
-	case lifecycleStarted:
-		err := l.startErr
-		l.mu.Unlock()
-		return err
 	}
-	l.state = lifecycleStarting
-	components := append([]*lifecycleEntry(nil), l.components...)
-	l.mu.Unlock()
+}
 
+func (l *Lifecycle) startComponents(ctx context.Context, components []*lifecycleEntry) error {
 	for _, entry := range components {
 		l.mu.Lock()
 		active := entry.active
@@ -194,6 +221,7 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 	}
 	l.mu.Lock()
 	l.state = lifecycleStarted
+	close(l.operationDone)
 	l.mu.Unlock()
 	return nil
 }
@@ -217,6 +245,7 @@ func (l *Lifecycle) rollbackStart(startErr error) error {
 	l.mu.Lock()
 	l.stopErr = rollbackErr
 	l.state = lifecycleStopped
+	close(l.operationDone)
 	l.mu.Unlock()
 	if rollbackErr != nil {
 		return errors.Join(startErr, fmt.Errorf("lifecycle rollback failed: %w", rollbackErr))
@@ -239,28 +268,42 @@ func (l *Lifecycle) Stop(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	l.opMu.Lock()
-	defer l.opMu.Unlock()
-	l.mu.Lock()
-	if l.state == lifecycleStopped {
-		err := l.stopErr
-		l.mu.Unlock()
-		return err
-	}
-	l.state = lifecycleStopping
-	components := make([]any, 0, len(l.components))
-	for _, entry := range l.components {
-		if entry.started && !entry.stopped {
-			entry.stopped = true
-			components = append(components, entry.component)
+	for {
+		l.mu.Lock()
+		switch l.state {
+		case lifecycleStopped:
+			err := l.stopErr
+			l.mu.Unlock()
+			return err
+		case lifecycleStarting, lifecycleStopping:
+			done := l.operationDone
+			l.mu.Unlock()
+			if err := waitLifecycleOperation(ctx, done); err != nil {
+				return err
+			}
+			continue
+		default:
+			l.state = lifecycleStopping
+			l.operationDone = make(chan struct{})
+			components := make([]any, 0, len(l.components))
+			for _, entry := range l.components {
+				if entry.started && !entry.stopped {
+					entry.stopped = true
+					components = append(components, entry.component)
+				}
+			}
+			l.mu.Unlock()
+			return l.stopComponents(ctx, components)
 		}
 	}
-	l.mu.Unlock()
+}
 
+func (l *Lifecycle) stopComponents(ctx context.Context, components []any) error {
 	stopErr := stopLifecycleComponents(ctx, components)
 	l.mu.Lock()
 	l.stopErr = stopErr
 	l.state = lifecycleStopped
+	close(l.operationDone)
 	l.mu.Unlock()
 	return stopErr
 }
@@ -269,11 +312,30 @@ func stopLifecycleComponents(ctx context.Context, components []any) error {
 	var shutdownErrors []error
 	for i := len(components) - 1; i >= 0; i-- {
 		component := components[i]
+		if err := ctx.Err(); err != nil {
+			shutdownErrors = append(shutdownErrors, fmt.Errorf("component shutdown not started [%s]: %w", lifecycleComponentName(component), err))
+			break
+		}
 		if err := stopLifecycleComponent(ctx, component); err != nil {
 			shutdownErrors = append(shutdownErrors, fmt.Errorf("component shutdown failed [%s]: %w", lifecycleComponentName(component), err))
 		}
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return errors.Join(shutdownErrors...)
+}
+
+func waitLifecycleOperation(ctx context.Context, done <-chan struct{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-done:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func sameLifecycleComponent(a, b any) bool {
@@ -315,6 +377,9 @@ func runLegacyShutdown(ctx context.Context, shutdown func() error) error {
 }
 
 func runShutdownWorker(ctx context.Context, shutdown func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	done := make(chan error, 1)
 	go func() {
 		defer func() {

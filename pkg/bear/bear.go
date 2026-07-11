@@ -100,16 +100,18 @@ const (
 	applyFailed
 )
 
-// OnShutdown 注册服务关闭时的清理函数
-func (b *Bear) OnShutdown(f ...func()) {
+// OnShutdown registers cleanup hooks before startup begins.
+func (b *Bear) OnShutdown(f ...func()) error {
 	if b == nil || b.runtime == nil {
-		return
+		return nil
 	}
+	hooks := make([]any, 0, len(f))
 	for _, hook := range f {
 		if hook != nil {
-			b.runtime.Lifecycle.Add(shutdownHook{fn: hook})
+			hooks = append(hooks, shutdownHook{fn: hook})
 		}
 	}
+	return b.runtime.Lifecycle.add(hooks...)
 }
 
 func (b *Bear) Name() string {
@@ -255,6 +257,9 @@ func (b *Bear) Launch(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	if err := b.launchApplyError(); err != nil {
+		return err
+	}
+	if err := b.closePluginRegistration(ctx); err != nil {
 		return err
 	}
 	config := b.runtime.Config
@@ -948,7 +953,13 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err, cached := b.cachedApplyResult(); cached {
+		return err
+	}
 	if err := b.closePluginRegistration(ctx); err != nil {
+		if cachedErr, cached := b.cachedApplyResult(); cached {
+			return cachedErr
+		}
 		return err
 	}
 	b.applyMu.Lock()
@@ -989,6 +1000,19 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 	close(b.applyDone)
 	b.applyMu.Unlock()
 	return err
+}
+
+func (b *Bear) cachedApplyResult() (error, bool) {
+	b.applyMu.Lock()
+	defer b.applyMu.Unlock()
+	switch b.applyState {
+	case applySucceeded:
+		return nil, true
+	case applyFailed:
+		return b.applyErr, true
+	default:
+		return nil, false
+	}
 }
 
 func (b *Bear) applyAll(ctx context.Context) (resultErr error) {

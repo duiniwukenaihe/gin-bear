@@ -443,6 +443,14 @@ safely replace lifecycle-owned resources in a live process. Publish the new
 plugin with a new application instance and use a readiness-checked rolling
 replacement to move traffic.
 
+`Launch` closes the same registration barrier even when an application skips
+`ApplyAll`. Register lifecycle components and shutdown hooks before startup:
+`Lifecycle.Add` and `Bear.OnShutdown` return
+`bear.ErrLifecycleRegistrationClosed` once startup has begun. Shutdown remains
+strictly LIFO; when its context expires, Bear does not start another component.
+A legacy `Shutdown()` call that already started may finish in one bounded
+background worker, while `Stop` returns the context error and caches that result.
+
 ## Delivery Checks
 
 Run the project verification gate locally before cutting a release:
