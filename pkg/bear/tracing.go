@@ -63,7 +63,12 @@ func TracingMiddleware(provider oteltrace.TracerProvider, propagator propagation
 			span.SetStatus(codes.Error, http.StatusText(status))
 		}
 		for _, ginErr := range c.Errors {
-			span.AddEvent("gin.error", oteltrace.WithAttributes(attribute.String("error.message", ginErr.Error())))
+			category, errorCode := observableErrorMetadata(ginErr.Err, status)
+			span.AddEvent("gin.error", oteltrace.WithAttributes(
+				attribute.String("error.type", category),
+				attribute.Int("http.response.status_code", status),
+				attribute.Int("gin_bear.error_code", errorCode),
+			))
 		}
 	}
 }

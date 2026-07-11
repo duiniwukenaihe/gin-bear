@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	mysqldriver "github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -136,6 +137,57 @@ func effectivePostgresSSLMode(cfg *DBConfig) (string, error) {
 	}
 }
 
+// validateProductionDBTLS validates the effective driver configuration so a
+// raw DSN cannot bypass the production TLS policy.
+func validateProductionDBTLS(cfg *DBConfig, production bool) error {
+	if !production || cfg == nil || !cfg.Enabled {
+		return nil
+	}
+
+	dsn, err := buildDSN(cfg)
+	if err != nil {
+		return errors.New("production database DSN is invalid")
+	}
+	dbType := strings.ToLower(strings.TrimSpace(cfg.Type))
+	if dbType == "" {
+		dbType = "mysql"
+	}
+
+	switch dbType {
+	case "postgres", "postgresql":
+		parsed, parseErr := pgconn.ParseConfig(dsn)
+		if parseErr != nil {
+			return errors.New("production PostgreSQL DSN is invalid")
+		}
+		if !postgresTLSVerifiesHostname(parsed) {
+			return errors.New("production PostgreSQL requires sslmode=verify-full")
+		}
+	case "mysql":
+		parsed, parseErr := mysqldriver.ParseDSN(dsn)
+		if parseErr != nil {
+			return errors.New("production MySQL DSN is invalid")
+		}
+		if parsed.TLS == nil || parsed.TLS.InsecureSkipVerify || parsed.AllowFallbackToPlaintext {
+			return errors.New("production MySQL requires TLS with certificate verification")
+		}
+	default:
+		return errors.New("production database type is unsupported")
+	}
+	return nil
+}
+
+func postgresTLSVerifiesHostname(cfg *pgconn.Config) bool {
+	if cfg == nil || cfg.TLSConfig == nil || cfg.TLSConfig.InsecureSkipVerify {
+		return false
+	}
+	for _, fallback := range cfg.Fallbacks {
+		if fallback == nil || fallback.TLSConfig == nil || fallback.TLSConfig.InsecureSkipVerify {
+			return false
+		}
+	}
+	return true
+}
+
 // NewGormAdapter 创建 GORM 适配器
 func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 	dsn, err := buildDSN(cfg)
@@ -206,21 +258,23 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 }
 
 func buildGormConfig(cfg *DBConfig) *gorm.Config {
+	slowThreshold := 200 * time.Millisecond
+	if cfg != nil && cfg.SlowQueryThreshold != "" {
+		if configured := parseDurationOrDefault(cfg.SlowQueryThreshold, 0); configured > 0 {
+			slowThreshold = configured
+		}
+	}
 	gormCfg := &gorm.Config{
 		NamingStrategy: schema.NamingStrategy{
 			SingularTable: true, // 使用单数表名
 		},
 		PrepareStmt: false, // 禁用预编译语句缓存以兼容旧版驱动或某些插件
-	}
-	if cfg != nil && cfg.SlowQueryThreshold != "" {
-		threshold := parseDurationOrDefault(cfg.SlowQueryThreshold, 0)
-		if threshold > 0 {
-			gormCfg.Logger = logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
-				SlowThreshold: threshold,
-				LogLevel:      logger.Warn,
-				Colorful:      false,
-			})
-		}
+		Logger: logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
+			SlowThreshold:        slowThreshold,
+			LogLevel:             logger.Warn,
+			Colorful:             false,
+			ParameterizedQueries: true,
+		}),
 	}
 	return gormCfg
 }

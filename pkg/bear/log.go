@@ -69,13 +69,22 @@ type ContextHandler struct {
 
 // Handle 实现 slog.Handler 接口
 func (h *ContextHandler) Handle(ctx context.Context, r slog.Record) error {
+	r = sanitizeLogRecord(r)
 	if ctx == nil {
 		return h.Handler.Handle(ctx, r)
 	}
 	if rid, ok := ctx.Value(RequestIDKey).(string); ok {
-		r.AddAttrs(slog.String(string(RequestIDKey), rid))
+		r.AddAttrs(sanitizeLogAttr(slog.String(string(RequestIDKey), rid)))
 	}
 	return h.Handler.Handle(ctx, r)
+}
+
+func (h *ContextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &ContextHandler{Handler: h.Handler.WithAttrs(sanitizeLogAttrs(attrs))}
+}
+
+func (h *ContextHandler) WithGroup(name string) slog.Handler {
+	return &ContextHandler{Handler: h.Handler.WithGroup(name)}
 }
 
 // SetDefaultLogger initializes the legacy global logger with default settings.

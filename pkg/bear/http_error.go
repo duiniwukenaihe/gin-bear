@@ -22,12 +22,12 @@ func WriteError(ctx *gin.Context, err error) {
 	if ctx.Writer.Written() {
 		return
 	}
-	logHTTPError(ctx, err)
 	status, response := errorResponse(ctx, err)
+	logHTTPError(ctx, err, status, response.Code)
 	ctx.AbortWithStatusJSON(status, response)
 }
 
-func logHTTPError(ctx *gin.Context, err error) {
+func logHTTPError(ctx *gin.Context, err error, status, errorCode int) {
 	logger := legacyLogger()
 	if value, ok := ctx.Get(runtimeContextKey); ok {
 		if runtime, ok := value.(*Runtime); ok && runtime != nil && runtime.Logger != nil {
@@ -35,16 +35,20 @@ func logHTTPError(ctx *gin.Context, err error) {
 		}
 	}
 	requestContext := context.Background()
-	path := ""
-	method := ""
+	method := "OTHER"
 	if ctx.Request != nil {
 		requestContext = ctx.Request.Context()
-		path = ctx.Request.URL.Path
-		method = ctx.Request.Method
+		method = normalizeHTTPMethod(ctx.Request.Method)
+	}
+	category, stableCode := observableErrorMetadata(err, status)
+	if stableCode == 0 {
+		stableCode = errorCode
 	}
 	logger.ErrorContext(requestContext, "Handler execution failed",
-		"error", err,
-		"path", path,
+		"error_category", category,
+		"error_code", stableCode,
+		"status", status,
+		"route", tracingRoute(ctx),
 		"method", method,
 	)
 }

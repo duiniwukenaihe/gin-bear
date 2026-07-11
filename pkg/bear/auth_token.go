@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // ErrTokenRevocationUnavailable reports that no Redis revocation store exists.
@@ -67,9 +69,12 @@ func (m *AuthTokenManager) RevokeToken(ctx context.Context, tokenStr string) err
 	if err != nil {
 		return err // Invalid token, no need to blacklist (or already expired)
 	}
+	if claims == nil || claims.ExpiresAt == nil {
+		return jwt.ErrTokenRequiredClaimMissing
+	}
 
 	expirationTime := claims.ExpiresAt.Time
-	ttl := time.Until(expirationTime)
+	ttl := time.Until(expirationTime.Add(m.JWTUtil.Config.ClockSkew))
 
 	if ttl <= 0 {
 		return nil // Already expired
