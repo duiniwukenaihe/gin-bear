@@ -100,8 +100,14 @@ const (
 	applyFailed
 )
 
-// OnShutdown registers cleanup hooks before startup begins.
-func (b *Bear) OnShutdown(f ...func()) error {
+// OnShutdown registers cleanup hooks before startup begins. Hooks attempted
+// after registration closes are ignored for compatibility.
+func (b *Bear) OnShutdown(f ...func()) {
+	_ = b.TryOnShutdown(f...)
+}
+
+// TryOnShutdown registers cleanup hooks or reports that registration is closed.
+func (b *Bear) TryOnShutdown(f ...func()) error {
 	if b == nil || b.runtime == nil {
 		return nil
 	}
@@ -213,19 +219,29 @@ func (b *Bear) EnableTracing(ctx context.Context) *Bear {
 	if config == nil || config.Tracing == nil || !config.Tracing.Enabled {
 		return b
 	}
+	if b.runtime.Lifecycle.registrationClosed() {
+		b.runtime.Logger.Error("Tracing registration rejected", "error_code", "BEAR_TRACING_REGISTRATION_CLOSED")
+		return b
+	}
 	if !b.tracingRegistered.CompareAndSwap(false, true) {
 		return b
 	}
 	provider, err := newTracerProvider(ctx, config.Tracing)
 	if err != nil {
+		b.tracingRegistered.Store(false)
 		b.runtime.Logger.Error("Tracing initialization failed", "error_code", "BEAR_TRACING_INIT")
+		return b
+	}
+	if err := b.TryOnShutdown(shutdownTracerProvider(provider)); err != nil {
+		shutdownTracerProvider(provider)()
+		b.tracingRegistered.Store(false)
+		b.runtime.Logger.Error("Tracing registration rejected", "error_code", "BEAR_TRACING_REGISTRATION_CLOSED")
 		return b
 	}
 	propagator := propagation.TraceContext{}
 	b.runtime.TracerProvider = provider
 	b.runtime.TextMapPropagator = propagator
 	b.Use(TracingMiddleware(provider, propagator))
-	b.OnShutdown(shutdownTracerProvider(provider))
 	b.runtime.Logger.Info("Tracing enabled", "exporter", config.Tracing.Exporter, "service", config.Tracing.ServiceName)
 	return b
 }
@@ -262,6 +278,7 @@ func (b *Bear) Launch(ctx context.Context) error {
 	if err := b.closePluginRegistration(ctx); err != nil {
 		return err
 	}
+	b.runtime.Lifecycle.sealRegistration()
 	config := b.runtime.Config
 	logger := b.runtime.Logger
 	server := b.buildHTTPServer(config)

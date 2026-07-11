@@ -16,13 +16,14 @@ type ContextShutdowner interface {
 
 // Lifecycle owns component startup and shutdown order for one application.
 type Lifecycle struct {
-	mu            sync.Mutex
-	components    []*lifecycleEntry
-	beanEntries   map[reflect.Type]*lifecycleEntry
-	state         lifecycleState
-	operationDone chan struct{}
-	startErr      error
-	stopErr       error
+	mu                 sync.Mutex
+	components         []*lifecycleEntry
+	beanEntries        map[reflect.Type]*lifecycleEntry
+	state              lifecycleState
+	registrationSealed bool
+	operationDone      chan struct{}
+	startErr           error
+	stopErr            error
 }
 
 type lifecycleEntry struct {
@@ -61,9 +62,18 @@ func (l *Lifecycle) registrationClosed() bool {
 		return true
 	}
 	l.mu.Lock()
-	closed := l.state != lifecycleNew
+	closed := l.registrationSealed || l.state != lifecycleNew
 	l.mu.Unlock()
 	return closed
+}
+
+func (l *Lifecycle) sealRegistration() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.registrationSealed = true
+	l.mu.Unlock()
 }
 
 func (l *Lifecycle) setBean(beanType reflect.Type, bean any) {
@@ -137,9 +147,14 @@ func (l *Lifecycle) retireUnregisteredEntry(entry *lifecycleEntry) {
 	}
 }
 
-// Add appends a component in registration order. Registration closes as soon
-// as startup begins so every accepted component has a defined lifecycle.
-func (l *Lifecycle) Add(component any) error {
+// Add appends a component in registration order. Registrations attempted after
+// startup begins are ignored for compatibility; use TryAdd to observe rejection.
+func (l *Lifecycle) Add(component any) {
+	_ = l.TryAdd(component)
+}
+
+// TryAdd appends a component or reports that lifecycle registration is closed.
+func (l *Lifecycle) TryAdd(component any) error {
 	if l == nil || component == nil {
 		return nil
 	}
@@ -149,7 +164,7 @@ func (l *Lifecycle) Add(component any) error {
 func (l *Lifecycle) add(components ...any) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.state != lifecycleNew {
+	if l.registrationSealed || l.state != lifecycleNew {
 		return ErrLifecycleRegistrationClosed
 	}
 	for _, component := range components {
@@ -213,7 +228,7 @@ func (l *Lifecycle) startComponents(ctx context.Context, components []*lifecycle
 			l.markStarted(entry)
 			continue
 		}
-		if err := initializer.Init(ctx); err != nil {
+		if err := runLifecycleInitializer(ctx, initializer); err != nil {
 			startErr := fmt.Errorf("component initialization failed [%s]: %w", lifecycleComponentName(entry.component), err)
 			return l.rollbackStart(startErr)
 		}
@@ -224,6 +239,15 @@ func (l *Lifecycle) startComponents(ctx context.Context, components []*lifecycle
 	close(l.operationDone)
 	l.mu.Unlock()
 	return nil
+}
+
+func runLifecycleInitializer(ctx context.Context, initializer Initializer) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("component initialization panic")
+		}
+	}()
+	return initializer.Init(ctx)
 }
 
 func (l *Lifecycle) rollbackStart(startErr error) error {

@@ -445,11 +445,13 @@ replacement to move traffic.
 
 `Launch` closes the same registration barrier even when an application skips
 `ApplyAll`. Register lifecycle components and shutdown hooks before startup:
-`Lifecycle.Add` and `Bear.OnShutdown` return
-`bear.ErrLifecycleRegistrationClosed` once startup has begun. Shutdown remains
-strictly LIFO; when its context expires, Bear does not start another component.
-A legacy `Shutdown()` call that already started may finish in one bounded
-background worker, while `Stop` returns the context error and caches that result.
+the compatibility methods `Lifecycle.Add` and `Bear.OnShutdown` safely ignore
+registrations once startup has begun. Use `Lifecycle.TryAdd` and
+`Bear.TryOnShutdown` when the caller must receive
+`bear.ErrLifecycleRegistrationClosed`. Shutdown remains strictly LIFO; when its
+context expires, Bear does not start another component. A legacy `Shutdown()`
+call that already started may finish in one bounded background worker, while
+`Stop` returns the context error and caches that result.
 
 ## Delivery Checks
 
