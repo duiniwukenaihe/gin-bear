@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrTokenRevocationUnavailable reports that no Redis revocation store exists.
+var ErrTokenRevocationUnavailable = errors.New("token revocation is unavailable")
 
 // AuthTokenManager manages token lifecycle including blacklist
 type AuthTokenManager struct {
@@ -35,6 +39,10 @@ func (m *AuthTokenManager) ParseToken(tokenStr string) (*CustomClaims, error) {
 		return nil, err
 	}
 
+	if !m.revocationAvailable() {
+		return claims, nil
+	}
+
 	// 2. Check if token is blacklisted
 	isBlacklisted, err := m.IsTokenBlacklisted(context.Background(), tokenStr)
 	if err != nil {
@@ -51,6 +59,9 @@ func (m *AuthTokenManager) ParseToken(tokenStr string) (*CustomClaims, error) {
 
 // RevokeToken adds the token to the blacklist
 func (m *AuthTokenManager) RevokeToken(ctx context.Context, tokenStr string) error {
+	if !m.revocationAvailable() {
+		return ErrTokenRevocationUnavailable
+	}
 	// Need to parse token to get expiration time
 	claims, err := m.JWTUtil.ParseToken(tokenStr)
 	if err != nil {
@@ -74,12 +85,19 @@ func (m *AuthTokenManager) RevokeToken(ctx context.Context, tokenStr string) err
 
 // IsTokenBlacklisted checks if the token is in the blacklist
 func (m *AuthTokenManager) IsTokenBlacklisted(ctx context.Context, tokenStr string) (bool, error) {
+	if !m.revocationAvailable() {
+		return false, ErrTokenRevocationUnavailable
+	}
 	key := m.blacklistKey(tokenStr)
 	exists, err := m.Redis.Client.Exists(ctx, key).Result()
 	if err != nil {
 		return false, err
 	}
 	return exists > 0, nil
+}
+
+func (m *AuthTokenManager) revocationAvailable() bool {
+	return m != nil && m.Redis != nil && m.Redis.Client != nil
 }
 
 func (m *AuthTokenManager) blacklistKey(token string) string {

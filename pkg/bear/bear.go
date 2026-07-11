@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -124,6 +125,9 @@ func Ignite(args ...any) *Bear {
 	} else {
 		config.PostProcess()
 	}
+	if err := config.Validate(); err != nil {
+		panic(fmt.Sprintf("Invalid configuration: %v", err))
+	}
 
 	if config.DB != nil && config.DB.Enabled && config.DB.DSN == "" && config.DB.DBName == "" {
 		panic("database configuration is required when database.enabled=true (dsn or dbname)")
@@ -154,6 +158,8 @@ func Ignite(args ...any) *Bear {
 
 	// 注入底座中间件
 	b.Use(runtimeOwnershipMiddleware(runtime))
+	b.Use(securityHeadersMiddleware())
+	b.Use(requestBodyLimitMiddleware(effectiveRequestBodyLimit(config)))
 	b.Use(RequestIDMiddleware())
 	b.Use(runtimePerformanceMiddleware(runtime))
 	b.Use(runtimeRecoveryMiddleware(runtime))
@@ -397,6 +403,7 @@ func (b *Bear) buildHTTPServer(config *SysConfig) *http.Server {
 		ReadTimeout:       parseDurationOrDefault(configDuration(config, "read_timeout"), 15*time.Second),
 		WriteTimeout:      parseDurationOrDefault(configDuration(config, "write_timeout"), 30*time.Second),
 		IdleTimeout:       parseDurationOrDefault(configDuration(config, "idle_timeout"), 60*time.Second),
+		MaxHeaderBytes:    defaultHTTPSizeLimit,
 	}
 	if config != nil && config.Server != nil && config.Server.MaxHeaderBytes > 0 {
 		srv.MaxHeaderBytes = config.Server.MaxHeaderBytes
@@ -441,7 +448,7 @@ func shutdownTimeout(config *SysConfig) time.Duration {
 }
 
 func configureGinRuntime(b *Bear, config *SysConfig) {
-	if config != nil && config.Server != nil && len(config.Server.TrustedProxies) > 0 {
+	if config != nil && config.Server != nil {
 		if err := b.Engine.SetTrustedProxies(config.Server.TrustedProxies); err != nil {
 			panic(fmt.Sprintf("invalid trusted proxies: %v", err))
 		}
@@ -481,6 +488,9 @@ func isProductionMode(config *SysConfig) bool {
 }
 
 func validateProductionSecurity(config *SysConfig) error {
+	if err := validateCORSConfig(config); err != nil {
+		return err
+	}
 	if !isProductionMode(config) {
 		return nil
 	}
@@ -488,8 +498,8 @@ func validateProductionSecurity(config *SysConfig) error {
 		return nil
 	}
 	if config.Auth != nil {
-		secret := config.Auth.JWTSecret
-		if secret == "" || secret == "bear-secret" || secret == "your-secret-key" || len(secret) < 32 {
+		secret := strings.TrimSpace(config.Auth.JWTSecret)
+		if secret == "" || secret == "bear-secret" || secret == "your-secret-key" || secret == "set-with-JWT_SECRET-32-plus-random-chars" || len(secret) < 32 {
 			return fmt.Errorf("weak jwt secret is not allowed in production")
 		}
 	}

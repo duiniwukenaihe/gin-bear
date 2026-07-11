@@ -34,6 +34,72 @@ Start from `application-prod.yaml.example` and keep real secrets outside git. Su
 - `TRACING_OTLP_ENDPOINT`
 - `REDIS_REQUIRED`
 
+Production configuration is always strict. `LoadConfig(paths ...string)` loads
+files in order, returns syntax, unknown-field, and validation errors, then
+applies environment overrides. YAML uses known-field validation and JSON
+rejects unknown fields. Development remains strict by default, but can
+temporarily accept legacy extension keys with:
+
+```yaml
+config:
+  strict: false
+```
+
+Production rejects `config.strict: false`. `InitConfig()` remains available for
+source compatibility and delegates to `LoadConfig`; because its signature has
+no error result, it panics on any loading or validation error.
+
+## HTTP Security Defaults
+
+Request headers and bodies default to 1 MiB limits. Tune either bound only for
+an endpoint profile that requires it:
+
+```yaml
+server:
+  max_header_bytes: 1048576
+  max_request_body_bytes: 1048576
+  trusted_proxies:
+    - "10.0.0.0/8"
+```
+
+When `trusted_proxies` is omitted or empty, Gin trusts no proxy and ignores
+forwarded client IP headers. Configure only the CIDRs of load balancers or
+reverse proxies that connect directly to the application.
+
+Client `X-Request-ID` values are accepted only when they match
+`[A-Za-z0-9._-]{1,128}`; all other values are replaced. Responses include
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
+`Referrer-Policy: no-referrer`. The framework intentionally does not emit HSTS
+because HTTPS and HSTS policy usually belong to the TLS termination layer.
+
+CORS startup validation rejects `allow_origins: ["*"]` when
+`allow_credentials: true`. Use an explicit origin allowlist for credentialed
+browser requests.
+
+## JWT Authentication
+
+JWT parsing accepts HS256 only. Issuer, audience, and clock skew checks are
+optional; configured clock skew must be between zero and five minutes:
+
+```yaml
+auth:
+  jwt_secret: "set-with-JWT_SECRET-32-plus-random-chars"
+  jwt_issuer: "https://auth.example.com"
+  jwt_audience: "gin-bear-api"
+  jwt_clock_skew: "30s"
+```
+
+Set the actual secret with `JWT_SECRET`; the example value is deliberately
+recognized as unsafe and production startup rejects it. Configure matching
+`Issuer`, `Audience`, and `ClockSkew` fields on `JWTUtil.Config` when creating
+the JWT utility. Generated tokens include configured issuer and audience
+claims, and parsing requires them when configured.
+
+Redis-backed token revocation is optional. Without a Redis client, ordinary JWT
+validation still succeeds. `RevokeToken` and direct blacklist checks return
+`ErrTokenRevocationUnavailable`, which callers can detect with `errors.Is`,
+instead of panicking. Treat that error as a failed logout/revocation operation.
+
 ## Logging
 
 Configure structured JSON log verbosity with:
@@ -103,6 +169,9 @@ metrics:
 - `gin_bear_http_request_duration_seconds_count`
 
 Request metrics are labeled by `method`, Gin route pattern, and `status`.
+`/metrics` is no longer in the default authentication public-path list. Expose
+it through a separately protected listener, network policy, or an explicit
+`auth.public_paths` entry only when that is intentional.
 
 ## Tracing
 

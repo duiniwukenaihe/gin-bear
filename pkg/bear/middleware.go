@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
@@ -23,11 +24,13 @@ type ContextKey string
 
 const RequestIDKey ContextKey = "request_id"
 
+var validRequestID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
 // RequestIDMiddleware 为请求注入唯一标识，并传播到 context
 func RequestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rid := c.GetHeader("X-Request-ID")
-		if rid == "" {
+		if !validRequestID.MatchString(rid) {
 			rid = uuid.New().String()
 		}
 		c.Set(RequestIDKey, rid)

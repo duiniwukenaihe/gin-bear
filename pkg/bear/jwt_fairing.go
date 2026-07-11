@@ -41,8 +41,10 @@ func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 
 	if f.TokenManager != nil {
 		claims, err = f.TokenManager.ParseToken(tokenStr)
-	} else {
+	} else if f.JWTUtil != nil {
 		claims, err = f.JWTUtil.ParseToken(tokenStr)
+	} else {
+		return NewError(401, "invalid or expired token")
 	}
 
 	if err != nil {

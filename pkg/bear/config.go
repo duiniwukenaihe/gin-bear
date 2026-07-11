@@ -14,18 +14,19 @@ import (
 type UserConfig map[string]interface{}
 
 type ServerConfig struct {
-	Port              int32    `yaml:"port" json:"port" validate:"required,gt=0"`
-	Name              string   `yaml:"name" json:"name" validate:"required"`
-	Mode              string   `yaml:"mode" json:"mode"`
-	TrustedProxies    []string `yaml:"trusted_proxies" json:"trusted_proxies"`
-	HotReload         bool     `yaml:"hot_reload" json:"hot_reload"` // 是否开启热更新监听
-	MachineID         int64    `yaml:"machine_id" json:"machine_id"` // 分布式 ID 机器码 (-1 为自动)
-	ReadHeaderTimeout string   `yaml:"read_header_timeout" json:"read_header_timeout"`
-	ReadTimeout       string   `yaml:"read_timeout" json:"read_timeout"`
-	WriteTimeout      string   `yaml:"write_timeout" json:"write_timeout"`
-	IdleTimeout       string   `yaml:"idle_timeout" json:"idle_timeout"`
-	ShutdownTimeout   string   `yaml:"shutdown_timeout" json:"shutdown_timeout"`
-	MaxHeaderBytes    int      `yaml:"max_header_bytes" json:"max_header_bytes"`
+	Port                int32    `yaml:"port" json:"port" validate:"required,gt=0"`
+	Name                string   `yaml:"name" json:"name" validate:"required"`
+	Mode                string   `yaml:"mode" json:"mode"`
+	TrustedProxies      []string `yaml:"trusted_proxies" json:"trusted_proxies"`
+	HotReload           bool     `yaml:"hot_reload" json:"hot_reload"` // 是否开启热更新监听
+	MachineID           int64    `yaml:"machine_id" json:"machine_id"` // 分布式 ID 机器码 (-1 为自动)
+	ReadHeaderTimeout   string   `yaml:"read_header_timeout" json:"read_header_timeout"`
+	ReadTimeout         string   `yaml:"read_timeout" json:"read_timeout"`
+	WriteTimeout        string   `yaml:"write_timeout" json:"write_timeout"`
+	IdleTimeout         string   `yaml:"idle_timeout" json:"idle_timeout"`
+	ShutdownTimeout     string   `yaml:"shutdown_timeout" json:"shutdown_timeout"`
+	MaxHeaderBytes      int      `yaml:"max_header_bytes" json:"max_header_bytes"`
+	MaxRequestBodyBytes int64    `yaml:"max_request_body_bytes" json:"max_request_body_bytes"`
 }
 
 type HealthConfig struct {
@@ -159,6 +160,9 @@ type I18nConfig struct {
 type AuthConfig struct {
 	StorageType      string   `yaml:"storage_type" json:"storage_type"`
 	JWTSecret        string   `yaml:"jwt_secret" json:"jwt_secret" validate:"required_with=JWT"`
+	JWTIssuer        string   `yaml:"jwt_issuer" json:"jwt_issuer"`
+	JWTAudience      string   `yaml:"jwt_audience" json:"jwt_audience"`
+	JWTClockSkew     string   `yaml:"jwt_clock_skew" json:"jwt_clock_skew"`
 	TokenExpireHours int      `yaml:"token_expire_hours" json:"token_expire_hours"`
 	PublicPaths      []string `yaml:"public_paths" json:"public_paths"`
 }
@@ -301,6 +305,9 @@ func (c *SysConfig) validateSemantic() error {
 	if c == nil {
 		return nil
 	}
+	if err := validateCORSConfig(c); err != nil {
+		return err
+	}
 	if c.Tracing != nil {
 		exporter := strings.ToLower(strings.TrimSpace(c.Tracing.Exporter))
 		switch exporter {
@@ -323,6 +330,12 @@ func (c *SysConfig) validateSemantic() error {
 		return fmt.Errorf("metrics.path must start with /")
 	}
 	if c.Server != nil {
+		if c.Server.MaxHeaderBytes < 0 {
+			return fmt.Errorf("server.max_header_bytes must not be negative")
+		}
+		if c.Server.MaxRequestBodyBytes < 0 {
+			return fmt.Errorf("server.max_request_body_bytes must not be negative")
+		}
 		for name, value := range map[string]string{
 			"server.read_header_timeout": c.Server.ReadHeaderTimeout,
 			"server.read_timeout":        c.Server.ReadTimeout,
@@ -341,6 +354,27 @@ func (c *SysConfig) validateSemantic() error {
 	if c.Health != nil && c.Health.ReadinessTimeout != "" {
 		if _, err := time.ParseDuration(c.Health.ReadinessTimeout); err != nil {
 			return fmt.Errorf("health.readiness_timeout must be a valid duration: %w", err)
+		}
+	}
+	if c.Auth != nil && c.Auth.JWTClockSkew != "" {
+		skew, err := time.ParseDuration(c.Auth.JWTClockSkew)
+		if err != nil {
+			return fmt.Errorf("auth.jwt_clock_skew must be a valid duration: %w", err)
+		}
+		if skew < 0 || skew > 5*time.Minute {
+			return fmt.Errorf("auth.jwt_clock_skew must be between 0 and 5m")
+		}
+	}
+	return nil
+}
+
+func validateCORSConfig(config *SysConfig) error {
+	if config == nil || config.CORS == nil || !config.CORS.Enabled || !config.CORS.AllowCredentials {
+		return nil
+	}
+	for _, origin := range config.CORS.AllowOrigins {
+		if origin == "*" {
+			return fmt.Errorf("cors wildcard origin cannot be used with credentials")
 		}
 	}
 	return nil
@@ -398,20 +432,22 @@ func (c *SysConfig) PostProcess() {
 func NewSysConfig() *SysConfig {
 	return &SysConfig{
 		Server: &ServerConfig{
-			Port:              8080,
-			Name:              "gin-bear",
-			MachineID:         -1,
-			ReadHeaderTimeout: "5s",
-			ReadTimeout:       "15s",
-			WriteTimeout:      "30s",
-			IdleTimeout:       "60s",
-			ShutdownTimeout:   "5s",
+			Port:                8080,
+			Name:                "gin-bear",
+			MachineID:           -1,
+			ReadHeaderTimeout:   "5s",
+			ReadTimeout:         "15s",
+			WriteTimeout:        "30s",
+			IdleTimeout:         "60s",
+			ShutdownTimeout:     "5s",
+			MaxHeaderBytes:      1 << 20,
+			MaxRequestBodyBytes: 1 << 20,
 		},
 		Auth: &AuthConfig{
 			StorageType:      "file",
 			JWTSecret:        "bear-secret",
 			TokenExpireHours: 24,
-			PublicPaths:      []string{"/health", "/live", "/ready", "/version", "/metrics", "/swagger/*", "/login"},
+			PublicPaths:      []string{"/health", "/live", "/ready", "/version", "/swagger/*", "/login"},
 		},
 		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root", SSLMode: "disable"},
 		Redis:  &RedisConfig{Addr: "localhost:6379", Password: "", DB: 0},
@@ -500,61 +536,6 @@ func NewSysConfig() *SysConfig {
 	}
 }
 
-func InitConfig() *SysConfig {
-	config := NewSysConfig()
-
-	// 1. 获取当前环境 (BEAR_ENV 优先, 其次 GIN_MODE)
-	env := os.Getenv("BEAR_ENV")
-	if env == "" {
-		mode := os.Getenv("GIN_MODE")
-		if mode == "release" {
-			env = "prod"
-		} else {
-			env = "dev"
-		}
-	}
-
-	// 2. 加载基础 YAML 配置 (底座)
-	yamlFile := "application.yaml"
-	if _, err := os.Stat(yamlFile); err == nil {
-		if err := ParseConfig(yamlFile, config); err != nil {
-			slog.Error("Failed to unmarshal application.yaml", "error", err)
-		} else {
-			slog.Info("Loaded base config from application.yaml")
-		}
-	}
-
-	// 3. 加载环境特定 YAML 配置并覆盖
-	envYamlFile := fmt.Sprintf("application-%s.yaml", env)
-	if _, err := os.Stat(envYamlFile); err == nil {
-		if err := ParseConfig(envYamlFile, config); err != nil {
-			slog.Error("Failed to unmarshal env config", "file", envYamlFile, "error", err)
-		} else {
-			slog.Info("Loaded env config", "env", env, "file", envYamlFile)
-		}
-	}
-
-	// 4. 兼容 legacy: 如果存在 config.json，则覆盖当前配置
-	jsonFile := "config.json"
-	if _, err := os.Stat(jsonFile); err == nil {
-		if err := ParseConfig(jsonFile, config); err != nil {
-			slog.Error("Failed to unmarshal config.json", "error", err)
-		} else {
-			slog.Info("Loaded and merged config from config.json (legacy mode)")
-		}
-	}
-
-	// 5. 环境变量覆盖
-	applyEnvOverrides(config)
-
-	// 6. 远程配置中心 (已禁用 - 精简模式)
-	// if config.ConfigCenter != nil && config.ConfigCenter.Enabled {
-	// 	loadFromConfigCenter(config)
-	// }
-
-	return validateAndReturn(config)
-}
-
 func applyEnvOverrides(config *SysConfig) {
 	if config == nil {
 		return
@@ -635,16 +616,4 @@ func applyEnvOverrides(config *SysConfig) {
 			config.Tracing.OTLPEndpoint = endpoint
 		}
 	}
-}
-
-func validateAndReturn(config *SysConfig) *SysConfig {
-	// 兼容性与后处理
-	config.PostProcess()
-
-	// 配置验证
-	if err := config.Validate(); err != nil {
-		slog.Error("Configuration validation failed", "error", err)
-		panic(fmt.Sprintf("Invalid configuration: %v", err))
-	}
-	return config
 }
