@@ -72,6 +72,9 @@ binaries before the gate. It explicitly sets `RC_ALLOW_NETWORK=1`, recorded as
 `network_mode=online-opt-in`, because govulncheck refreshes vulnerability data.
 The API gate still receives the controlled `APIDIFF_BIN` and leaves
 `API_COMPAT_ALLOW_NETWORK=0`.
+The ordinary CI quality job uses the same pinned versions under
+`${RUNNER_TEMP}/bin` and passes all three absolute binary paths to `make verify`,
+so the gate does not depend on tools preinstalled by the runner image.
 
 The RC path always enforces total coverage `70.0` and every critical group
 `80.0`; lower caller-provided environment values do not reduce these gates.
@@ -132,8 +135,17 @@ local tag, clone, or shallow repository history. Reconstruction is an explicit
 manual or independent audit and is not required by the default offline gate,
 which checks only the committed hash and additive API compatibility. The release
 workflow prepares the pinned binary before invoking that offline gate. The
-network switch, rebuild switch, and tool source are printed to stdout and
-appended to `API_COMPAT_METADATA` when that path is provided.
+network switch, rebuild switch, tool source, canonical executable path,
+SHA-256, and available `go version -m` identity are printed to stdout and
+appended to `API_COMPAT_METADATA` when that path is provided. `APIDIFF_BIN`
+must be a non-empty absolute path to a regular, non-symlink executable.
+
+`scripts/release-check.sh` independently prints and persists
+`release_check_network` and `release_check_network_opt_in`. Set
+`RELEASE_CHECK_METADATA` to retain the evidence at a chosen path; when it is
+unset, the script creates a retained temporary metadata file and prints its
+location. `verify-rc` appends this evidence to its artifact metadata rather
+than relying on the outer gate's network fields alone.
 
 Remote branch hygiene is also offline by default. Set `RC_REMOTE_HYGIENE=1` to
 opt into `git ls-remote --heads origin`. `RC_ALLOW_NETWORK=1` separately opts

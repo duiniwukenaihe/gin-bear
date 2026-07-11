@@ -324,6 +324,6 @@ run_step race3 go test -race ./... -count=3 || exit $?
 run_step vet go vet ./... || exit $?
 run_step staticcheck "${staticcheck_command[@]}" ./... || exit $?
 run_step govulncheck "${govulncheck_command[@]}" "${govulncheck_scan_args[@]}" ./... || exit $?
-run_step release-check env COVERAGE_MINIMUM="${coverage_minimum}" CRITICAL_COVERAGE_MINIMUM="${critical_coverage_minimum}" API_COMPAT_METADATA="${metadata}" scripts/release-check.sh || exit $?
+run_step release-check env COVERAGE_MINIMUM="${coverage_minimum}" CRITICAL_COVERAGE_MINIMUM="${critical_coverage_minimum}" API_COMPAT_METADATA="${metadata}" RELEASE_CHECK_METADATA="${metadata}" scripts/release-check.sh || exit $?
 run_step diff-check check_candidate_diff || exit $?
 run_step hygiene check_repository_hygiene || exit $?

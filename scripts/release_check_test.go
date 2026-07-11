@@ -59,6 +59,14 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 	}
 	text := string(content)
 	for _, want := range []string{
+		`GOBIN="${RUNNER_TEMP}/bin" go install honnef.co/go/tools/cmd/staticcheck@v0.7.0`,
+		`GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/vuln/cmd/govulncheck@v1.6.0`,
+		`GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597`,
+		"STATICCHECK_BIN: ${{ runner.temp }}/bin/staticcheck",
+		"GOVULNCHECK_BIN: ${{ runner.temp }}/bin/govulncheck",
+		"APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff",
+		"RC_ALLOW_NETWORK: \"1\"",
+		"RELEASE_CHECK_METADATA: ${{ runner.temp }}/release-check-metadata.txt",
 		"run: make verify",
 		"run: go test -race ./... -count=1",
 	} {
@@ -75,6 +83,48 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("CI should not contain container delivery step %q:\n%s", unwanted, text)
 		}
+	}
+}
+
+func TestReleaseCheckPersistsExplicitNetworkEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		flag string
+		mode string
+	}{
+		{name: "offline", flag: "0", mode: "offline"},
+		{name: "online opt in", flag: "1", mode: "online-opt-in"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository, state := fakeReleaseRepository(t)
+			metadata := filepath.Join(state, "release-check-metadata.txt")
+			command := exec.Command("./scripts/release-check.sh")
+			command.Dir = repository
+			command.Env = append(os.Environ(),
+				"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"RELEASE_TEST_STATE="+state,
+				"RC_ALLOW_NETWORK="+test.flag,
+				"RELEASE_CHECK_METADATA="+metadata,
+				"GOVULNCHECK_DB=file://"+filepath.Join(repository, "vulndb"),
+			)
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("release check failed: %v\n%s", err, output)
+			}
+			for _, evidence := range []string{string(output), readTestFile(t, metadata)} {
+				for _, want := range []string{
+					"release_check_network=" + test.mode,
+					"release_check_network_opt_in=" + test.flag,
+				} {
+					if !strings.Contains(evidence, want) {
+						t.Fatalf("release-check evidence missing %q:\n%s", want, evidence)
+					}
+				}
+			}
+			if !strings.Contains(string(output), "release_check_metadata="+metadata) {
+				t.Fatalf("release-check stdout does not identify persisted metadata:\n%s", output)
+			}
+		})
 	}
 }
 
@@ -227,6 +277,7 @@ exit 73
 	command.Env = append(os.Environ(),
 		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"RELEASE_TEST_STATE="+state,
+		"RELEASE_CHECK_METADATA="+filepath.Join(state, "release-check-metadata.txt"),
 	)
 	output, err := command.CombinedOutput()
 	if err == nil {
@@ -714,16 +765,58 @@ func TestAPICompatibilityGateRecordsControlledOfflineMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("controlled offline API gate failed: %v\n%s", err, output)
 	}
+	apidiffPath := filepath.Join(bin, "apidiff")
+	apidiffPath, err = filepath.EvalSymlinks(apidiffPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apidiffContents, err := os.ReadFile(apidiffPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apidiffSHA256 := fmt.Sprintf("%x", sha256.Sum256(apidiffContents))
 	for _, evidence := range []string{string(output), readTestFile(t, metadata)} {
 		for _, want := range []string{
 			"api_compat_network=offline",
 			"api_baseline_rebuild=disabled",
 			"apidiff_source=controlled-path",
+			"apidiff_path=" + apidiffPath,
+			"apidiff_sha256=" + apidiffSHA256,
+			"apidiff_go_version_m=unavailable",
 		} {
 			if !strings.Contains(evidence, want) {
 				t.Fatalf("API compatibility evidence missing %q:\n%s", want, evidence)
 			}
 		}
+	}
+}
+
+func TestAPICompatibilityGateRejectsEmptyOrUntrustedAPIDiffPath(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		match string
+	}{
+		{name: "empty", value: "", match: "APIDIFF_BIN must not be empty"},
+		{name: "relative", value: "bin/apidiff", match: "APIDIFF_BIN must be an absolute path"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory, bin := fakeAPICompatibilityDirectory(t)
+			command := exec.Command("./check-api-compat.sh")
+			command.Dir = directory
+			command.Env = append(os.Environ(),
+				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"FAKE_API_STATE="+directory,
+				"APIDIFF_BIN="+test.value,
+			)
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("API gate accepted untrusted APIDIFF_BIN %q:\n%s", test.value, output)
+			}
+			if !strings.Contains(string(output), test.match) {
+				t.Fatalf("APIDIFF_BIN rejection missing %q:\n%s", test.match, output)
+			}
+		})
 	}
 }
 
@@ -798,8 +891,8 @@ func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *test
 			if !test.wantFailed && err != nil {
 				t.Fatalf("API gate rejected compatible additions: %v\n%s", err, output)
 			}
-			if _, statErr := os.Stat(filepath.Join(directory, "go-calls")); !os.IsNotExist(statErr) {
-				t.Fatalf("default API compatibility path invoked go: %v", statErr)
+			if calls := readTestFile(t, filepath.Join(directory, "go-calls")); !strings.HasPrefix(strings.TrimSpace(calls), "version -m /") || strings.Count(strings.TrimSpace(calls), "\n") != 0 {
+				t.Fatalf("controlled API compatibility path invoked unexpected go command:\n%s", calls)
 			}
 		})
 	}

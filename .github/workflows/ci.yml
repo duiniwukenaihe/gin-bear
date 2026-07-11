@@ -27,7 +27,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install pinned verification tools
+        run: |
+          mkdir -p "${RUNNER_TEMP}/bin"
+          GOBIN="${RUNNER_TEMP}/bin" go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597
+
       - name: Verify quality baseline
+        env:
+          STATICCHECK_BIN: ${{ runner.temp }}/bin/staticcheck
+          GOVULNCHECK_BIN: ${{ runner.temp }}/bin/govulncheck
+          APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff
+          RC_ALLOW_NETWORK: "1"
+          RELEASE_CHECK_METADATA: ${{ runner.temp }}/release-check-metadata.txt
         run: make verify
 
   race:

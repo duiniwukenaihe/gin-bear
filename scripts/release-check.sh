@@ -4,11 +4,13 @@ set -euo pipefail
 network_flag="${RC_ALLOW_NETWORK-0}"
 case "${network_flag}" in
 0)
+	network_mode="offline"
 	export GOPROXY=off
 	export GOSUMDB=off
 	export GOTOOLCHAIN=local
 	;;
 1)
+	network_mode="online-opt-in"
 	export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
 	export GOSUMDB="${GOSUMDB:-sum.golang.org}"
 	export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.25.12}"
@@ -18,6 +20,30 @@ case "${network_flag}" in
 	exit 1
 	;;
 esac
+
+if [[ "${RELEASE_CHECK_METADATA+x}" == "x" ]]; then
+	if [[ -z "${RELEASE_CHECK_METADATA}" ]]; then
+		printf 'RELEASE_CHECK_METADATA must not be empty when explicitly set\n' >&2
+		exit 1
+	fi
+	release_check_metadata="${RELEASE_CHECK_METADATA}"
+	mkdir -p "$(dirname "${release_check_metadata}")"
+	: >>"${release_check_metadata}"
+else
+	release_check_metadata="$(mktemp "${TMPDIR:-/tmp}/gin-bear-release-check-metadata.XXXXXX")"
+fi
+
+record_release_evidence() {
+	local line
+	for line in \
+		"release_check_network=${network_mode}" \
+		"release_check_network_opt_in=${network_flag}" \
+		"release_check_metadata=${release_check_metadata}"; do
+		printf '%s\n' "${line}"
+		printf '%s\n' "${line}" >>"${release_check_metadata}"
+	done
+}
+record_release_evidence
 
 tool_command() {
 	local env_name="$1"
@@ -117,7 +143,7 @@ env COVERAGE_MINIMUM="${release_coverage_minimum}" CRITICAL_COVERAGE_MINIMUM="${
 	scripts/check-coverage.sh "${coverage_profile}"
 
 echo "==> Checking v0.9.1 public API compatibility"
-scripts/check-api-compat.sh
+API_COMPAT_METADATA="${API_COMPAT_METADATA:-${release_check_metadata}}" scripts/check-api-compat.sh
 
 echo "==> Running legacy and generated application E2E checks"
 BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1

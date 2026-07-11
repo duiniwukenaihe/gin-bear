@@ -37,12 +37,34 @@ case "${rebuild_flag}" in
 esac
 
 apidiff_command=()
-if [[ -n "${APIDIFF_BIN:-}" ]]; then
-	if [[ ! -x "${APIDIFF_BIN}" ]]; then
+apidiff_path="not-applicable"
+apidiff_sha256="not-applicable"
+apidiff_go_version_m="not-applicable"
+if [[ "${APIDIFF_BIN+x}" == "x" ]]; then
+	if [[ -z "${APIDIFF_BIN}" ]]; then
+		printf 'APIDIFF_BIN must not be empty when explicitly set\n' >&2
+		exit 1
+	fi
+	if [[ "${APIDIFF_BIN}" != /* ]]; then
+		printf 'APIDIFF_BIN must be an absolute path: %s\n' "${APIDIFF_BIN}" >&2
+		exit 1
+	fi
+	if [[ -L "${APIDIFF_BIN}" || ! -f "${APIDIFF_BIN}" || ! -x "${APIDIFF_BIN}" ]]; then
 		printf 'APIDIFF_BIN must name an executable file: %s\n' "${APIDIFF_BIN}" >&2
 		exit 1
 	fi
-	apidiff_command=("${APIDIFF_BIN}")
+	apidiff_path="$(cd "$(dirname "${APIDIFF_BIN}")" && pwd -P)/$(basename "${APIDIFF_BIN}")"
+	if command -v sha256sum >/dev/null 2>&1; then
+		apidiff_sha256="$(sha256sum "${apidiff_path}" | awk '{print $1}')"
+	else
+		apidiff_sha256="$(shasum -a 256 "${apidiff_path}" | awk '{print $1}')"
+	fi
+	if build_info="$(go version -m "${apidiff_path}" 2>/dev/null)"; then
+		apidiff_go_version_m="${build_info//$'\n'/; }"
+	else
+		apidiff_go_version_m="unavailable"
+	fi
+	apidiff_command=("${apidiff_path}")
 	apidiff_source="controlled-path"
 elif [[ "${network_flag}" == "1" ]]; then
 	apidiff_command=(go run "${apidiff}")
@@ -59,7 +81,10 @@ record_mode() {
 		"api_compat_network_opt_in=${network_flag}" \
 		"api_baseline_rebuild=${rebuild_mode}" \
 		"api_baseline_rebuild_opt_in=${rebuild_flag}" \
-		"apidiff_source=${apidiff_source}"; do
+		"apidiff_source=${apidiff_source}" \
+		"apidiff_path=${apidiff_path}" \
+		"apidiff_sha256=${apidiff_sha256}" \
+		"apidiff_go_version_m=${apidiff_go_version_m}"; do
 		printf '%s\n' "${line}"
 		if [[ -n "${API_COMPAT_METADATA:-}" ]]; then
 			printf '%s\n' "${line}" >>"${API_COMPAT_METADATA}"
