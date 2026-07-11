@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"go/format"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +52,68 @@ func TestGenerateProjectBuildsTestsAndServesHealth(t *testing.T) {
 	runGo(t, dir, "mod", "tidy")
 	runGo(t, dir, "test", "./...", "-count=1")
 	runGeneratedServerHealthCheck(t, dir, "/live")
+}
+
+func TestGeneratedServerHealthCheckTimesOutAndReapsUnresponsiveChild(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGeneratedServerUnresponsiveHelper$")
+	cmd.Env = append(os.Environ(), "GO_WANT_UNRESPONSIVE_GENERATED_SERVER=1", "UNRESPONSIVE_SERVER_ADDRESS="+address)
+	prepareGeneratedProcess(cmd)
+	started := time.Now()
+	output, err := checkGeneratedServer(cmd, "http://"+address+"/live", generatedServerCheckConfig{
+		startupTimeout:  750 * time.Millisecond,
+		requestTimeout:  150 * time.Millisecond,
+		shutdownTimeout: 250 * time.Millisecond,
+		cleanupTimeout:  time.Second,
+		closeTimeout:    250 * time.Millisecond,
+		retryInterval:   10 * time.Millisecond,
+		maxBodyBytes:    1024,
+		maxOutputBytes:  4096,
+	})
+	if err == nil {
+		t.Fatal("health check unexpectedly accepted a child that never answered")
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("health check exceeded its deadline: %v", elapsed)
+	} else if elapsed < 500*time.Millisecond {
+		t.Fatalf("unresponsive child exited before the health deadline: %v", elapsed)
+	}
+	if !strings.Contains(output, "accepted without response") {
+		t.Fatalf("child never accepted the bounded request:\n%s", output)
+	}
+	if cmd.ProcessState == nil {
+		t.Fatalf("unresponsive child was not reaped: state=%v", cmd.ProcessState)
+	}
+	if err := cmd.Process.Kill(); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("reaped child accepted another kill: %v", err)
+	}
+}
+
+func TestGeneratedServerUnresponsiveHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_UNRESPONSIVE_GENERATED_SERVER") != "1" {
+		return
+	}
+	listener, err := net.Listen("tcp", os.Getenv("UNRESPONSIVE_SERVER_ADDRESS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintln(os.Stdout, "accepted without response")
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 func TestGenerateRejectsInvalidOptionsWithoutPublishingFiles(t *testing.T) {
@@ -351,94 +411,13 @@ func runGeneratedServerHealthCheck(t *testing.T, dir, path string) {
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
 	prepareGeneratedProcess(cmd)
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	stderrDone := make(chan []byte, 1)
-	stdoutDone := make(chan []byte, 1)
-	go func() {
-		output, _ := io.ReadAll(stderr)
-		stderrDone <- output
-	}()
-	go func() {
-		output, _ := io.ReadAll(stdout)
-		stdoutDone <- output
-	}()
-	stopped := false
-	t.Cleanup(func() {
-		if !stopped && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-	})
-
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		resp, requestErr := http.Get(url) //nolint:gosec // loopback smoke test
-		if requestErr == nil {
-			body, readErr := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ok"`) {
-				t.Fatalf("GET %s = %d %s", path, resp.StatusCode, body)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			stopped = true
-			t.Fatalf("generated server did not become healthy: %v\n%s\n%s", requestErr, <-stdoutDone, <-stderrDone)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	if err := cancelGeneratedProcess(cmd.Process.Pid); err != nil {
-		t.Fatal(err)
-	}
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
-	var waitErr error
-	select {
-	case waitErr = <-waitDone:
-		stopped = true
-	case <-time.After(10 * time.Second):
-		_ = cmd.Process.Kill()
-		<-waitDone
-		stopped = true
-		t.Fatalf("generated server did not exit after cancellation\n%s\n%s", <-stdoutDone, <-stderrDone)
-	}
-	serverOutput := string(<-stdoutDone) + string(<-stderrDone)
-	if waitErr != nil {
-		t.Fatalf("generated server exited with an error after cancellation: %v\n%s", waitErr, serverOutput)
-	}
-	if !strings.Contains(serverOutput, "WhiteBear returning to ice") {
-		t.Fatalf("generated server skipped graceful cancellation:\n%s", serverOutput)
-	}
-	closeDeadline := time.Now().Add(3 * time.Second)
-	for {
-		resp, requestErr := http.Get(url) //nolint:gosec // loopback smoke test
-		if requestErr != nil {
-			break
-		}
-		_ = resp.Body.Close()
-		if time.Now().After(closeDeadline) {
-			t.Fatalf("generated server still answers after cancellation: %s", url)
-		}
-		time.Sleep(50 * time.Millisecond)
+	output, err := checkGeneratedServer(cmd, url, defaultGeneratedServerCheckConfig())
+	if err != nil {
+		t.Fatalf("generated server health check failed: %v\n%s", err, output)
 	}
 }
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)

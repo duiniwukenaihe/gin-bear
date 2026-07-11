@@ -4,6 +4,10 @@ package atomicdir
 
 import "golang.org/x/sys/unix"
 
-func renameNoReplace(staged, destination string) error {
+var nativeRenameNoReplace = func(staged, destination string) error {
 	return unix.RenamexNp(staged, destination, unix.RENAME_EXCL)
+}
+
+func renameNoReplace(staged, destination string) error {
+	return nativeRenameNoReplace(staged, destination)
 }
