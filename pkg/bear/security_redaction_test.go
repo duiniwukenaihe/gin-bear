@@ -10,13 +10,75 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+type observablePanicErrorKey struct {
+	calls *atomic.Int32
+}
+
+func (key observablePanicErrorKey) Error() string {
+	key.calls.Add(1)
+	panic("error-key-password-secret")
+}
+
+type observableRecursiveStringerKey struct {
+	calls *atomic.Int32
+}
+
+func (key observableRecursiveStringerKey) String() string {
+	if key.calls.Add(1) > 1 {
+		panic("stringer-key-password-secret")
+	}
+	return formatObservableRecursiveKey(key)
+}
+
+func formatObservableRecursiveKey(value any) string {
+	return fmt.Sprint(value)
+}
+
+type observableLoopError struct {
+	next  error
+	calls *atomic.Int32
+}
+
+func (err *observableLoopError) Error() string {
+	err.calls.Add(1)
+	panic("loop-error-password-secret")
+}
+
+func (err *observableLoopError) Unwrap() error {
+	return err.next
+}
+
+type observableJoinError struct {
+	children []error
+}
+
+func (err observableJoinError) Error() string {
+	return "joined-error-password-secret"
+}
+
+func (err observableJoinError) Unwrap() []error {
+	return err.children
+}
+
+type observablePanicUnwrapError struct{}
+
+func (observablePanicUnwrapError) Error() string {
+	return "panic-unwrap-password-secret"
+}
+
+func (observablePanicUnwrapError) Unwrap() error {
+	panic("panic-unwrap-password-secret")
+}
 
 func TestContextHandlerRedactsSensitiveObservableData(t *testing.T) {
 	var output bytes.Buffer
@@ -53,6 +115,91 @@ func TestSanitizeForObservabilityReturnsStableErrorCategory(t *testing.T) {
 	}
 	if got := SanitizeForObservability("opaque panic detail"); got != "[REDACTED]" {
 		t.Fatalf("SanitizeForObservability panic value = %q, want redacted", got)
+	}
+}
+
+func TestContextHandlerSafelySanitizesHostileMapKeys(t *testing.T) {
+	panicErrorKey := observablePanicErrorKey{calls: new(atomic.Int32)}
+	recursiveStringerKey := observableRecursiveStringerKey{calls: new(atomic.Int32)}
+	value := map[any]any{
+		"password=map-key-secret": "map-value-secret",
+		panicErrorKey:             "safe-panic-key-value",
+		recursiveStringerKey:      "safe-recursive-key-value",
+	}
+
+	var output bytes.Buffer
+	logger := slog.New(&ContextHandler{Handler: slog.NewJSONHandler(&output, nil)})
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		logger.Info("hostile map keys", "payload", value)
+	}()
+	if recovered != nil {
+		t.Fatalf("structured logging panicked for map key: %v", recovered)
+	}
+	if got := panicErrorKey.calls.Load(); got != 0 {
+		t.Fatalf("error map key Error calls = %d, want 0", got)
+	}
+	if got := recursiveStringerKey.calls.Load(); got != 0 {
+		t.Fatalf("Stringer map key calls = %d, want 0", got)
+	}
+
+	logged := output.String()
+	for _, forbidden := range []string{
+		"map-key-secret", "map-value-secret", "error-key-password-secret",
+		"stringer-key-password-secret", "loop-error-password-secret",
+	} {
+		if strings.Contains(logged, forbidden) {
+			t.Fatalf("map-key sanitizer leaked %q: %s", forbidden, logged)
+		}
+	}
+	for _, required := range []string{"safe-panic-key-value", "safe-recursive-key-value", "[REDACTED]"} {
+		if !strings.Contains(logged, required) {
+			t.Fatalf("map-key sanitizer lost %q: %s", required, logged)
+		}
+	}
+}
+
+func TestSanitizeForObservabilityBoundsUnsafeErrorChains(t *testing.T) {
+	self := &observableLoopError{calls: new(atomic.Int32)}
+	self.next = self
+	first := &observableLoopError{calls: new(atomic.Int32)}
+	second := &observableLoopError{calls: new(atomic.Int32)}
+	first.next = second
+	second.next = first
+
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "self cycle", err: self, want: "internal_error"},
+		{name: "mutual cycle", err: first, want: "internal_error"},
+		{
+			name: "unwrap slice",
+			err:  observableJoinError{children: []error{errors.New("generic"), context.DeadlineExceeded}},
+			want: "deadline_exceeded",
+		},
+		{name: "panicking unwrap", err: observablePanicUnwrapError{}, want: "internal_error"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := make(chan string, 1)
+			go func() { result <- SanitizeForObservability(test.err) }()
+			select {
+			case got := <-result:
+				if got != test.want {
+					t.Fatalf("SanitizeForObservability() = %q, want %q", got, test.want)
+				}
+			case <-time.After(100 * time.Millisecond):
+				t.Fatalf("SanitizeForObservability did not return for %s", test.name)
+			}
+		})
+	}
+	if got := self.calls.Load(); got != 0 {
+		t.Fatalf("self-cycle Error calls = %d, want 0", got)
+	}
+	if got := first.calls.Load() + second.calls.Load(); got != 0 {
+		t.Fatalf("mutual-cycle Error calls = %d, want 0", got)
 	}
 }
 

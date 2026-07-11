@@ -2,14 +2,13 @@ package bear
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -24,6 +23,8 @@ const (
 	maxObservableDepth       = 6
 	maxObservableCollection  = 16
 	maxObservableStringBytes = 4096
+	maxObservableErrorDepth  = 32
+	maxObservableErrorNodes  = 64
 )
 
 var (
@@ -56,8 +57,37 @@ func observableErrorMetadata(err error, fallbackStatus int) (string, int) {
 		return "none", code
 	}
 
-	var bearError *BearError
-	if errors.As(err, &bearError) && bearError != nil {
+	var (
+		bearError        *BearError
+		contextCanceled  bool
+		deadlineExceeded bool
+		tokenExpired     bool
+		tokenMissing     bool
+		tokenInvalid     bool
+	)
+	walkObservableErrors(err, func(current error) bool {
+		if typed, ok := current.(*BearError); ok && typed != nil {
+			bearError = typed
+			return true
+		}
+		switch {
+		case observableErrorsEqual(current, context.Canceled):
+			contextCanceled = true
+		case observableErrorsEqual(current, context.DeadlineExceeded):
+			deadlineExceeded = true
+		case observableErrorsEqual(current, jwt.ErrTokenExpired):
+			tokenExpired = true
+		case observableErrorsEqual(current, jwt.ErrTokenRequiredClaimMissing):
+			tokenMissing = true
+		case observableErrorsEqual(current, jwt.ErrTokenMalformed),
+			observableErrorsEqual(current, jwt.ErrTokenSignatureInvalid),
+			observableErrorsEqual(current, jwt.ErrTokenInvalidClaims):
+			tokenInvalid = true
+		}
+		return false
+	})
+
+	if bearError != nil {
 		if bearError.Code != 0 {
 			code = bearError.Code
 		} else if fallbackStatus == 0 && bearError.Status != 0 {
@@ -67,23 +97,110 @@ func observableErrorMetadata(err error, fallbackStatus int) (string, int) {
 	}
 
 	switch {
-	case errors.Is(err, context.Canceled):
+	case contextCanceled:
 		return "context_canceled", code
-	case errors.Is(err, context.DeadlineExceeded):
+	case deadlineExceeded:
 		return "deadline_exceeded", code
-	case errors.Is(err, jwt.ErrTokenExpired):
+	case tokenExpired:
 		return "token_expired", code
-	case errors.Is(err, jwt.ErrTokenRequiredClaimMissing):
+	case tokenMissing:
 		return "token_missing_claim", code
-	case errors.Is(err, jwt.ErrTokenMalformed),
-		errors.Is(err, jwt.ErrTokenSignatureInvalid),
-		errors.Is(err, jwt.ErrTokenInvalidClaims):
+	case tokenInvalid:
 		return "token_invalid", code
 	case fallbackStatus >= http.StatusBadRequest && fallbackStatus < http.StatusInternalServerError:
 		return "request_error", code
 	default:
 		return "internal_error", code
 	}
+}
+
+type observableErrorNode struct {
+	err   error
+	depth int
+}
+
+type observableErrorVisit struct {
+	typ reflect.Type
+	ptr uintptr
+}
+
+// walkObservableErrors only follows standard unwrap interfaces under explicit
+// bounds. It never invokes Error, String, Is, or As on an untrusted error.
+func walkObservableErrors(root error, visit func(error) bool) {
+	queue := []observableErrorNode{{err: root}}
+	seen := make(map[observableErrorVisit]struct{})
+	visited := 0
+	for len(queue) > 0 && visited < maxObservableErrorNodes {
+		node := queue[0]
+		queue = queue[1:]
+		if node.err == nil {
+			continue
+		}
+		if identity, ok := observableErrorIdentity(node.err); ok {
+			if _, exists := seen[identity]; exists {
+				continue
+			}
+			seen[identity] = struct{}{}
+		}
+		visited++
+		if visit(node.err) || node.depth >= maxObservableErrorDepth {
+			continue
+		}
+		for _, child := range observableErrorChildren(node.err) {
+			if child != nil && len(queue) < maxObservableErrorNodes {
+				queue = append(queue, observableErrorNode{err: child, depth: node.depth + 1})
+			}
+		}
+	}
+}
+
+func observableErrorIdentity(err error) (observableErrorVisit, bool) {
+	value := reflect.ValueOf(err)
+	if !value.IsValid() {
+		return observableErrorVisit{}, false
+	}
+	switch value.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.UnsafePointer:
+		if value.IsNil() {
+			return observableErrorVisit{}, false
+		}
+		if ptr := value.Pointer(); ptr != 0 {
+			return observableErrorVisit{typ: value.Type(), ptr: ptr}, true
+		}
+	}
+	return observableErrorVisit{}, false
+}
+
+func observableErrorChildren(err error) (children []error) {
+	defer func() {
+		if recover() != nil {
+			children = nil
+		}
+	}()
+	if multiple, ok := err.(interface{ Unwrap() []error }); ok {
+		children = multiple.Unwrap()
+		if len(children) > maxObservableCollection {
+			children = children[:maxObservableCollection]
+		}
+		return children
+	}
+	if single, ok := err.(interface{ Unwrap() error }); ok {
+		if child := single.Unwrap(); child != nil {
+			return []error{child}
+		}
+	}
+	return nil
+}
+
+func observableErrorsEqual(first, second error) bool {
+	if first == nil || second == nil {
+		return false
+	}
+	typ := reflect.TypeOf(first)
+	if typ != reflect.TypeOf(second) || !typ.Comparable() {
+		return false
+	}
+	return first == second
 }
 
 func sanitizeObservableString(value string) string {
@@ -354,30 +471,89 @@ func sanitizeReflectedValue(key string, value reflect.Value, state *observableRe
 
 func sanitizeReflectedMap(value reflect.Value, state *observableRedactionState, depth int) map[string]any {
 	type mapEntry struct {
-		name  string
-		value any
+		name      string
+		value     any
+		sensitive bool
 	}
 	entries := make([]mapEntry, 0, min(value.Len(), maxObservableCollection+1))
 	iterator := value.MapRange()
 	for len(entries) <= maxObservableCollection && iterator.Next() {
-		name := truncateObservableString(fmt.Sprint(iterator.Key().Interface()))
+		name, sensitive := sanitizeObservableMapKey(iterator.Key(), len(entries))
 		mapValue := iterator.Value()
 		if mapValue.IsValid() && mapValue.CanInterface() {
-			entries = append(entries, mapEntry{name: name, value: mapValue.Interface()})
+			entries = append(entries, mapEntry{name: name, value: mapValue.Interface(), sensitive: sensitive})
 		} else {
-			entries = append(entries, mapEntry{name: name, value: "[UNSUPPORTED]"})
+			entries = append(entries, mapEntry{name: name, value: "[UNSUPPORTED]", sensitive: sensitive})
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
 	limit := min(len(entries), maxObservableCollection)
 	result := make(map[string]any, limit+1)
 	for _, entry := range entries[:limit] {
-		result[entry.name] = sanitizeStructuredValue(entry.name, entry.value, state, depth+1)
+		if entry.sensitive {
+			result[entry.name] = redactedObservableValue
+		} else {
+			result[entry.name] = sanitizeStructuredValue(entry.name, entry.value, state, depth+1)
+		}
 	}
 	if value.Len() > maxObservableCollection {
 		result["_truncated"] = truncatedObservableValue
 	}
 	return result
+}
+
+func sanitizeObservableMapKey(value reflect.Value, index int) (string, bool) {
+	for value.IsValid() && value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return observableMapKeyPlaceholder(value, index), false
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() {
+		return "[KEY invalid #" + strconv.Itoa(index) + "]", false
+	}
+
+	var name string
+	switch value.Kind() {
+	case reflect.String:
+		name = value.String()
+	case reflect.Bool:
+		name = strconv.FormatBool(value.Bool())
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		name = strconv.FormatInt(value.Int(), 10)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		name = strconv.FormatUint(value.Uint(), 10)
+	case reflect.Float32, reflect.Float64:
+		name = strconv.FormatFloat(value.Float(), 'g', -1, value.Type().Bits())
+	default:
+		name = observableMapKeyPlaceholder(value, index)
+	}
+	name = truncateObservableString(name)
+	if isSensitiveObservableMapKey(name) {
+		return redactedObservableValue, true
+	}
+	return sanitizeObservableString(name), false
+}
+
+func observableMapKeyPlaceholder(value reflect.Value, index int) string {
+	typeName := "invalid"
+	if value.IsValid() {
+		typeName = value.Type().String()
+	}
+	return "[KEY " + typeName + " #" + strconv.Itoa(index) + "]"
+}
+
+func isSensitiveObservableMapKey(key string) bool {
+	if isSensitiveObservableKey(key) {
+		return true
+	}
+	normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(key))
+	for _, marker := range []string{"token", "password", "passwd", "secret", "authorization", "cookie", "credential", "apikey", "accesskey", "dsn", "query", "rawquery", "userinfo", "connectionstring", "stacktrace"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeReflectedStruct(value reflect.Value, state *observableRedactionState, depth int) map[string]any {

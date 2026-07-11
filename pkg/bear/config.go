@@ -188,7 +188,7 @@ func (c *AuthConfig) GetPublicPaths() []string {
 
 type DBConfig struct {
 	Enabled         bool   `yaml:"enabled" json:"enabled"`
-	Type            string `yaml:"type" json:"type"`         // mysql, postgres (default: mysql)
+	Type            string `yaml:"type" json:"type"`         // mysql, postgres, sqlite (default: mysql)
 	DSN             string `yaml:"dsn" json:"dsn"`           // 直接指定 DSN
 	Host            string `yaml:"host" json:"host"`         // 主机
 	User            string `yaml:"user" json:"user"`         // 用户名

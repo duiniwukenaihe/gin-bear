@@ -255,6 +255,67 @@ func TestNewGormAdapterDefensivelyEnforcesProductionDBTLS(t *testing.T) {
 	}
 }
 
+func TestNewGormAdapterConnectsSQLiteInDevelopment(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	t.Setenv("GIN_MODE", "debug")
+
+	adapter, err := NewGormAdapter(&DBConfig{
+		Enabled: true,
+		Type:    "sqlite",
+		DSN:     ":memory:",
+	})
+	if err != nil {
+		t.Fatalf("NewGormAdapter sqlite error = %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.Shutdown() })
+	if err := adapter.Exec("CREATE TABLE adapter_smoke_test (id INTEGER PRIMARY KEY)").Error; err != nil {
+		t.Fatalf("sqlite adapter did not execute query: %v", err)
+	}
+}
+
+func TestProductionMySQLTLSFailsAtAllStartupBoundaries(t *testing.T) {
+	const dsn = "app:mysql-path-secret@tcp(db.example:3306)/app?tls=false"
+	t.Setenv("BEAR_ENV", "production")
+	t.Setenv("GIN_MODE", "")
+
+	assertMySQLProductionTLSFailure := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "requires TLS") {
+			t.Fatalf("production MySQL TLS error = %v", err)
+		}
+		if strings.Contains(err.Error(), "mysql-path-secret") {
+			t.Fatalf("production MySQL TLS error leaked DSN secret: %v", err)
+		}
+	}
+
+	t.Run("Validate", func(t *testing.T) {
+		cfg := NewSysConfig()
+		cfg.DB.Enabled = true
+		cfg.DB.Type = "mysql"
+		cfg.DB.DSN = dsn
+		assertMySQLProductionTLSFailure(t, cfg.Validate())
+	})
+
+	t.Run("LoadConfig", func(t *testing.T) {
+		path := writeConfig(t, "production-insecure-mysql.yaml", `
+database:
+  enabled: true
+  type: mysql
+  dsn: app:mysql-path-secret@tcp(db.example:3306)/app?tls=false
+auth:
+  jwt_secret: production-secret-with-at-least-32-characters
+  token_expire_hours: 24
+`)
+		_, err := LoadConfig(path)
+		assertMySQLProductionTLSFailure(t, err)
+	})
+
+	t.Run("NewGormAdapter", func(t *testing.T) {
+		_, err := NewGormAdapter(&DBConfig{Enabled: true, Type: "mysql", DSN: dsn})
+		assertMySQLProductionTLSFailure(t, err)
+	})
+}
+
 func TestSysConfigValidateRejectsNonPositiveTokenExpiration(t *testing.T) {
 	t.Setenv("BEAR_ENV", "dev")
 	cfg := NewSysConfig()

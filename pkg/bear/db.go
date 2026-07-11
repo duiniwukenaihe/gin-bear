@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/driver/mysql"
@@ -117,7 +118,7 @@ func buildDSN(cfg *DBConfig) (string, error) {
 		}
 		return dsn, nil
 	default:
-		return "", fmt.Errorf("unsupported database type: %s, supported: mysql, postgres", dbType)
+		return "", fmt.Errorf("unsupported database type: %s, supported: mysql, postgres, sqlite", dbType)
 	}
 }
 
@@ -213,8 +214,12 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 	switch dbType {
 	case "postgres", "postgresql":
 		dialector = postgres.Open(dsn)
-	default:
+	case "mysql", "":
 		dialector = mysql.Open(dsn)
+	case "sqlite", "sqlite3":
+		dialector = sqlite.Open(dsn)
+	default:
+		return nil, fmt.Errorf("unsupported database type: %s", dbType)
 	}
 
 	db, err := gorm.Open(dialector, buildGormConfig(cfg))
