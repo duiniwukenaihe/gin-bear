@@ -38,9 +38,19 @@ Move MySQL settings to `database.tls` before deployment.
 
 ### Metrics
 
-Built-in **metrics** are disabled unless `metrics.enabled: true` is set.
-`EnableHealth()` registers the configured metrics path only when metrics are
-enabled. `/metrics` is no longer public by default; expose it with a protected
+Newly generated `application-prod.yaml.example` files set `metrics.enabled: false`,
+so production metrics stay off until that generated configuration is changed
+explicitly. `NewSysConfig()` still enables metrics in its in-memory default configuration;
+that compatibility default is not a global production default.
+
+Call `EnableMetrics()` when the application should expose Prometheus metrics.
+On its first call, `EnableMetrics()` skips registration only when the supplied
+configuration explicitly sets `metrics.enabled: false`; otherwise it registers
+the configured path (or `/metrics`). Later calls are idempotent. For existing
+applications, `EnableHealth()` calls
+`EnableMetrics()` when metrics configuration is absent or enabled, while an
+explicit `metrics.enabled: false` still prevents registration. `/metrics` is no
+longer public in generated production configuration; expose it with a protected
 listener, network policy, or an explicit `auth.public_paths` entry.
 
 ### Token Revocation

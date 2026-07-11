@@ -3,7 +3,12 @@
 ## Release Checklist
 
 1. Review configuration from `application-prod.yaml.example`.
-2. Run `GOPROXY=https://goproxy.cn,direct scripts/release-check.sh`.
+2. Run the same pinned local verification command required by the README and
+   security policy:
+
+   ```bash
+   GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
+   ```
 3. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
 4. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
 5. Confirm `server.shutdown_timeout`, `health.readiness_timeout`, `log.level`, and `redis.required` match the service's dependency profile.
@@ -13,14 +18,21 @@
 7. Before publishing, run the pinned local snapshot check:
 
    ```bash
-   go run github.com/goreleaser/goreleaser/v2@v2.17.0 release --snapshot --clean
+   GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run github.com/goreleaser/goreleaser/v2@v2.17.0 release --snapshot --clean
+   ```
+
+   Verify the generated SHA-256 manifest, then inspect the CLI archives and
+   release metadata:
+
+   ```bash
+   (cd dist && shasum -a 256 -c checksums.txt)
    ```
 
    Inspect `dist/checksums.txt`, the CLI archives, and `dist/artifacts.json`.
    Remove `dist/` after the check; snapshot artifacts are not committed.
 
 The release workflow runs only for `v*` tags. It runs `make verify` before
-GoReleaser and grants `contents: write` only to the release job.
+GoReleaser with Go 1.25.12 and grants `contents: write` only to the release job.
 
 ## Rollback
 
