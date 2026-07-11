@@ -2,7 +2,7 @@
 
 All notable changes to gin-bear are documented in this file.
 
-## [0.10.0] - 2026-07-11
+## [v0.10.0-rc.1] - Unreleased
 
 ### Added
 

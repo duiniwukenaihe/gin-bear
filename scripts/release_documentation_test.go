@@ -80,6 +80,17 @@ func TestReleaseDocumentationSeparatesPublishedAndUpcomingVersions(t *testing.T)
 	}
 }
 
+func TestChangelogKeepsV010ReleaseCandidateUnreleased(t *testing.T) {
+	changelog := readDocumentationFile(t, "../CHANGELOG.md")
+	const expectedHeading = "## [v0.10.0-rc.1] - Unreleased"
+	if !strings.Contains(changelog, expectedHeading) {
+		t.Fatalf("CHANGELOG.md missing unreleased release-candidate heading %q", expectedHeading)
+	}
+	if strings.Contains(changelog, "## [0.10.0] - 2026-07-11") {
+		t.Fatal("CHANGELOG.md must not claim the v0.10 release candidate is dated or published")
+	}
+}
+
 func TestProductionDocumentationUsesPinnedVerifyCommand(t *testing.T) {
 	text := readDocumentationFile(t, "../docs/production.md")
 	const command = "GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify"
