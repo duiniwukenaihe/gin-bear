@@ -49,6 +49,11 @@ Production rejects `config.strict: false`. `InitConfig()` remains available for
 source compatibility and delegates to `LoadConfig`; because its signature has
 no error result, it panics on any loading or validation error.
 
+The tested production-loading pattern is in
+[`examples/migration/main.go`](../examples/migration/main.go). It calls
+`LoadConfig` and returns startup errors to the caller instead of relying on the
+legacy panic behavior.
+
 ## HTTP Security Defaults
 
 Request headers and bodies default to 1 MiB limits. Tune either bound only for
@@ -99,6 +104,8 @@ Redis-backed token revocation is optional. Without a Redis client, ordinary JWT
 validation still succeeds. `RevokeToken` and direct blacklist checks return
 `ErrTokenRevocationUnavailable`, which callers can detect with `errors.Is`,
 instead of panicking. Treat that error as a failed logout/revocation operation.
+The tested typed-error handling pattern is in
+[`examples/auth/main.go`](../examples/auth/main.go).
 
 ## Logging
 
@@ -178,6 +185,14 @@ collectors, so tests and colocated runtimes do not share HTTP metric state.
 `/metrics` is no longer in the default authentication public-path list. Expose
 it through a separately protected listener, network policy, or an explicit
 `auth.public_paths` entry only when that is intentional.
+
+## Tested Startup Example
+
+[`examples/basic/main.go`](../examples/basic/main.go) is the source behind the
+README lifecycle guidance. It checks the error returned by `ApplyAll`, starts
+with a signal-cancellable context, and returns any `Launch` error to `main`.
+Its route setup is exercised by `examples/basic/main_test.go` as part of
+`go test ./...`.
 
 ## Tracing
 

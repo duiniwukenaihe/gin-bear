@@ -7,6 +7,20 @@
 3. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
 4. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
 5. Confirm `server.shutdown_timeout`, `health.readiness_timeout`, `log.level`, and `redis.required` match the service's dependency profile.
+6. For a tag release, confirm `.goreleaser.yml` still builds only `cmd/bear`
+   archives for Linux, macOS, and Windows, plus SHA-256 checksums, source
+   archive, changelog text, and release metadata.
+7. Before publishing, run the pinned local snapshot check:
+
+   ```bash
+   go run github.com/goreleaser/goreleaser/v2@v2.17.0 release --snapshot --clean
+   ```
+
+   Inspect `dist/checksums.txt`, the CLI archives, and `dist/artifacts.json`.
+   Remove `dist/` after the check; snapshot artifacts are not committed.
+
+The release workflow runs only for `v*` tags. It runs `make verify` before
+GoReleaser and grants `contents: write` only to the release job.
 
 ## Rollback
 
@@ -14,6 +28,8 @@
 2. Roll back to the previous application binary or release artifact.
 3. Check `/ready` before restoring traffic.
 4. Review `/version` to confirm the running commit.
+5. For framework behavior changes, follow the exact configuration and rollback
+   sequence in [the v0.9 to v0.10 migration guide](migration-v0.9-to-v0.10.md).
 
 ## Migration Recovery
 
