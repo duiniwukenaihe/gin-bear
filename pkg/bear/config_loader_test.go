@@ -3,6 +3,7 @@ package bear
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"net"
 	"net/http"
@@ -657,7 +658,13 @@ func TestSysConfigValidateRejectsKnownProductionJWTSecrets(t *testing.T) {
 func TestSysConfigValidateAccepts32ByteJWTSecretWithBoundaryWhitespace(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")
-	secret := " " + strings.Repeat("k", 30) + " "
+	secretBytes := make([]byte, 32)
+	secretBytes[0] = ' '
+	secretBytes[len(secretBytes)-1] = ' '
+	if _, err := rand.Read(secretBytes[1 : len(secretBytes)-1]); err != nil {
+		t.Fatalf("generate random JWT secret content: %v", err)
+	}
+	secret := string(secretBytes)
 	if len(secret) != 32 {
 		t.Fatalf("test JWT secret length = %d", len(secret))
 	}
