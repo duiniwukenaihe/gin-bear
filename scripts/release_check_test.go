@@ -59,11 +59,13 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 	}
 	text := string(content)
 	for _, want := range []string{
-		`GOBIN="${RUNNER_TEMP}/bin" go install honnef.co/go/tools/cmd/staticcheck@v0.7.0`,
-		`GOBIN="${RUNNER_TEMP}/bin" go install golang.org/x/vuln/cmd/govulncheck@v1.6.0`,
+		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= honnef.co/go/tools/cmd/staticcheck@v0.7.0`,
+		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/vuln/cmd/govulncheck@v1.6.0`,
 		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597`,
 		"STATICCHECK_BIN: ${{ runner.temp }}/bin/staticcheck",
+		"STATICCHECK_EXPECTED_SHA256: 968c4cdeff3a18eef976ecdbcd83dbea35ca3c12c58b87c9f4684e1ea6adfc75",
 		"GOVULNCHECK_BIN: ${{ runner.temp }}/bin/govulncheck",
+		"GOVULNCHECK_EXPECTED_SHA256: 15ad0c7081d061d06f83a39b1783318d90659f3404d83a75bcdda51eda3ef75f",
 		"APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff",
 		"APIDIFF_EXPECTED_SHA256: 84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f",
 		"RC_ALLOW_NETWORK: \"1\"",
@@ -101,7 +103,7 @@ func TestReleaseCheckPersistsExplicitNetworkEvidence(t *testing.T) {
 			metadata := filepath.Join(state, "release-check-metadata.txt")
 			command := exec.Command("./scripts/release-check.sh")
 			command.Dir = repository
-			command.Env = append(os.Environ(),
+			command.Env = releaseTestEnvironment(
 				"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"RELEASE_TEST_STATE="+state,
 				"RC_ALLOW_NETWORK="+test.flag,
@@ -126,6 +128,70 @@ func TestReleaseCheckPersistsExplicitNetworkEvidence(t *testing.T) {
 				t.Fatalf("release-check stdout does not identify persisted metadata:\n%s", output)
 			}
 		})
+	}
+}
+
+func TestReleaseCheckRejectsUnverifiedControlledStaticcheck(t *testing.T) {
+	repository, state := fakeReleaseRepository(t)
+	staticcheck := systemTrue(t)
+	command := exec.Command("./scripts/release-check.sh")
+	command.Dir = repository
+	command.Env = releaseTestEnvironment(
+		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RELEASE_TEST_STATE="+state,
+		"RC_ALLOW_NETWORK=0",
+		"STATICCHECK_BIN="+staticcheck,
+		"STATICCHECK_EXPECTED_SHA256="+fileSHA256(t, staticcheck),
+		"GOVULNCHECK_BIN="+filepath.Join(repository, "bin", "govulncheck"),
+		"GOVULNCHECK_EXPECTED_SHA256="+fileSHA256(t, filepath.Join(repository, "bin", "govulncheck")),
+		"GOVULNCHECK_DB=file://"+filepath.Join(repository, "vulndb"),
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("release-check.sh accepted %s as staticcheck:\n%s", staticcheck, output)
+	}
+	if !strings.Contains(string(output), "STATICCHECK_BIN") {
+		t.Fatalf("unverified staticcheck failure is not actionable:\n%s", output)
+	}
+}
+
+func TestReleaseCheckRejectsControlledToolDigestMismatch(t *testing.T) {
+	repository, state := fakeReleaseRepository(t)
+	command := exec.Command("./scripts/release-check.sh")
+	command.Dir = repository
+	command.Env = releaseTestEnvironment(
+		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RELEASE_TEST_STATE="+state,
+		"RC_ALLOW_NETWORK=0",
+		"STATICCHECK_BIN="+filepath.Join(repository, "bin", "staticcheck"),
+		"STATICCHECK_EXPECTED_SHA256="+strings.Repeat("0", 64),
+		"GOVULNCHECK_BIN="+filepath.Join(repository, "bin", "govulncheck"),
+		"GOVULNCHECK_EXPECTED_SHA256="+fileSHA256(t, filepath.Join(repository, "bin", "govulncheck")),
+		"GOVULNCHECK_DB=file://"+filepath.Join(repository, "vulndb"),
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("release-check.sh accepted a staticcheck digest mismatch:\n%s", output)
+	}
+	if !strings.Contains(string(output), "STATICCHECK_EXPECTED_SHA256") {
+		t.Fatalf("staticcheck digest failure is not actionable:\n%s", output)
+	}
+}
+
+func TestVerifyRCRejectsUnverifiedControlledGovulncheck(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	govulncheck := systemTrue(t)
+	output, err := runFakeRC(repository, artifact, state,
+		"GOVULNCHECK_BIN="+govulncheck,
+		"GOVULNCHECK_EXPECTED_SHA256="+fileSHA256(t, govulncheck),
+		"STATICCHECK_BIN="+filepath.Join(repository, "bin", "staticcheck"),
+		"STATICCHECK_EXPECTED_SHA256="+fileSHA256(t, filepath.Join(repository, "bin", "staticcheck")),
+	)
+	if err == nil {
+		t.Fatalf("verify-rc.sh accepted %s as govulncheck:\n%s", govulncheck, output)
+	}
+	if !strings.Contains(string(output), "GOVULNCHECK_BIN") {
+		t.Fatalf("unverified govulncheck failure is not actionable:\n%s", output)
 	}
 }
 
@@ -157,7 +223,9 @@ func TestReleaseExpectedVersionComesFromPushedTag(t *testing.T) {
 	}
 	if !strings.Contains(workflow, `CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/exp/cmd/apidiff@`) ||
 		!strings.Contains(workflow, "APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff") ||
-		!strings.Contains(workflow, "APIDIFF_EXPECTED_SHA256: 84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f") {
+		!strings.Contains(workflow, "APIDIFF_EXPECTED_SHA256: 84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f") ||
+		!strings.Contains(workflow, "STATICCHECK_EXPECTED_SHA256: 968c4cdeff3a18eef976ecdbcd83dbea35ca3c12c58b87c9f4684e1ea6adfc75") ||
+		!strings.Contains(workflow, "GOVULNCHECK_EXPECTED_SHA256: 15ad0c7081d061d06f83a39b1783318d90659f3404d83a75bcdda51eda3ef75f") {
 		t.Fatalf("release workflow does not prepare and pass a pinned local apidiff binary:\n%s", workflow)
 	}
 	if strings.Contains(workflow, "API_COMPAT_ALLOW_NETWORK:") {
@@ -202,7 +270,7 @@ func TestReleaseCheckOwnsOnlyImplicitCoverageProfile(t *testing.T) {
 			before := readTestFile(t, filepath.Join(repository, "go.mod"))
 			command := exec.Command("./scripts/release-check.sh")
 			command.Dir = repository
-			command.Env = append(os.Environ(),
+			command.Env = releaseTestEnvironment(
 				"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"RELEASE_TEST_STATE="+state,
 				"COVERAGE_MINIMUM=1",
@@ -238,7 +306,7 @@ func TestReleaseCheckForcesNonDowngradableCoverageThresholds(t *testing.T) {
 	repository, state := fakeReleaseRepository(t)
 	command := exec.Command("./scripts/release-check.sh")
 	command.Dir = repository
-	command.Env = append(os.Environ(),
+	command.Env = releaseTestEnvironment(
 		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"RELEASE_TEST_STATE="+state,
 		"COVERAGE_MINIMUM=1",
@@ -276,7 +344,7 @@ exit 73
 	}
 	command := exec.Command("./scripts/release-check.sh")
 	command.Dir = repository
-	command.Env = append(os.Environ(),
+	command.Env = releaseTestEnvironment(
 		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"RELEASE_TEST_STATE="+state,
 		"RELEASE_CHECK_METADATA="+filepath.Join(state, "release-check-metadata.txt"),
@@ -410,8 +478,12 @@ func TestVerifyRCDefaultModeUsesLocalToolsWithoutNetworkCommands(t *testing.T) {
 	for _, want := range []string{
 		"network_mode=offline",
 		"GOPROXY=off",
-		"staticcheck_source=local-binary",
-		"govulncheck_source=local-binary",
+		"staticcheck_source=controlled-binary",
+		"govulncheck_source=controlled-binary",
+		"staticcheck_expected_sha256=",
+		"staticcheck_actual_sha256=",
+		"govulncheck_expected_sha256=",
+		"govulncheck_actual_sha256=",
 	} {
 		if !strings.Contains(metadata, want) {
 			t.Fatalf("offline metadata missing %q:\n%s", want, metadata)
@@ -707,7 +779,7 @@ func TestAPICompatibilityGateRejectsInvalidRebuildFlag(t *testing.T) {
 	for _, value := range []string{"", "banana"} {
 		t.Run(value, func(t *testing.T) {
 			command := exec.Command("./check-api-compat.sh")
-			command.Env = append(os.Environ(), "API_BASELINE_REBUILD="+value, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+			command.Env = releaseTestEnvironment("API_BASELINE_REBUILD="+value, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
 			output, err := command.CombinedOutput()
 			if err == nil {
 				t.Fatalf("API compatibility gate accepted invalid rebuild flag %q:\n%s", value, output)
@@ -723,7 +795,7 @@ func TestAPICompatibilityGateRejectsInvalidNetworkFlag(t *testing.T) {
 	for _, value := range []string{"", "banana"} {
 		t.Run(value, func(t *testing.T) {
 			command := exec.Command("./check-api-compat.sh")
-			command.Env = append(os.Environ(), "API_COMPAT_ALLOW_NETWORK="+value)
+			command.Env = releaseTestEnvironment("API_COMPAT_ALLOW_NETWORK=" + value)
 			output, err := command.CombinedOutput()
 			if err == nil {
 				t.Fatalf("API compatibility gate accepted invalid network flag %q:\n%s", value, output)
@@ -739,7 +811,7 @@ func TestAPICompatibilityGateRejectsUncontrolledPathAPIDiff(t *testing.T) {
 	directory, bin := fakeAPICompatibilityDirectory(t)
 	command := exec.Command("./check-api-compat.sh")
 	command.Dir = directory
-	command.Env = append(os.Environ(),
+	command.Env = releaseTestEnvironment(
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_API_STATE="+directory,
 	)
@@ -762,7 +834,7 @@ func TestAPICompatibilityGateRejectsFakeExitZeroShellAPIDiff(t *testing.T) {
 	expectedSHA256 := fmt.Sprintf("%x", sha256.Sum256(apidiffContents))
 	command := exec.Command("./check-api-compat.sh")
 	command.Dir = directory
-	command.Env = append(os.Environ(),
+	command.Env = releaseTestEnvironment(
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_API_STATE="+directory,
 		"APIDIFF_BIN="+apidiffPath,
@@ -783,7 +855,7 @@ func TestAPICompatibilityGateRecordsControlledOfflineMode(t *testing.T) {
 	metadata := filepath.Join(directory, "metadata.txt")
 	command := exec.Command("./check-api-compat.sh")
 	command.Dir = directory
-	command.Env = append(os.Environ(),
+	command.Env = releaseTestEnvironment(
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_API_STATE="+directory,
 		"APIDIFF_BIN="+filepath.Join(bin, "apidiff"),
@@ -857,7 +929,7 @@ func TestAPICompatibilityGateRejectsWrongControlledAPIDiffIdentity(t *testing.T)
 			}
 			command := exec.Command("./check-api-compat.sh")
 			command.Dir = directory
-			command.Env = append(os.Environ(),
+			command.Env = releaseTestEnvironment(
 				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"FAKE_API_STATE="+directory,
 				"FAKE_APIDIFF_BUILD_INFO="+test.buildInfo,
@@ -903,7 +975,7 @@ func TestAPICompatibilityGateRejectsEmptyOrUntrustedAPIDiffPath(t *testing.T) {
 			directory, bin := fakeAPICompatibilityDirectory(t)
 			command := exec.Command("./check-api-compat.sh")
 			command.Dir = directory
-			command.Env = append(os.Environ(),
+			command.Env = releaseTestEnvironment(
 				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"FAKE_API_STATE="+directory,
 				"APIDIFF_BIN="+test.value,
@@ -924,7 +996,7 @@ func TestAPICompatibilityGateRecordsPinnedOnlineFallback(t *testing.T) {
 	metadata := filepath.Join(directory, "metadata.txt")
 	command := exec.Command("./check-api-compat.sh")
 	command.Dir = directory
-	command.Env = append(os.Environ(),
+	command.Env = releaseTestEnvironment(
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_API_STATE="+directory,
 		"API_COMPAT_ALLOW_NETWORK=1",
@@ -951,7 +1023,7 @@ func TestAPICompatibilityGateRecordsOptInBaselineRebuild(t *testing.T) {
 	metadata := filepath.Join(directory, "metadata.txt")
 	command := exec.Command("./check-api-compat.sh")
 	command.Dir = directory
-	command.Env = append(os.Environ(),
+	command.Env = releaseTestEnvironment(
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_API_STATE="+directory,
 		"APIDIFF_BIN="+filepath.Join(bin, "apidiff"),
@@ -983,7 +1055,7 @@ func TestAPICompatibilityGateAcceptsAdditionsAndRejectsIncompatibilities(t *test
 			directory, bin := fakeAPICompatibilityDirectory(t)
 			command := exec.Command("./check-api-compat.sh")
 			command.Dir = directory
-			command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_API_STATE="+directory, "FAKE_APIDIFF_OUTPUT="+test.output, "APIDIFF_BIN="+filepath.Join(bin, "apidiff"), "APIDIFF_EXPECTED_SHA256="+fakeAPIDiffSHA256(t, bin))
+			command.Env = releaseTestEnvironment("PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_API_STATE="+directory, "FAKE_APIDIFF_OUTPUT="+test.output, "APIDIFF_BIN="+filepath.Join(bin, "apidiff"), "APIDIFF_EXPECTED_SHA256="+fakeAPIDiffSHA256(t, bin))
 			output, err := command.CombinedOutput()
 			if test.wantFailed && err == nil {
 				t.Fatalf("API gate accepted incompatible output:\n%s", output)
@@ -1137,6 +1209,19 @@ func fakeReleaseRepository(t *testing.T) (string, string) {
 	fakeGo := `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${RELEASE_TEST_STATE}/go-calls"
+if [[ "$1 $2" == "version -m" ]]; then
+	case "${3##*/}" in
+	staticcheck)
+		if [[ "${FAKE_STATICCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
+		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		;;
+	govulncheck)
+		if [[ "${FAKE_GOVULNCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
+		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		;;
+	esac
+	exit 0
+fi
 if [[ "$1 $2" == "list -m" ]]; then
 	printf '%s\n' example.com/release-test
 	exit 0
@@ -1167,6 +1252,10 @@ exit 0
 			t.Fatal(err)
 		}
 	}
+	t.Setenv("STATICCHECK_BIN", filepath.Join(repository, "bin", "staticcheck"))
+	t.Setenv("STATICCHECK_EXPECTED_SHA256", fileSHA256(t, filepath.Join(repository, "bin", "staticcheck")))
+	t.Setenv("GOVULNCHECK_BIN", filepath.Join(repository, "bin", "govulncheck"))
+	t.Setenv("GOVULNCHECK_EXPECTED_SHA256", fileSHA256(t, filepath.Join(repository, "bin", "govulncheck")))
 	return repository, state
 }
 
@@ -1198,6 +1287,19 @@ func fakeRCRepository(t *testing.T) (string, string, string) {
 set -euo pipefail
 printf 'GOPROXY=%s %s\n' "${GOPROXY:-}" "$*" >> "${RC_TEST_STATE}/go-calls"
 if [[ "${1:-}" == "version" ]]; then printf '%s\n' 'go version go1.25.12 fixture'; fi
+if [[ "${1:-} ${2:-}" == "version -m" ]]; then
+	case "${3##*/}" in
+	staticcheck)
+		if [[ "${FAKE_STATICCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
+		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		;;
+	govulncheck)
+		if [[ "${FAKE_GOVULNCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
+		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		;;
+	esac
+	exit 0
+fi
 if [[ "${1:-} ${2:-} ${3:-}" == "run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -version" ]]; then printf '%s\n' 'staticcheck fixture'; fi
 if [[ "${1:-} ${2:-} ${3:-}" == "run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -version" ]]; then printf '%s\n' 'govulncheck fixture'; fi
 exit 0
@@ -1265,13 +1367,17 @@ printf '%s\n' "${RC_TEST_DATE:-123}"
 			t.Fatal(err)
 		}
 	}
+	t.Setenv("STATICCHECK_BIN", filepath.Join(repository, "bin", "staticcheck"))
+	t.Setenv("STATICCHECK_EXPECTED_SHA256", fileSHA256(t, filepath.Join(repository, "bin", "staticcheck")))
+	t.Setenv("GOVULNCHECK_BIN", filepath.Join(repository, "bin", "govulncheck"))
+	t.Setenv("GOVULNCHECK_EXPECTED_SHA256", fileSHA256(t, filepath.Join(repository, "bin", "govulncheck")))
 	return repository, artifact, state
 }
 
 func runFakeRC(repository, artifact, state string, extraEnvironment ...string) ([]byte, error) {
 	command := exec.Command("./scripts/verify-rc.sh")
 	command.Dir = repository
-	command.Env = append(os.Environ(),
+	command.Env = releaseTestEnvironment(
 		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"RC_ARTIFACT_DIR="+artifact,
 		"RC_TEST_STATE="+state,
@@ -1280,6 +1386,65 @@ func runFakeRC(repository, artifact, state string, extraEnvironment ...string) (
 	)
 	command.Env = append(command.Env, extraEnvironment...)
 	return command.CombinedOutput()
+}
+
+func releaseTestEnvironment(overrides ...string) []string {
+	controlled := map[string]struct{}{
+		"API_BASELINE_REBUILD":      {},
+		"API_COMPAT_ALLOW_NETWORK":  {},
+		"API_COMPAT_METADATA":       {},
+		"APIDIFF_BIN":               {},
+		"APIDIFF_EXPECTED_SHA256":   {},
+		"COVERAGE_MINIMUM":          {},
+		"COVERAGE_PROFILE":          {},
+		"CRITICAL_COVERAGE_MINIMUM": {},
+		"RC_ALLOW_NETWORK":          {},
+		"RC_ARTIFACT_DIR":           {},
+		"RC_BASE_REF":               {},
+		"RC_EXPECTED_VERSION":       {},
+		"RC_RELEASE_TAG":            {},
+		"RC_REMOTE_HYGIENE":         {},
+		"RELEASE_CHECK_METADATA":    {},
+	}
+	for _, override := range overrides {
+		name, _, found := strings.Cut(override, "=")
+		if found {
+			controlled[name] = struct{}{}
+		}
+	}
+
+	environment := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		name, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, excluded := controlled[name]; excluded {
+				continue
+			}
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment, overrides...)
+}
+
+func fileSHA256(t *testing.T, path string) string {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(contents))
+}
+
+func systemTrue(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(path) {
+		t.Fatalf("true path must be absolute: %s", path)
+	}
+	return path
 }
 
 func metadataValue(t *testing.T, path, key string) string {

@@ -14,7 +14,7 @@
    populated module cache, and a local govulncheck database:
 
    ```bash
-   SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
+   SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
    ```
 4. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
 5. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
@@ -57,7 +57,7 @@ workflow exemption, not signature verification. A local release operator with
 an isolated trusted `GNUPGHOME` must run:
 
 ```bash
-RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.10.0-rc.1 RC_EXPECTED_VERSION=v0.10.0-rc.1 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
+RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.10.0-rc.1 RC_EXPECTED_VERSION=v0.10.0-rc.1 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
 ```
 
 When `RC_RELEASE_TAG` is non-empty, `RC_VERIFY_TAG_SIGNATURE` is mandatory and
@@ -68,9 +68,12 @@ explicit exemption. Supplying the signature variable without a release tag is
 invalid.
 
 The workflow installs pinned `staticcheck`, `govulncheck`, and `apidiff`
-binaries before the gate. The `apidiff` build fixes Go 1.25.12,
-Linux/amd64, and `CGO_ENABLED=0`, then supplies the independently trusted
-SHA-256 `84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f`. It explicitly sets `RC_ALLOW_NETWORK=1`, recorded as
+binaries before the gate. All three builds fix Go 1.25.12, Linux/amd64,
+`CGO_ENABLED=0`, trim paths, and remove the Go build ID. The workflow verifies
+the independently reproduced SHA-256 values `968c4cdeff3a18eef976ecdbcd83dbea35ca3c12c58b87c9f4684e1ea6adfc75`
+for staticcheck, `15ad0c7081d061d06f83a39b1783318d90659f3404d83a75bcdda51eda3ef75f`
+for govulncheck, and `84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f`
+for apidiff. It explicitly sets `RC_ALLOW_NETWORK=1`, recorded as
 `network_mode=online-opt-in`, because govulncheck refreshes vulnerability data.
 The API gate still receives the controlled `APIDIFF_BIN` and leaves
 `API_COMPAT_ALLOW_NETWORK=0`.
@@ -183,7 +186,7 @@ pinned tool versions, shuffle seed `20260711`, each command and exit code, and
 clean before/after worktree status:
 
 ```bash
-SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
+SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
 ```
 
 By default logs are retained in a `mktemp` directory outside the repository;
