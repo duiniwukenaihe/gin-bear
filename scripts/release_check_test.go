@@ -487,7 +487,7 @@ func TestRCGateAndReleaseWorkflowAreAuditable(t *testing.T) {
 		"go clean -testcache",
 		"go test ./... -count=1",
 		"-shuffle=\"${shuffle_seed}\" -count=20",
-		"-shuffle=\"${shuffle_seed}\" -count=20 -timeout=30m",
+		"-shuffle=\"${shuffle_seed}\" -count=20 -timeout=\"${shuffle_timeout}\"",
 		"go test -race ./... -count=3",
 		"go vet ./...",
 		"staticcheck@v0.7.0",
@@ -561,6 +561,44 @@ func TestVerifyRCDerivesStableShuffleSeedFromCandidate(t *testing.T) {
 	second := metadataValue(t, filepath.Join(secondArtifact, "metadata.txt"), "shuffle_seed")
 	if first == "" || first != second {
 		t.Fatalf("derived shuffle seeds differ for the same candidate: first=%q second=%q", first, second)
+	}
+}
+
+func TestVerifyRCRecordsConfigurableShuffleTimeout(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	if output, err := runFakeRC(repository, artifact, state, "RC_SHUFFLE_TIMEOUT=75m"); err != nil {
+		t.Fatalf("verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	if got := metadataValue(t, filepath.Join(artifact, "metadata.txt"), "shuffle_timeout"); got != "75m" {
+		t.Fatalf("shuffle_timeout = %q, want 75m", got)
+	}
+	if calls := readTestFile(t, filepath.Join(state, "go-calls")); !strings.Contains(calls, "-count=20 -timeout=75m") {
+		t.Fatalf("shuffle timeout was not passed to go test:\n%s", calls)
+	}
+}
+
+func TestVerifyRCDefaultsShuffleTimeout(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	if output, err := runFakeRC(repository, artifact, state); err != nil {
+		t.Fatalf("verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	if got := metadataValue(t, filepath.Join(artifact, "metadata.txt"), "shuffle_timeout"); got != "60m" {
+		t.Fatalf("shuffle_timeout = %q, want 60m", got)
+	}
+	if calls := readTestFile(t, filepath.Join(state, "go-calls")); !strings.Contains(calls, "-count=20 -timeout=60m") {
+		t.Fatalf("default shuffle timeout was not passed to go test:\n%s", calls)
+	}
+}
+
+func TestVerifyRCRejectsInvalidShuffleTimeout(t *testing.T) {
+	for _, value := range []string{"", "0m", "30", "1.5h", "30m;false"} {
+		t.Run(strings.ReplaceAll(value, "/", "_"), func(t *testing.T) {
+			repository, artifact, state := fakeRCRepository(t)
+			output, err := runFakeRC(repository, artifact, state, "RC_SHUFFLE_TIMEOUT="+value)
+			if err == nil {
+				t.Fatalf("verify-rc.sh accepted invalid RC_SHUFFLE_TIMEOUT %q:\n%s", value, output)
+			}
+		})
 	}
 }
 
@@ -1528,6 +1566,7 @@ func releaseTestEnvironment(overrides ...string) []string {
 		"RC_EXPECTED_VERSION":       {},
 		"RC_RELEASE_TAG":            {},
 		"RC_REMOTE_HYGIENE":         {},
+		"RC_SHUFFLE_TIMEOUT":        {},
 		"RELEASE_CHECK_METADATA":    {},
 	}
 	for _, override := range overrides {

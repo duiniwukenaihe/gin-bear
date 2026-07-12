@@ -170,7 +170,10 @@ the full RC gate into an online Go proxy, tool fallback, and vulnerability DB;
 the default forces `GOPROXY=off`, `GOSUMDB=off`, and `GOTOOLCHAIN=local`.
 Offline mode does not promise to populate an empty `GOMODCACHE`. All switches
 accept only `0` or `1`. When `SHUFFLE_SEED` is omitted, `verify-rc` derives a
-stable seed from the candidate commit and tree.
+stable seed from the candidate commit and tree. The 20-run shuffle stage uses
+`RC_SHUFFLE_TIMEOUT=60m` by default so command-heavy packages can complete all
+iterations. Override it only with a positive integer followed by `s`, `m`, or
+`h`; the effective timeout is recorded in RC metadata.
 
 Run the release-only compatibility test once with:
 
@@ -187,8 +190,8 @@ contain the request secret.
 After coverage and compatibility pass, commit the reviewed fixes and run the
 final gate through its tracked entry point from a clean HEAD. It records the
 actual commit and git tree hash, the resolved `RC_BASE_REF` merge base, Go and
-pinned tool versions, shuffle seed `20260711`, each command and exit code, and
-clean before/after worktree status:
+pinned tool versions, shuffle seed `20260711`, shuffle timeout, each command
+and exit code, and clean before/after worktree status:
 
 ```bash
 SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc

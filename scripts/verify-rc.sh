@@ -247,6 +247,15 @@ if ! base_commit="$(git merge-base "${base_ref_commit}" HEAD)"; then
 fi
 
 shuffle_seed="${SHUFFLE_SEED:-$(printf '%s\n%s\n' "${commit}" "${tree}" | cksum | awk '{print $1}')}"
+if [[ "${RC_SHUFFLE_TIMEOUT+x}" == "x" ]]; then
+	shuffle_timeout="${RC_SHUFFLE_TIMEOUT}"
+else
+	shuffle_timeout="60m"
+fi
+if [[ ! "${shuffle_timeout}" =~ ^[1-9][0-9]*(s|m|h)$ ]]; then
+	printf 'RC_SHUFFLE_TIMEOUT must be a positive integer followed by s, m, or h\n' >&2
+	exit 1
+fi
 artifact_dir="${RC_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/gin-bear-rc.XXXXXX")}"
 mkdir -p "${artifact_dir}"
 artifact_dir="$(cd "${artifact_dir}" && pwd)"
@@ -355,6 +364,7 @@ capture_version() {
 	printf 'coverage_minimum=%s\n' "${coverage_minimum}"
 	printf 'critical_coverage_minimum=%s\n' "${critical_coverage_minimum}"
 	printf 'shuffle_seed=%s\n' "${shuffle_seed}"
+	printf 'shuffle_timeout=%s\n' "${shuffle_timeout}"
 	printf 'remote_hygiene=%s\n' "${remote_hygiene}"
 	printf 'network_mode=%s\n' "${network_mode}"
 	printf 'network_opt_in=%s\n' "${network_flag}"
@@ -378,6 +388,7 @@ printf 'RC commit: %s\n' "${commit}"
 printf 'RC tree: %s\n' "${tree}"
 printf 'RC base: %s (%s)\n' "${base_ref}" "${base_commit}"
 printf 'Shuffle seed: %s\n' "${shuffle_seed}"
+printf 'Shuffle timeout: %s\n' "${shuffle_timeout}"
 printf 'Audit logs: %s\n' "${artifact_dir}"
 cat "${metadata}"
 
@@ -466,7 +477,7 @@ check_repository_hygiene() {
 
 run_step clean go clean -testcache || exit $?
 run_step count1 go test ./... -count=1 || exit $?
-run_step shuffle20 go test ./... -shuffle="${shuffle_seed}" -count=20 -timeout=30m || exit $?
+run_step shuffle20 go test ./... -shuffle="${shuffle_seed}" -count=20 -timeout="${shuffle_timeout}" || exit $?
 run_step race3 go test -race ./... -count=3 || exit $?
 run_step vet go vet ./... || exit $?
 run_step staticcheck "${staticcheck_command[@]}" ./... || exit $?
