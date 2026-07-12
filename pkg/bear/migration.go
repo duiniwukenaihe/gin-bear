@@ -118,6 +118,7 @@ func LoadSQLMigrations(dir string) ([]Migration, error) {
 	}
 
 	byKey := make(map[string]*Migration)
+	nameByVersion := make(map[string]string)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -127,6 +128,10 @@ func LoadSQLMigrations(dir string) ([]Migration, error) {
 		if !ok {
 			continue
 		}
+		if existingName, found := nameByVersion[version]; found && existingName != migrationName {
+			return nil, fmt.Errorf("duplicate migration version %q for %q and %q; use a unique version for each migration", version, existingName, migrationName)
+		}
+		nameByVersion[version] = migrationName
 		path := filepath.Join(dir, name)
 		content, err := os.ReadFile(path)
 		if err != nil {
