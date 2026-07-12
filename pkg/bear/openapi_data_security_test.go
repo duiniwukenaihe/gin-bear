@@ -162,7 +162,7 @@ func TestGenerateOpenAPISecurityRequiresActualAuthFairing(t *testing.T) {
 	resetGinModeForTest(t)
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	configuredOnly := Ignite(cfg)
 	configuredOnly.Handle(http.MethodGet, "/configured-only", func() string { return "ok" })
@@ -615,7 +615,7 @@ func TestEnableSwaggerIsDisabledInProduction(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 	app := Ignite(cfg)
 	app.EnableSwagger()
 
