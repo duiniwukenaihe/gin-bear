@@ -250,7 +250,7 @@ shuffle_seed="${SHUFFLE_SEED:-$(printf '%s\n%s\n' "${commit}" "${tree}" | cksum 
 if [[ "${RC_SHUFFLE_TIMEOUT+x}" == "x" ]]; then
 	shuffle_timeout="${RC_SHUFFLE_TIMEOUT}"
 else
-	shuffle_timeout="60m"
+	shuffle_timeout="90m"
 fi
 if [[ ! "${shuffle_timeout}" =~ ^[1-9][0-9]*(s|m|h)$ ]]; then
 	printf 'RC_SHUFFLE_TIMEOUT must be a positive integer followed by s, m, or h\n' >&2

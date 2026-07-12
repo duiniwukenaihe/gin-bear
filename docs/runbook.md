@@ -171,7 +171,7 @@ the default forces `GOPROXY=off`, `GOSUMDB=off`, and `GOTOOLCHAIN=local`.
 Offline mode does not promise to populate an empty `GOMODCACHE`. All switches
 accept only `0` or `1`. When `SHUFFLE_SEED` is omitted, `verify-rc` derives a
 stable seed from the candidate commit and tree. The 20-run shuffle stage uses
-`RC_SHUFFLE_TIMEOUT=60m` by default so command-heavy packages can complete all
+`RC_SHUFFLE_TIMEOUT=90m` by default so command-heavy packages can complete all
 iterations. Override it only with a positive integer followed by `s`, `m`, or
 `h`; the effective timeout is recorded in RC metadata.
 

@@ -582,10 +582,10 @@ func TestVerifyRCDefaultsShuffleTimeout(t *testing.T) {
 	if output, err := runFakeRC(repository, artifact, state); err != nil {
 		t.Fatalf("verify-rc.sh fixture failed: %v\n%s", err, output)
 	}
-	if got := metadataValue(t, filepath.Join(artifact, "metadata.txt"), "shuffle_timeout"); got != "60m" {
-		t.Fatalf("shuffle_timeout = %q, want 60m", got)
+	if got := metadataValue(t, filepath.Join(artifact, "metadata.txt"), "shuffle_timeout"); got != "90m" {
+		t.Fatalf("shuffle_timeout = %q, want 90m", got)
 	}
-	if calls := readTestFile(t, filepath.Join(state, "go-calls")); !strings.Contains(calls, "-count=20 -timeout=60m") {
+	if calls := readTestFile(t, filepath.Join(state, "go-calls")); !strings.Contains(calls, "-count=20 -timeout=90m") {
 		t.Fatalf("default shuffle timeout was not passed to go test:\n%s", calls)
 	}
 }
