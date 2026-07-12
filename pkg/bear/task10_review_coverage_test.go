@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 type reviewCoverageFairing struct {
@@ -60,6 +61,27 @@ func (m *reviewCoverageModule) Build(app *Bear) {
 type reviewContextShutdowner struct{}
 
 func (reviewContextShutdowner) ShutdownContext(ctx context.Context) error { return ctx.Err() }
+
+type reviewWebSocketHandler struct {
+	BaseWebSocketHandler
+	connected chan struct{}
+	messages  chan string
+	closed    chan struct{}
+}
+
+func (h *reviewWebSocketHandler) OnConnect(*gin.Context, *websocket.Conn) error {
+	close(h.connected)
+	return nil
+}
+
+func (h *reviewWebSocketHandler) OnMessage(_ *gin.Context, conn *websocket.Conn, messageType int, payload []byte) error {
+	h.messages <- string(payload)
+	return conn.WriteMessage(messageType, append([]byte("echo:"), payload...))
+}
+
+func (h *reviewWebSocketHandler) OnClose(*gin.Context, *websocket.Conn) {
+	close(h.closed)
+}
 
 func TestTask10ReviewExercisesCompleteHandlerResponseFairingAndRoutePipeline(t *testing.T) {
 	resetGinModeForTest(t)
@@ -142,6 +164,67 @@ func TestTask10ReviewExercisesCompleteHandlerResponseFairingAndRoutePipeline(t *
 	activeContext, _ := gin.CreateTestContext(httptest.NewRecorder())
 	if err := handler.OnRequestWithRoute(activeContext, []Fairing{&reviewCoverageFairing{request: func(*gin.Context) error { return requestError }}}); !errors.Is(err, requestError) {
 		t.Fatalf("route fairing error = %v", err)
+	}
+}
+
+func TestTask10ReviewExercisesWebSocketRouteLifecycle(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.DB.Enabled = false
+	config.Config = make(map[string]any)
+	config.Config["websocket.read_timeout"] = "2s"
+	config.Config["websocket.write_timeout"] = "1s"
+	config.Config["websocket.ping_interval"] = "1h"
+	app := Ignite(config)
+	handler := &reviewWebSocketHandler{
+		connected: make(chan struct{}),
+		messages:  make(chan string, 1),
+		closed:    make(chan struct{}),
+	}
+	app.HandleWS("/ws", handler)
+
+	server := httptest.NewServer(app)
+	defer server.Close()
+	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws", nil)
+	if err != nil {
+		if response != nil {
+			t.Fatalf("dial websocket: %v (status %d)", err, response.StatusCode)
+		}
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer connection.Close()
+
+	select {
+	case <-handler.connected:
+	case <-time.After(time.Second):
+		t.Fatal("websocket handler did not receive OnConnect")
+	}
+	if err := connection.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
+		t.Fatalf("write websocket message: %v", err)
+	}
+	messageType, payload, err := connection.ReadMessage()
+	if err != nil {
+		t.Fatalf("read websocket response: %v", err)
+	}
+	if messageType != websocket.TextMessage || string(payload) != "echo:hello" {
+		t.Fatalf("websocket response = type %d payload %q", messageType, payload)
+	}
+	select {
+	case message := <-handler.messages:
+		if message != "hello" {
+			t.Fatalf("OnMessage payload = %q", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("websocket handler did not receive OnMessage")
+	}
+
+	if err := connection.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done")); err != nil {
+		t.Fatalf("close websocket: %v", err)
+	}
+	select {
+	case <-handler.closed:
+	case <-time.After(time.Second):
+		t.Fatal("websocket handler did not receive OnClose")
 	}
 }
 
