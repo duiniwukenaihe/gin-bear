@@ -1145,6 +1145,9 @@ func (b *Bear) buildController(group *gin.RouterGroup, groupName string, class I
 	var ownFairings []Fairing
 	if inter, ok := class.(IInterceptors); ok {
 		ownFairings = append([]Fairing(nil), inter.Interceptors()...)
+		for _, fairing := range ownFairings {
+			b.runtime.Container.Apply(fairing)
+		}
 		fairings = append(fairings, ownFairings...)
 	}
 	controller, _ := class.(IOpenAPI)

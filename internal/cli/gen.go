@@ -600,31 +600,29 @@ func (c *{{.Title}}Controller) Build(b *bear.Bear) {
 	b.Handle("DELETE", "/{{.RouteName}}/:id", c.Delete)
 }
 
-func (c *{{.Title}}Controller) List(ctx *gin.Context, query *{{.Title}}QueryDTO) (interface{}, error) {
+func (c *{{.Title}}Controller) List(ctx *gin.Context, query *{{.Title}}QueryDTO) (*{{.Title}}ListResponse, error) {
 	return c.Service.Query(ctx, query)
 }
 
-func (c *{{.Title}}Controller) Get(ctx *gin.Context) (interface{}, error) {
+func (c *{{.Title}}Controller) Get(ctx *gin.Context) (*{{.Title}}Response, error) {
 	id, err := parseID(ctx.Param("id"))
 	if err != nil { return nil, err }
 	return c.Service.GetByID(ctx, id)
 }
 
-func (c *{{.Title}}Controller) Create(ctx *gin.Context, request *{{.Title}}CreateDTO) (interface{}, error) {
+func (c *{{.Title}}Controller) Create(ctx *gin.Context, request *{{.Title}}CreateDTO) (*{{.Title}}Response, error) {
 	return c.Service.Create(ctx, request)
 }
 
-func (c *{{.Title}}Controller) Update(ctx *gin.Context) (interface{}, error) {
+func (c *{{.Title}}Controller) Update(ctx *gin.Context, request *{{.Title}}UpdateDTO) (bear.Response, error) {
 	id, err := parseID(ctx.Param("id"))
-	if err != nil { return nil, err }
-	request := &{{.Title}}UpdateDTO{}
-	if err := ctx.ShouldBindJSON(request); err != nil { return nil, bear.ErrInvalidParams.WithErr(err) }
+	if err != nil { return bear.Response{}, err }
 	return bear.Success(nil), c.Service.Update(ctx, id, request)
 }
 
-func (c *{{.Title}}Controller) Delete(ctx *gin.Context) (interface{}, error) {
+func (c *{{.Title}}Controller) Delete(ctx *gin.Context) (bear.Response, error) {
 	id, err := parseID(ctx.Param("id"))
-	if err != nil { return nil, err }
+	if err != nil { return bear.Response{}, err }
 	return bear.Success(nil), c.Service.Delete(ctx, id)
 }
 

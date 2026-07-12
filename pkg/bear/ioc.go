@@ -1,6 +1,7 @@
 package bear
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -119,14 +120,34 @@ func (f *BeanFactory) SetWithInterface(ifacePtr any, bean any) {
 
 // TrySetWithInterface registers a bean for an interface or reports rejection.
 func (f *BeanFactory) TrySetWithInterface(ifacePtr any, bean any) error {
-	t := reflect.TypeOf(ifacePtr).Elem()
-	if t.Kind() != reflect.Interface {
-		// 如果不是接口，尝试作为普通类型注册
-		return f.TrySet(bean)
+	if f == nil {
+		return fmt.Errorf("bean factory is nil")
+	}
+	ifaceType := reflect.TypeOf(ifacePtr)
+	if ifaceType == nil || ifaceType.Kind() != reflect.Ptr || ifaceType.Elem().Kind() != reflect.Interface {
+		return fmt.Errorf("ifacePtr must be a pointer to an interface")
+	}
+	beanType := reflect.TypeOf(bean)
+	if beanType == nil || isNilBean(bean) {
+		return fmt.Errorf("bean must not be nil")
+	}
+	interfaceType := ifaceType.Elem()
+	if !beanType.Implements(interfaceType) {
+		return fmt.Errorf("bean type %s does not implement interface %s", beanType, interfaceType)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.trySet(t, bean)
+	return f.trySet(interfaceType, bean)
+}
+
+func isNilBean(bean any) bool {
+	value := reflect.ValueOf(bean)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // Remove 移除一个 Bean

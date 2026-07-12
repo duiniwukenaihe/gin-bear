@@ -215,7 +215,7 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 				},
 			},
 		}
-		enrichOpenAPIOperation(op, route.HandlerType, schemaBuilder)
+		enrichOpenAPIOperation(op, method, route.HandlerType, schemaBuilder)
 		ensureOpenAPIPathParameters(op, path)
 		if publicRoute {
 			op["security"] = []map[string][]string{}
@@ -421,7 +421,7 @@ func toOpenAPIPath(path string) string {
 	return strings.Join(parts, "/")
 }
 
-func enrichOpenAPIOperation(op map[string]interface{}, handlerType reflect.Type, schemas *openAPISchemaBuilder) {
+func enrichOpenAPIOperation(op map[string]interface{}, method string, handlerType reflect.Type, schemas *openAPISchemaBuilder) {
 	if handlerType == nil || handlerType.Kind() != reflect.Func {
 		return
 	}
@@ -432,7 +432,11 @@ func enrichOpenAPIOperation(op map[string]interface{}, handlerType reflect.Type,
 			continue
 		}
 		parameters = append(parameters, openAPIParametersFromStruct(argType, schemas, make(map[reflect.Type]bool), 0)...)
-		if bodySchema := openAPIRequestBodySchema(argType, schemas, make(map[reflect.Type]bool), 0); bodySchema != nil {
+		if openAPIAllowsJSONRequestBody(method) {
+			bodySchema := openAPIRequestBodySchema(argType, schemas, make(map[reflect.Type]bool), 0)
+			if bodySchema == nil {
+				continue
+			}
 			op["requestBody"] = map[string]interface{}{
 				"required": true,
 				"content": map[string]interface{}{
@@ -457,6 +461,15 @@ func enrichOpenAPIOperation(op map[string]interface{}, handlerType reflect.Type,
 				},
 			},
 		}
+	}
+}
+
+func openAPIAllowsJSONRequestBody(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+		return true
+	default:
+		return false
 	}
 }
 

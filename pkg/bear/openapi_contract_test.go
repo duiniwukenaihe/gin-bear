@@ -192,6 +192,42 @@ func TestGenerateOpenAPIAddsPathParametersForOpaqueHandlers(t *testing.T) {
 	}
 }
 
+func TestGenerateOpenAPIDoesNotDeclareJSONBodyForGETQueryHandlers(t *testing.T) {
+	type queryRequest struct {
+		Page     int    `form:"page" json:"page"`
+		PageSize int    `form:"page_size" json:"page_size"`
+		Keyword  string `form:"keyword" json:"keyword"`
+	}
+	type queryResponse struct {
+		Total int `json:"total"`
+	}
+
+	app := Ignite(NewSysConfig())
+	app.routeRegistry = []RouteMetadata{{
+		Method:      http.MethodGet,
+		Path:        "/resources",
+		HandlerType: reflect.TypeOf(func(*queryRequest) (*queryResponse, error) { return nil, nil }),
+		HandlerName: "queryResources",
+	}}
+
+	doc, err := app.GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("generate openapi: %v", err)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v", err)
+	}
+	op := spec["paths"].(map[string]interface{})["/resources"].(map[string]interface{})["get"].(map[string]interface{})
+	if _, found := op["requestBody"]; found {
+		t.Fatalf("GET query handler declared request body: %#v", op["requestBody"])
+	}
+	parameters, ok := op["parameters"].([]interface{})
+	if !ok || !openAPIHasParameter(parameters, "page", "query", "integer") {
+		t.Fatalf("GET query handler parameters = %#v, want page query parameter", op["parameters"])
+	}
+}
+
 func TestGenerateOpenAPIRejectsInvalidGeneratedDocument(t *testing.T) {
 	type mismatchedPathRequest struct {
 		Other string `uri:"other" binding:"required"`

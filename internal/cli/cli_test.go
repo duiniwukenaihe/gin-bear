@@ -172,6 +172,39 @@ func TestGenerateDecimalResourcePreservesHigherDependencyVersion(t *testing.T) {
 	}
 }
 
+func TestGeneratedAPIControllerUsesTypedRequestAndResponseContracts(t *testing.T) {
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte("module example.com/invoice\n\ngo 1.25.12\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generateResource(context.Background(), resourceOptions{
+		Kind:      "api",
+		Name:      "invoice",
+		Directory: project,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	controller, err := os.ReadFile(filepath.Join(project, "internal", "invoice", "controller.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"func (c *InvoiceController) List(ctx *gin.Context, query *InvoiceQueryDTO) (*InvoiceListResponse, error)",
+		"func (c *InvoiceController) Get(ctx *gin.Context) (*InvoiceResponse, error)",
+		"func (c *InvoiceController) Create(ctx *gin.Context, request *InvoiceCreateDTO) (*InvoiceResponse, error)",
+		"func (c *InvoiceController) Update(ctx *gin.Context, request *InvoiceUpdateDTO) (bear.Response, error)",
+		"func (c *InvoiceController) Delete(ctx *gin.Context) (bear.Response, error)",
+	} {
+		if !strings.Contains(string(controller), want) {
+			t.Fatalf("generated controller missing typed contract %q:\n%s", want, controller)
+		}
+	}
+	if strings.Contains(string(controller), "ShouldBindJSON") {
+		t.Fatalf("generated controller bypasses framework request binding:\n%s", controller)
+	}
+}
+
 func TestGenerateResourceCoversKindsAndRejectsUnsafeInputs(t *testing.T) {
 	project := t.TempDir()
 	fields := strings.Join([]string{

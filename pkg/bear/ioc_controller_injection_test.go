@@ -1,0 +1,129 @@
+package bear
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+)
+
+type controllerInjectedAuthFairing struct {
+	BaseFairing
+	JWTUtil *JWTUtil `inject:"-"`
+}
+
+func (f *controllerInjectedAuthFairing) OnRequest(ctx *gin.Context) error {
+	if f.JWTUtil == nil {
+		return NewError(http.StatusUnauthorized, "jwt util was not injected")
+	}
+	_, err := f.JWTUtil.ParseToken(ctx.GetHeader("Authorization")[len("Bearer "):])
+	if err != nil {
+		return NewError(http.StatusUnauthorized, "invalid token")
+	}
+	return nil
+}
+
+type controllerWithInjectedInterceptor struct {
+	fairing Fairing
+}
+
+func (c *controllerWithInjectedInterceptor) Name() string { return "ControllerWithInjectedInterceptor" }
+
+func (c *controllerWithInjectedInterceptor) Build(app *Bear) {
+	app.Handle(http.MethodGet, "/private", func() string { return "ok" })
+}
+
+func (c *controllerWithInjectedInterceptor) Interceptors() []Fairing {
+	return []Fairing{c.fairing}
+}
+
+func TestControllerInterceptorReceivesRuntimeContainerInjection(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.DB.Enabled = false
+	config.Auth.JWTSecret = "controller-interceptor-injected-secret"
+	config.Auth.PublicPaths = nil
+	app := Ignite(config)
+	interceptor := &controllerInjectedAuthFairing{}
+	app.Mount("/api", &controllerWithInjectedInterceptor{fairing: interceptor})
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll() error = %v", err)
+	}
+
+	util := NewJWTUtil(config.Auth.JWTSecret, 1)
+	token, err := util.GenerateToken(1, "user@example.com")
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/private", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	app.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if interceptor.JWTUtil == nil {
+		t.Fatal("controller interceptor did not receive the runtime JWTUtil")
+	}
+}
+
+type iocControllerTestAlias interface {
+	iocControllerTestMethod()
+}
+
+type iocControllerTestBean struct{}
+
+func (*iocControllerTestBean) iocControllerTestMethod() {}
+
+type iocControllerTestOtherBean struct{}
+
+func TestTrySetWithInterfaceRejectsInvalidRegistrationWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name     string
+		ifacePtr any
+		bean     any
+	}{
+		{name: "nil interface pointer", ifacePtr: nil, bean: &iocControllerTestBean{}},
+		{name: "non-pointer", ifacePtr: "not an interface pointer", bean: &iocControllerTestBean{}},
+		{name: "pointer to concrete type", ifacePtr: (*iocControllerTestBean)(nil), bean: &iocControllerTestBean{}},
+		{name: "nil bean", ifacePtr: (*iocControllerTestAlias)(nil), bean: nil},
+		{name: "bean does not implement interface", ifacePtr: (*iocControllerTestAlias)(nil), bean: &iocControllerTestOtherBean{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			factory := NewBeanFactory()
+			if err := factory.TrySetWithInterface(tt.ifacePtr, tt.bean); err == nil {
+				t.Fatal("TrySetWithInterface() error = nil, want rejection")
+			}
+			if got := Resolve[iocControllerTestAlias](factory); got != nil {
+				t.Fatalf("invalid registration published bean %T", got)
+			}
+		})
+	}
+}
+
+func TestTrySetWithInterfaceRegistersCompatibleBeanAndLegacyAPIStaysSafe(t *testing.T) {
+	factory := NewBeanFactory()
+	bean := &iocControllerTestBean{}
+	if err := factory.TrySetWithInterface((*iocControllerTestAlias)(nil), bean); err != nil {
+		t.Fatalf("TrySetWithInterface() error = %v", err)
+	}
+	if got := Resolve[iocControllerTestAlias](factory); got != bean {
+		t.Fatalf("Resolve() = %T, want registered bean", got)
+	}
+
+	legacy := NewBeanFactory()
+	legacy.SetWithInterface(nil, bean)
+	if got := Resolve[iocControllerTestAlias](legacy); got != nil {
+		t.Fatalf("legacy invalid registration published bean %T", got)
+	}
+	legacy.SetWithInterface((*iocControllerTestAlias)(nil), bean)
+	if got := Resolve[iocControllerTestAlias](legacy); got != bean {
+		t.Fatalf("legacy valid registration = %T, want registered bean", got)
+	}
+}
