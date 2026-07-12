@@ -79,11 +79,11 @@ func (h *ContextHandler) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
-func (h *ContextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+func (h ContextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &ContextHandler{Handler: h.Handler.WithAttrs(sanitizeLogAttrs(attrs))}
 }
 
-func (h *ContextHandler) WithGroup(name string) slog.Handler {
+func (h ContextHandler) WithGroup(name string) slog.Handler {
 	return &ContextHandler{Handler: h.Handler.WithGroup(sanitizeLogKey(name))}
 }
 

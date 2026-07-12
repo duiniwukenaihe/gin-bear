@@ -31,6 +31,11 @@ import (
 	"gorm.io/gorm"
 )
 
+var _ interface {
+	WithAttrs([]slog.Attr) slog.Handler
+	WithGroup(string) slog.Handler
+} = ContextHandler{}
+
 func randomProductionJWTKey(t *testing.T) string {
 	t.Helper()
 	raw := make([]byte, 32)
