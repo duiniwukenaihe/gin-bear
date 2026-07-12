@@ -233,6 +233,21 @@ func TestVerifyRCRecordsOfflineDatabaseManifestIdentity(t *testing.T) {
 	}
 }
 
+func TestVerifyRCOnlineModeOmitsOfflineDatabaseEvidence(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	output, err := runFakeRC(repository, artifact, state, "RC_ALLOW_NETWORK=1")
+	if err != nil {
+		t.Fatalf("online verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	metadata := readTestFile(t, filepath.Join(artifact, "metadata.txt"))
+	if !strings.Contains(metadata, "network_mode=online-opt-in") {
+		t.Fatalf("online metadata missing network mode:\n%s", metadata)
+	}
+	if strings.Contains(metadata, "govulncheck_db_source=") {
+		t.Fatalf("online metadata declared offline database evidence:\n%s", metadata)
+	}
+}
+
 func TestOfflineDatabaseManifestMustCoverExactFileTree(t *testing.T) {
 	tests := []struct {
 		name      string

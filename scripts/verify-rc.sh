@@ -362,7 +362,9 @@ capture_version() {
 	printf 'govulncheck_source=%s\n' "${govulncheck_source}"
 	printf '%s\n' "${staticcheck_evidence[@]}"
 	printf '%s\n' "${govulncheck_evidence[@]}"
-	printf '%s\n' "${govulncheck_db_evidence[@]}"
+	if [[ "${network_flag}" == "0" ]]; then
+		printf '%s\n' "${govulncheck_db_evidence[@]}"
+	fi
 	printf 'artifact_dir=%s\n' "${artifact_dir}"
 	printf 'GOPROXY=%s\n' "${GOPROXY}"
 	printf 'GOSUMDB=%s\n' "${GOSUMDB}"
@@ -468,7 +470,11 @@ run_step shuffle20 go test ./... -shuffle="${shuffle_seed}" -count=20 -timeout=3
 run_step race3 go test -race ./... -count=3 || exit $?
 run_step vet go vet ./... || exit $?
 run_step staticcheck "${staticcheck_command[@]}" ./... || exit $?
-run_step govulncheck "${govulncheck_command[@]}" "${govulncheck_scan_args[@]}" ./... || exit $?
+if [[ "${network_flag}" == "0" ]]; then
+	run_step govulncheck "${govulncheck_command[@]}" "${govulncheck_scan_args[@]}" ./... || exit $?
+else
+	run_step govulncheck "${govulncheck_command[@]}" ./... || exit $?
+fi
 run_step release-check env COVERAGE_MINIMUM="${coverage_minimum}" CRITICAL_COVERAGE_MINIMUM="${critical_coverage_minimum}" API_COMPAT_METADATA="${metadata}" RELEASE_CHECK_METADATA="${metadata}" scripts/release-check.sh || exit $?
 run_step diff-check check_candidate_diff || exit $?
 run_step hygiene check_repository_hygiene || exit $?
