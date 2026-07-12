@@ -233,6 +233,75 @@ func TestVerifyRCRecordsOfflineDatabaseManifestIdentity(t *testing.T) {
 	}
 }
 
+func TestOfflineDatabaseManifestMustCoverExactFileTree(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*testing.T, string)
+		wantError string
+	}{
+		{
+			name: "unlisted file",
+			mutate: func(t *testing.T, database string) {
+				path := filepath.Join(database, "ID", "GO-UNLISTED.json")
+				if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{}\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "must cover exactly",
+		},
+		{
+			name: "nested symlink",
+			mutate: func(t *testing.T, database string) {
+				link := filepath.Join(database, "index", "alias.json")
+				if err := os.Symlink("db.json", link); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			},
+			wantError: "must not contain symbolic links",
+		},
+		{
+			name: "duplicate manifest path",
+			mutate: func(t *testing.T, _ string) {
+				manifest := os.Getenv("GOVULNCHECK_DB_MANIFEST")
+				contents, err := os.ReadFile(manifest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(manifest, append(contents, contents...), 0644); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256", fileSHA256(t, manifest))
+			},
+			wantError: "duplicate path",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repository, state := fakeReleaseRepository(t)
+			database := strings.TrimPrefix(os.Getenv("GOVULNCHECK_DB"), "file://")
+			tt.mutate(t, database)
+			command := exec.Command("./scripts/release-check.sh")
+			command.Dir = repository
+			command.Env = releaseTestEnvironment(
+				"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"RELEASE_TEST_STATE="+state,
+				"RC_ALLOW_NETWORK=0",
+			)
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("offline release check accepted invalid database tree:\n%s", output)
+			}
+			if !strings.Contains(string(output), tt.wantError) {
+				t.Fatalf("database tree failure missing %q:\n%s", tt.wantError, output)
+			}
+		})
+	}
+}
+
 func TestAllCICheckoutAndSetupGoActionsUseReleasePins(t *testing.T) {
 	ci := readTestFile(t, "../.github/workflows/ci.yml")
 	checkout := "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"

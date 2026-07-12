@@ -97,10 +97,11 @@ resolve_offline_govulncheck_db() {
 		return 1
 	fi
 
-	local checksum path extra entries=0
+	local checksum path extra entries=0 manifest_paths=""
 	while read -r checksum path extra; do
 		[[ -z "${checksum}" ]] && continue
 		path="${path#\*}"
+		path="${path#./}"
 		if [[ ! "${checksum}" =~ ^[[:xdigit:]]{64}$ || -z "${path}" || -n "${extra:-}" ]]; then
 			printf 'GOVULNCHECK_DB_MANIFEST contains an invalid entry\n' >&2
 			return 1
@@ -111,10 +112,30 @@ resolve_offline_govulncheck_db() {
 			return 1
 			;;
 		esac
+		manifest_paths+="${path}"$'\n'
 		entries=$((entries + 1))
 	done <"${manifest}"
 	if [[ "${entries}" -eq 0 ]]; then
 		printf 'GOVULNCHECK_DB_MANIFEST must contain at least one database file\n' >&2
+		return 1
+	fi
+	local duplicate_paths
+	duplicate_paths="$(printf '%s' "${manifest_paths}" | LC_ALL=C sort | uniq -d)"
+	if [[ -n "${duplicate_paths}" ]]; then
+		printf 'GOVULNCHECK_DB_MANIFEST contains a duplicate path: %s\n' "${duplicate_paths}" >&2
+		return 1
+	fi
+	local symbolic_links
+	symbolic_links="$(find "${database_path}" -type l -print)" || return $?
+	if [[ -n "${symbolic_links}" ]]; then
+		printf 'GOVULNCHECK_DB must not contain symbolic links: %s\n' "${symbolic_links}" >&2
+		return 1
+	fi
+	local manifest_file_set database_file_set
+	manifest_file_set="$(printf '%s' "${manifest_paths}" | LC_ALL=C sort)"
+	database_file_set="$(cd "${database_path}" && find . -type f -print | sed 's#^\./##' | LC_ALL=C sort)" || return $?
+	if [[ "${manifest_file_set}" != "${database_file_set}" ]]; then
+		printf 'GOVULNCHECK_DB_MANIFEST must cover exactly every regular file in GOVULNCHECK_DB\n' >&2
 		return 1
 	fi
 	if command -v sha256sum >/dev/null 2>&1; then
