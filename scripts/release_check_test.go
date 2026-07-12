@@ -195,6 +195,44 @@ func TestVerifyRCRejectsUnverifiedControlledGovulncheck(t *testing.T) {
 	}
 }
 
+func TestReleaseCheckRejectsRemoteDatabaseInOfflineMode(t *testing.T) {
+	repository, state := fakeReleaseRepository(t)
+	command := exec.Command("./scripts/release-check.sh")
+	command.Dir = repository
+	command.Env = releaseTestEnvironment(
+		"PATH="+filepath.Join(repository, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RELEASE_TEST_STATE="+state,
+		"RC_ALLOW_NETWORK=0",
+		"GOVULNCHECK_DB=https://vuln.go.dev",
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("offline release check accepted remote vulnerability database:\n%s", output)
+	}
+	if !strings.Contains(string(output), "local absolute path or file:// URI") {
+		t.Fatalf("remote database failure is not actionable:\n%s", output)
+	}
+}
+
+func TestVerifyRCRecordsOfflineDatabaseManifestIdentity(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	if output, err := runFakeRC(repository, artifact, state); err != nil {
+		t.Fatalf("offline verify-rc.sh fixture failed: %v\n%s", err, output)
+	}
+	metadata := readTestFile(t, filepath.Join(artifact, "metadata.txt"))
+	for _, want := range []string{
+		"govulncheck_db_source=local-snapshot",
+		"govulncheck_db_path=",
+		"govulncheck_db_manifest_path=",
+		"govulncheck_db_manifest_expected_sha256=",
+		"govulncheck_db_manifest_actual_sha256=",
+	} {
+		if !strings.Contains(metadata, want) {
+			t.Fatalf("offline database metadata missing %q:\n%s", want, metadata)
+		}
+	}
+}
+
 func TestAllCICheckoutAndSetupGoActionsUseReleasePins(t *testing.T) {
 	ci := readTestFile(t, "../.github/workflows/ci.yml")
 	checkout := "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"
@@ -1181,6 +1219,7 @@ func fakeReleaseRepository(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	t.Setenv("GOVULNCHECK_DB", "file://"+vulnDB)
+	configureFakeVulnerabilityDatabase(t, vulnDB, state)
 	for _, name := range []string{"release-check.sh", "check-coverage.sh", "critical-coverage-files.txt"} {
 		contents, err := os.ReadFile(name)
 		if err != nil {
@@ -1273,6 +1312,7 @@ func fakeRCRepository(t *testing.T) (string, string, string) {
 	if err := os.MkdirAll(filepath.Join(repository, "vulndb"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	configureFakeVulnerabilityDatabase(t, filepath.Join(repository, "vulndb"), state)
 	verifyScript, err := os.ReadFile("verify-rc.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -1433,6 +1473,25 @@ func fileSHA256(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(contents))
+}
+
+func configureFakeVulnerabilityDatabase(t *testing.T, database, state string) {
+	t.Helper()
+	index := filepath.Join(database, "index")
+	if err := os.MkdirAll(index, 0755); err != nil {
+		t.Fatal(err)
+	}
+	databaseIndex := filepath.Join(index, "db.json")
+	if err := os.WriteFile(databaseIndex, []byte(`{"modified":"fixture"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(state, "vulndb.manifest.sha256")
+	manifestContents := fileSHA256(t, databaseIndex) + "  index/db.json\n"
+	if err := os.WriteFile(manifest, []byte(manifestContents), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVULNCHECK_DB_MANIFEST", manifest)
+	t.Setenv("GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256", fileSHA256(t, manifest))
 }
 
 func systemTrue(t *testing.T) string {

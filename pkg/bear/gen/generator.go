@@ -17,10 +17,10 @@ import (
 func init() {
 	// 注册静态注入函数到框架
 	{{- range .Infos}}
-	bear.RegisterStaticInjector("{{.StructName}}", func(obj interface{}) {
-		target := obj.(*{{.StructName}})
-		{{- range .Fields}}
-		target.{{.FieldName}} = bear.GetByType[{{.TypeName}}]()
+		bear.RegisterRuntimeStaticInjector("{{.StructName}}", func(factory *bear.BeanFactory, obj interface{}) {
+			target := obj.(*{{.StructName}})
+			{{- range .Fields}}
+			target.{{.FieldName}} = bear.Resolve[{{.TypeName}}](factory)
 		{{- end}}
 	})
 	{{- end}}

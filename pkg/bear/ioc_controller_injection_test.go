@@ -81,6 +81,76 @@ func (*iocControllerTestBean) iocControllerTestMethod() {}
 
 type iocControllerTestOtherBean struct{}
 
+type runtimeScopedStaticTarget struct {
+	Config *SysConfig
+}
+
+type legacyRuntimeScopedTarget struct {
+	Config *SysConfig `inject:"-"`
+}
+
+func TestRuntimeStaticInjectorResolvesFromOwningContainer(t *testing.T) {
+	staticMu.Lock()
+	previous, hadPrevious := runtimeStaticInjectors["runtimeScopedStaticTarget"]
+	staticMu.Unlock()
+	t.Cleanup(func() {
+		staticMu.Lock()
+		if hadPrevious {
+			runtimeStaticInjectors["runtimeScopedStaticTarget"] = previous
+		} else {
+			delete(runtimeStaticInjectors, "runtimeScopedStaticTarget")
+		}
+		staticMu.Unlock()
+	})
+	RegisterRuntimeStaticInjector("runtimeScopedStaticTarget", func(factory *BeanFactory, obj interface{}) {
+		obj.(*runtimeScopedStaticTarget).Config = Resolve[*SysConfig](factory)
+	})
+
+	firstConfig := NewSysConfig()
+	firstConfig.Server.Name = "first-runtime"
+	first := Ignite(firstConfig)
+	secondConfig := NewSysConfig()
+	secondConfig.Server.Name = "second-runtime"
+	Ignite(secondConfig)
+
+	target := &runtimeScopedStaticTarget{}
+	first.runtime.Container.Apply(target)
+	if target.Config != firstConfig {
+		t.Fatalf("runtime static injection used config %p (%q), want first runtime config %p", target.Config, target.Config.Server.Name, firstConfig)
+	}
+}
+
+func TestLegacyStaticInjectorFallsBackToOwningContainer(t *testing.T) {
+	staticMu.Lock()
+	previous, hadPrevious := staticInjectors["legacyRuntimeScopedTarget"]
+	staticMu.Unlock()
+	t.Cleanup(func() {
+		staticMu.Lock()
+		if hadPrevious {
+			staticInjectors["legacyRuntimeScopedTarget"] = previous
+		} else {
+			delete(staticInjectors, "legacyRuntimeScopedTarget")
+		}
+		staticMu.Unlock()
+	})
+	RegisterStaticInjector("legacyRuntimeScopedTarget", func(obj interface{}) {
+		obj.(*legacyRuntimeScopedTarget).Config = GetByType[*SysConfig]()
+	})
+
+	firstConfig := NewSysConfig()
+	firstConfig.Server.Name = "legacy-first-runtime"
+	first := Ignite(firstConfig)
+	secondConfig := NewSysConfig()
+	secondConfig.Server.Name = "legacy-second-runtime"
+	Ignite(secondConfig)
+
+	target := &legacyRuntimeScopedTarget{}
+	first.runtime.Container.Apply(target)
+	if target.Config != firstConfig {
+		t.Fatalf("legacy static injection used config %p, want first runtime config %p", target.Config, firstConfig)
+	}
+}
+
 func TestTrySetWithInterfaceRejectsInvalidRegistrationWithoutMutation(t *testing.T) {
 	tests := []struct {
 		name     string

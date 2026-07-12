@@ -438,7 +438,7 @@ func enrichOpenAPIOperation(op map[string]interface{}, method string, handlerTyp
 				continue
 			}
 			op["requestBody"] = map[string]interface{}{
-				"required": true,
+				"required": openAPIRequestBodyRequired(bodySchema),
 				"content": map[string]interface{}{
 					"application/json": map[string]interface{}{
 						"schema": bodySchema,
@@ -462,6 +462,11 @@ func enrichOpenAPIOperation(op map[string]interface{}, method string, handlerTyp
 			},
 		}
 	}
+}
+
+func openAPIRequestBodyRequired(schema map[string]interface{}) bool {
+	required, ok := schema["required"].([]string)
+	return ok && len(required) > 0
 }
 
 func openAPIAllowsJSONRequestBody(method string) bool {

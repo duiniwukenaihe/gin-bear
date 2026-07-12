@@ -98,6 +98,78 @@ sha256_file() {
 	fi
 }
 
+resolve_offline_govulncheck_db() {
+	local configured="${GOVULNCHECK_DB:-}"
+	local database_path
+	case "${configured}" in
+	file:///*) database_path="${configured#file://}" ;;
+	/*) database_path="${configured}" ;;
+	*)
+		printf 'GOVULNCHECK_DB must be a local absolute path or file:// URI in offline mode\n' >&2
+		return 1
+		;;
+	esac
+	if [[ -L "${database_path}" || ! -d "${database_path}" ]]; then
+		printf 'GOVULNCHECK_DB must name a non-symlink local directory: %s\n' "${database_path}" >&2
+		return 1
+	fi
+	database_path="$(cd "${database_path}" && pwd -P)" || return $?
+
+	local manifest="${GOVULNCHECK_DB_MANIFEST:-}"
+	if [[ "${manifest}" != /* || -L "${manifest}" || ! -f "${manifest}" ]]; then
+		printf 'GOVULNCHECK_DB_MANIFEST must name an absolute, non-symlink regular file\n' >&2
+		return 1
+	fi
+	manifest="$(cd "$(dirname "${manifest}")" && pwd -P)/$(basename "${manifest}")"
+	local expected_manifest_digest="${GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256:-}"
+	if [[ ! "${expected_manifest_digest}" =~ ^[[:xdigit:]]{64}$ ]]; then
+		printf 'GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256 must be a 64-character SHA-256 digest\n' >&2
+		return 1
+	fi
+	expected_manifest_digest="$(printf '%s' "${expected_manifest_digest}" | tr '[:upper:]' '[:lower:]')"
+	local actual_manifest_digest
+	actual_manifest_digest="$(sha256_file "${manifest}")" || return $?
+	if [[ "${actual_manifest_digest}" != "${expected_manifest_digest}" ]]; then
+		printf 'GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256 mismatch: expected %s, got %s\n' "${expected_manifest_digest}" "${actual_manifest_digest}" >&2
+		return 1
+	fi
+
+	local checksum path extra entries=0
+	while read -r checksum path extra; do
+		[[ -z "${checksum}" ]] && continue
+		path="${path#\*}"
+		if [[ ! "${checksum}" =~ ^[[:xdigit:]]{64}$ || -z "${path}" || -n "${extra:-}" ]]; then
+			printf 'GOVULNCHECK_DB_MANIFEST contains an invalid entry\n' >&2
+			return 1
+		fi
+		case "${path}" in
+		/* | .. | ../* | */../*)
+			printf 'GOVULNCHECK_DB_MANIFEST entries must stay inside the database: %s\n' "${path}" >&2
+			return 1
+			;;
+		esac
+		entries=$((entries + 1))
+	done <"${manifest}"
+	if [[ "${entries}" -eq 0 ]]; then
+		printf 'GOVULNCHECK_DB_MANIFEST must contain at least one database file\n' >&2
+		return 1
+	fi
+	if command -v sha256sum >/dev/null 2>&1; then
+		(cd "${database_path}" && sha256sum -c "${manifest}" >/dev/null) || return $?
+	else
+		(cd "${database_path}" && shasum -a 256 -c "${manifest}" >/dev/null) || return $?
+	fi
+
+	govulncheck_scan_args=(-db "file://${database_path}")
+	govulncheck_db_evidence=(
+		"govulncheck_db_source=local-snapshot"
+		"govulncheck_db_path=${database_path}"
+		"govulncheck_db_manifest_path=${manifest}"
+		"govulncheck_db_manifest_expected_sha256=${expected_manifest_digest}"
+		"govulncheck_db_manifest_actual_sha256=${actual_manifest_digest}"
+	)
+}
+
 export RC_ALLOW_NETWORK="${network_flag}"
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -122,12 +194,9 @@ govulncheck_source="${resolved_source}"
 govulncheck_evidence=("${tool_evidence[@]}")
 
 govulncheck_scan_args=()
+govulncheck_db_evidence=()
 if [[ "${network_flag}" == "0" ]]; then
-	if [[ -z "${GOVULNCHECK_DB:-}" ]]; then
-		printf 'GOVULNCHECK_DB is required in offline mode and must point to a local vulnerability database\n' >&2
-		exit 1
-	fi
-	govulncheck_scan_args=(-db "${GOVULNCHECK_DB}")
+	resolve_offline_govulncheck_db || exit $?
 fi
 
 commit="$(git rev-parse HEAD)" || exit $?
@@ -272,6 +341,7 @@ capture_version() {
 	printf 'govulncheck_source=%s\n' "${govulncheck_source}"
 	printf '%s\n' "${staticcheck_evidence[@]}"
 	printf '%s\n' "${govulncheck_evidence[@]}"
+	printf '%s\n' "${govulncheck_db_evidence[@]}"
 	printf 'artifact_dir=%s\n' "${artifact_dir}"
 	printf 'GOPROXY=%s\n' "${GOPROXY}"
 	printf 'GOSUMDB=%s\n' "${GOSUMDB}"

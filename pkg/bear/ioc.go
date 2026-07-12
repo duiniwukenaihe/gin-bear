@@ -21,7 +21,12 @@ var bootstrapInjector = NewBeanFactory()
 // StaticInjector 静态注入函数定义
 type StaticInjector func(interface{})
 
+// RuntimeStaticInjector resolves dependencies from the BeanFactory that owns
+// the object being injected.
+type RuntimeStaticInjector func(*BeanFactory, interface{})
+
 var staticInjectors = make(map[string]StaticInjector)
+var runtimeStaticInjectors = make(map[string]RuntimeStaticInjector)
 var staticMu sync.RWMutex
 
 // RegisterStaticInjector 注册静态注入器
@@ -29,6 +34,13 @@ func RegisterStaticInjector(name string, injector StaticInjector) {
 	staticMu.Lock()
 	defer staticMu.Unlock()
 	staticInjectors[name] = injector
+}
+
+// RegisterRuntimeStaticInjector registers a container-scoped generated injector.
+func RegisterRuntimeStaticInjector(name string, injector RuntimeStaticInjector) {
+	staticMu.Lock()
+	defer staticMu.Unlock()
+	runtimeStaticInjectors[name] = injector
 }
 
 // GetInjector 获取单例注入器
@@ -212,9 +224,18 @@ func (f *BeanFactory) Apply(obj any) {
 	// 1. 尝试使用静态注入 (阶段 62)
 	structName := v.Type().Name()
 	staticMu.RLock()
-	staticInjector, ok := staticInjectors[structName]
+	runtimeInjector, runtimeOK := runtimeStaticInjectors[structName]
+	staticInjector, staticOK := staticInjectors[structName]
 	staticMu.RUnlock()
-	if ok {
+	if runtimeOK {
+		runtimeInjector(f, obj)
+		return
+	}
+	// Legacy generated injectors resolve through the process-wide facade. They
+	// are safe only when this factory is the facade's current owner; isolated
+	// runtimes fall back to reflection against their own container.
+	facade := loadDefaultFacade()
+	if staticOK && facade != nil && facade.injector == f {
 		staticInjector(obj)
 		return
 	}

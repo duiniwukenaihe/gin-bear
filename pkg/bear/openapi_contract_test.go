@@ -228,6 +228,33 @@ func TestGenerateOpenAPIDoesNotDeclareJSONBodyForGETQueryHandlers(t *testing.T) 
 	}
 }
 
+func TestGenerateOpenAPIMarksOptionalPUTBodyAsOptional(t *testing.T) {
+	type optionalUpdate struct {
+		Name *string `json:"name"`
+	}
+	app := Ignite(NewSysConfig())
+	app.routeRegistry = []RouteMetadata{{
+		Method:      http.MethodPut,
+		Path:        "/resources/:id",
+		HandlerType: reflect.TypeOf(func(*optionalUpdate) (Response, error) { return Response{}, nil }),
+		HandlerName: "updateResource",
+	}}
+
+	doc, err := app.GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("generate openapi: %v", err)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v", err)
+	}
+	op := spec["paths"].(map[string]interface{})["/resources/{id}"].(map[string]interface{})["put"].(map[string]interface{})
+	body := op["requestBody"].(map[string]interface{})
+	if required, ok := body["required"].(bool); !ok || required {
+		t.Fatalf("optional PUT requestBody.required = %#v, want false", body["required"])
+	}
+}
+
 func TestGenerateOpenAPIRejectsInvalidGeneratedDocument(t *testing.T) {
 	type mismatchedPathRequest struct {
 		Other string `uri:"other" binding:"required"`

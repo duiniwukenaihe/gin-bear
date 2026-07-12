@@ -3,6 +3,7 @@ package gen
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,5 +27,20 @@ func TestScannerPreservesBuildTaggedSourceFiles(t *testing.T) {
 	}
 	if len(infos[0].Fields) != 1 || infos[0].Fields[0].FieldName != "Dependency" {
 		t.Fatalf("Scan() fields = %#v", infos[0].Fields)
+	}
+}
+
+func TestGeneratorUsesRuntimeScopedStaticInjector(t *testing.T) {
+	text := iocTemplate
+	for _, want := range []string{
+		`bear.RegisterRuntimeStaticInjector("{{.StructName}}", func(factory *bear.BeanFactory, obj interface{})`,
+		`target.{{.FieldName}} = bear.Resolve[{{.TypeName}}](factory)`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("generated injector missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "bear.GetByType") {
+		t.Fatalf("generated injector depends on global facade:\n%s", text)
 	}
 }
