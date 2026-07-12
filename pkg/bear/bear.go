@@ -565,30 +565,6 @@ func validateProductionSecurity(config *SysConfig) error {
 	return nil
 }
 
-func isPlaceholderJWTSecret(secret string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(secret))
-	if normalized == "" {
-		return true
-	}
-	normalized = strings.NewReplacer("_", "-", " ", "-", ".", "-").Replace(normalized)
-	for _, marker := range []string{
-		"bear-secret",
-		"your-secret-key",
-		"set-with-jwt-secret-32-plus-random-chars",
-		"replace-with-at-least-",
-		"change-me",
-		"changeme",
-		"placeholder",
-		"example-secret",
-		"default-secret",
-	} {
-		if strings.Contains(normalized, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 func validateProductionTimeouts(config *SysConfig) error {
 	if config == nil {
 		return nil
