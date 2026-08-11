@@ -17,9 +17,9 @@ func NewAuthFairing() *AuthFairing {
 	return &AuthFairing{}
 }
 
-func (this *AuthFairing) OnRequest(ctx *gin.Context) error {
+func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 	path := ctx.Request.URL.Path
-	if isPublicAuthPath(path) {
+	if isPublicAuthPathForContext(ctx, path) {
 		return nil
 	}
 
@@ -39,10 +39,12 @@ func (this *AuthFairing) OnRequest(ctx *gin.Context) error {
 	var claims *CustomClaims
 	var err error
 
-	if this.TokenManager != nil {
-		claims, err = this.TokenManager.ParseToken(tokenStr)
+	if f.TokenManager != nil {
+		claims, err = f.TokenManager.ParseTokenContext(ctx.Request.Context(), tokenStr)
+	} else if f.JWTUtil != nil {
+		claims, err = f.JWTUtil.ParseToken(tokenStr)
 	} else {
-		claims, err = this.JWTUtil.ParseToken(tokenStr)
+		return NewError(401, "invalid or expired token")
 	}
 
 	if err != nil {
@@ -51,20 +53,36 @@ func (this *AuthFairing) OnRequest(ctx *gin.Context) error {
 
 	// 将用户信息存入上下文
 	ctx.Set("current_user_id", claims.UserID)
+	if userID, ok := normalizeUserID(claims.UserID); ok {
+		ctx.Request = ctx.Request.WithContext(WithUserID(ctx.Request.Context(), userID))
+	}
 	ctx.Set("current_token", tokenStr) // Save token for logout
 	return nil
 }
 
-func (this *AuthFairing) Name() string {
+func isPublicAuthPathForContext(ctx *gin.Context, path string) bool {
+	if runtimeValue, exists := ctx.Get(runtimeContextKey); exists {
+		if runtime, ok := runtimeValue.(*Runtime); ok && runtime != nil {
+			return isPublicAuthPathForConfig(path, runtime.Config)
+		}
+		return false
+	}
+	return isPublicAuthPath(path)
+}
+
+func (f *AuthFairing) Name() string {
 	return "AuthFairing"
 }
 
 func isPublicAuthPath(path string) bool {
-	config := GetByType[*SysConfig]()
+	return isPublicAuthPathForConfig(path, GetByType[*SysConfig]())
+}
+
+func isPublicAuthPathForConfig(path string, config *SysConfig) bool {
 	if config == nil || config.Auth == nil {
 		return false
 	}
-	for _, pattern := range config.Auth.PublicPaths {
+	for _, pattern := range config.Auth.GetPublicPaths() {
 		if publicPathMatch(path, pattern) {
 			return true
 		}

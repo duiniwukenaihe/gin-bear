@@ -1,22 +1,27 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 
+	"github.com/duiniwukenaihe/gin-bear/internal/cli"
 	"github.com/spf13/cobra"
 )
 
-var rootCmd = &cobra.Command{
-	Use:   "bear",
-	Short: "Bear CLI - A scaffolding tool for gin-bear",
-	Long: `Bear CLI is a productivity tool designed to help developers quickly build applications based on the gin-bear framework.
-It supports project initialization, code generation, and dev mode.`,
+var rootCmd = cli.NewRootCommand(os.Stdout, os.Stderr)
+
+// Execute runs the shared CLI with process arguments.
+// Deprecated: use cli.Execute for in-process execution.
+func Execute() {
+	if code := cli.Execute(os.Args[1:], os.Stdout, os.Stderr); code != 0 {
+		os.Exit(code)
+	}
 }
 
-func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+func legacyCommand(name string) *cobra.Command {
+	for _, command := range rootCmd.Commands() {
+		if command.Name() == name {
+			return command
+		}
 	}
+	panic("missing shared command: " + name)
 }

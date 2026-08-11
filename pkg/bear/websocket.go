@@ -1,9 +1,224 @@
 package bear
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
+
+const (
+	defaultWebSocketHandshakeTimeoutMilliseconds       = 10000
+	minWebSocketHandshakeTimeoutMilliseconds           = 100
+	maxWebSocketHandshakeTimeoutMilliseconds           = 30000
+	defaultWebSocketMaxMessageBytes              int64 = 1 << 20
+	minWebSocketMaxMessageBytes                        = 1
+	maxWebSocketMessageBytes                           = 16 << 20
+	defaultWebSocketReadTimeout                        = 60 * time.Second
+	minWebSocketReadTimeout                            = time.Second
+	maxWebSocketReadTimeout                            = 5 * time.Minute
+	defaultWebSocketWriteTimeout                       = 10 * time.Second
+	minWebSocketWriteTimeout                           = 100 * time.Millisecond
+	maxWebSocketWriteTimeout                           = time.Minute
+	defaultWebSocketPingInterval                       = 30 * time.Second
+	minWebSocketPingInterval                           = time.Second
+	maxWebSocketPingInterval                           = 5 * time.Minute
+	defaultWebSocketMaxConnections               int64 = 1024
+	maxWebSocketConnections                      int64 = 100000
+)
+
+type webSocketPolicy struct {
+	maxMessageBytes int64
+	readTimeout     time.Duration
+	writeTimeout    time.Duration
+	pingInterval    time.Duration
+	maxConnections  int64
+}
+
+func webSocketPolicyForConfig(config *SysConfig) webSocketPolicy {
+	policy := webSocketPolicy{
+		maxMessageBytes: defaultWebSocketMaxMessageBytes,
+		readTimeout:     defaultWebSocketReadTimeout,
+		writeTimeout:    defaultWebSocketWriteTimeout,
+		pingInterval:    defaultWebSocketPingInterval,
+	}
+	if config != nil && (config.FrameworkStrict() || isProductionMode(config)) {
+		policy.maxConnections = defaultWebSocketMaxConnections
+	}
+	if config == nil || config.Config == nil {
+		return policy
+	}
+	if value, ok := positiveInt64(config.Config["websocket.max_message_bytes"]); ok {
+		policy.maxMessageBytes = value
+	}
+	if value, ok := positiveDuration(config.Config["websocket.read_timeout"]); ok {
+		policy.readTimeout = value
+	}
+	if value, ok := positiveDuration(config.Config["websocket.write_timeout"]); ok {
+		policy.writeTimeout = value
+	}
+	if value, ok := positiveDuration(config.Config["websocket.ping_interval"]); ok {
+		policy.pingInterval = value
+	}
+	if value, ok := positiveInt64(config.Config["websocket.max_connections"]); ok {
+		policy.maxConnections = value
+	}
+	return policy
+}
+
+func validateProductionWebSocketPolicy(config *SysConfig) error {
+	if err := validateWebSocketConnectionLimit(config); err != nil {
+		return err
+	}
+	if config == nil {
+		return nil
+	}
+	if config.WS != nil {
+		if config.WS.HandshakeTimeout != 0 &&
+			(config.WS.HandshakeTimeout < minWebSocketHandshakeTimeoutMilliseconds ||
+				config.WS.HandshakeTimeout > maxWebSocketHandshakeTimeoutMilliseconds) {
+			return fmt.Errorf(
+				"websocket.handshake_timeout_ms must be between %d and %d",
+				minWebSocketHandshakeTimeoutMilliseconds,
+				maxWebSocketHandshakeTimeoutMilliseconds,
+			)
+		}
+		for _, origin := range config.WS.GetAllowedOrigins() {
+			if strings.TrimSpace(origin) == "*" {
+				return fmt.Errorf("websocket.allowed_origins must not contain * in production")
+			}
+		}
+	}
+	if config.Config == nil {
+		return nil
+	}
+	if raw, exists := config.Config["websocket.max_message_bytes"]; exists {
+		value, ok := positiveInt64(raw)
+		if !ok || value < minWebSocketMaxMessageBytes || value > maxWebSocketMessageBytes {
+			return fmt.Errorf(
+				"websocket.max_message_bytes must be an integer between %d and %d",
+				minWebSocketMaxMessageBytes,
+				maxWebSocketMessageBytes,
+			)
+		}
+	}
+	for _, setting := range []struct {
+		key string
+		min time.Duration
+		max time.Duration
+	}{
+		{key: "websocket.read_timeout", min: minWebSocketReadTimeout, max: maxWebSocketReadTimeout},
+		{key: "websocket.write_timeout", min: minWebSocketWriteTimeout, max: maxWebSocketWriteTimeout},
+		{key: "websocket.ping_interval", min: minWebSocketPingInterval, max: maxWebSocketPingInterval},
+	} {
+		raw, exists := config.Config[setting.key]
+		if !exists {
+			continue
+		}
+		value, ok := positiveDuration(raw)
+		if !ok || value < setting.min || value > setting.max {
+			return fmt.Errorf("%s must be a duration between %s and %s", setting.key, setting.min, setting.max)
+		}
+	}
+	policy := webSocketPolicyForConfig(config)
+	if policy.pingInterval >= policy.readTimeout {
+		return fmt.Errorf("websocket.ping_interval must be less than websocket.read_timeout")
+	}
+	return nil
+}
+
+func validateWebSocketConnectionLimit(config *SysConfig) error {
+	if config == nil || config.Config == nil {
+		return nil
+	}
+	raw, exists := config.Config["websocket.max_connections"]
+	if !exists {
+		return nil
+	}
+	value, ok := positiveInt64(raw)
+	if !ok || value > maxWebSocketConnections {
+		return fmt.Errorf("websocket.max_connections must be an integer between 1 and %d", maxWebSocketConnections)
+	}
+	return nil
+}
+
+func positiveInt64(value any) (int64, bool) {
+	var parsed int64
+	switch value := value.(type) {
+	case int:
+		parsed = int64(value)
+	case int32:
+		parsed = int64(value)
+	case int64:
+		parsed = value
+	case uint:
+		if uint64(value) > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		parsed = int64(value)
+	case uint64:
+		if value > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		parsed = int64(value)
+	case float64:
+		parsed = int64(value)
+		if float64(parsed) != value {
+			return 0, false
+		}
+	case string:
+		var err error
+		parsed, err = strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	return parsed, parsed > 0
+}
+
+func positiveDuration(value any) (time.Duration, bool) {
+	switch value := value.(type) {
+	case time.Duration:
+		return value, value > 0
+	case string:
+		parsed, err := time.ParseDuration(value)
+		return parsed, err == nil && parsed > 0
+	default:
+		return 0, false
+	}
+}
+
+func startWebSocketHeartbeat(connection *websocket.Conn, policy webSocketPolicy) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(policy.pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				deadline := time.Now().Add(policy.writeTimeout)
+				if err := connection.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() {
+		once.Do(func() { close(stop) })
+		<-done
+	}
+}
 
 // WebSocketHandler 规范化 WebSocket 事件处理接口
 type WebSocketHandler interface {
@@ -16,13 +231,14 @@ type WebSocketHandler interface {
 type BaseWebSocketHandler struct {
 }
 
-func (this *BaseWebSocketHandler) OnConnect(ctx *gin.Context, conn *websocket.Conn) error {
+func (h *BaseWebSocketHandler) OnConnect(ctx *gin.Context, conn *websocket.Conn) error {
 	return nil
 }
 
-func (this *BaseWebSocketHandler) OnMessage(ctx *gin.Context, conn *websocket.Conn, messageType int, p []byte) error {
+func (h *BaseWebSocketHandler) OnMessage(ctx *gin.Context, conn *websocket.Conn, messageType int, p []byte) error {
 	return nil
 }
 
-func (this *BaseWebSocketHandler) OnClose(ctx *gin.Context, conn *websocket.Conn) {
+func (h *BaseWebSocketHandler) OnClose(ctx *gin.Context, conn *websocket.Conn) {
+	_, _ = ctx, conn
 }

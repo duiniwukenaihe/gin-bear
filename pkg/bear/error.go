@@ -152,6 +152,12 @@ func NewError(code int, key string, args ...interface{}) *BearError {
 	return &BearError{Code: code, Key: key, Args: args}
 }
 
+// NewStatusError creates a business error with an explicit HTTP status and an
+// optional wrapped cause. WriteError logs cause and keeps it out of the body.
+func NewStatusError(status, code int, key string, cause error) *BearError {
+	return &BearError{Code: code, Status: status, Key: key, Err: cause}
+}
+
 // ToResponse 将业务错误转换为标准响应
 func (e *BearError) ToResponse() Response {
 	return Response{
@@ -160,20 +166,17 @@ func (e *BearError) ToResponse() Response {
 	}
 }
 
-// 初始化预定义错误
-func init() {
-	RegisterError(http.StatusNotFound, http.StatusNotFound, "error_not_found", "Resource not found")
-	RegisterError(http.StatusBadRequest, http.StatusBadRequest, "error_invalid_params", "Invalid parameters")
-	RegisterError(http.StatusUnauthorized, http.StatusUnauthorized, "error_unauthorized", "Unauthorized")
-	RegisterError(http.StatusInternalServerError, http.StatusInternalServerError, "error_internal", "Internal server error")
+func registerDefaultError(code, status int, key, message string) *BearError {
+	RegisterError(code, status, key, message)
+	return GetError(code)
 }
 
 // 预定义错误快捷方式 (向后兼容)
 var (
-	ErrNotFound       = GetError(http.StatusNotFound)
-	ErrInvalidParams  = GetError(http.StatusBadRequest)
+	ErrNotFound       = registerDefaultError(http.StatusNotFound, http.StatusNotFound, "error_not_found", "Resource not found")
+	ErrInvalidParams  = registerDefaultError(http.StatusBadRequest, http.StatusBadRequest, "error_invalid_params", "Invalid parameters")
 	ErrBadRequest     = GetError(http.StatusBadRequest)
-	ErrUnauthorized   = GetError(http.StatusUnauthorized)
-	ErrForbidden      = GetError(http.StatusForbidden)
-	ErrInternalServer = GetError(http.StatusInternalServerError)
+	ErrUnauthorized   = registerDefaultError(http.StatusUnauthorized, http.StatusUnauthorized, "error_unauthorized", "Unauthorized")
+	ErrForbidden      = registerDefaultError(http.StatusForbidden, http.StatusForbidden, "error_forbidden", "Forbidden")
+	ErrInternalServer = registerDefaultError(http.StatusInternalServerError, http.StatusInternalServerError, "error_internal", "Internal server error")
 )

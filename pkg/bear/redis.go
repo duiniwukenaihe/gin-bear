@@ -2,6 +2,8 @@ package bear
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -28,21 +30,72 @@ type RedisAdapter struct {
 	Client *redis.Client
 }
 
-func (this *RedisAdapter) Name() string {
+func (r *RedisAdapter) Name() string {
 	return "RedisAdapter"
 }
 
-func (this *RedisAdapter) Shutdown() error {
+func (r *RedisAdapter) Shutdown() error {
 	slog.Info("Closing Redis connection pool...")
-	return this.Client.Close()
+	return r.Client.Close()
 }
 
-func (this *RedisAdapter) CheckReady(ctx context.Context) error {
-	return this.Client.Ping(ctx).Err()
+func (r *RedisAdapter) CheckReady(ctx context.Context) error {
+	return r.Client.Ping(ctx).Err()
 }
 
-// NewRedisAdapter 创建 Redis 适配器
+// OpenRedisAdapter creates a Redis adapter and reports startup ping failures.
+func OpenRedisAdapter(cfg *RedisConfig) (*RedisAdapter, error) {
+	if cfg == nil {
+		return nil, errors.New("redis config is required")
+	}
+	client := redis.NewClient(redisOptions(cfg))
+	adapter := &RedisAdapter{Client: client}
+
+	// 链路追踪集成
+	config := GetByType[*SysConfig]()
+	if config != nil && config.Tracing != nil && config.Tracing.Enabled {
+		if err := redisotel.InstrumentTracing(client); err != nil {
+			slog.Error("Failed to instrument Redis with OTEL", "error", err)
+		}
+	}
+
+	// 测试连接
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("ping Redis at %s: %w", cfg.Addr, err)
+	}
+
+	slog.Info("Redis connected successfully", "addr", cfg.Addr)
+	return adapter, nil
+}
+
+// NewRedisAdapter creates a Redis adapter using the legacy panic/fail-open policy.
+// Deprecated: use OpenRedisAdapter to handle startup errors explicitly.
 func NewRedisAdapter(cfg *RedisConfig) *RedisAdapter {
+	adapter, err := OpenRedisAdapter(cfg)
+	if err == nil {
+		return adapter
+	}
+	addr := ""
+	required := false
+	if cfg != nil {
+		addr = cfg.Addr
+		required = cfg.Required
+	}
+	slog.Error("Failed to connect to Redis", "error", err, "addr", addr)
+	if required {
+		panic("required redis connection failed: " + err.Error())
+	}
+	if adapter == nil && cfg != nil {
+		adapter = &RedisAdapter{Client: redis.NewClient(redisOptions(cfg))}
+	}
+	return adapter
+}
+
+func redisOptions(cfg *RedisConfig) *redis.Options {
 	opts := &redis.Options{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
@@ -65,32 +118,7 @@ func NewRedisAdapter(cfg *RedisConfig) *RedisAdapter {
 	if cfg.WriteTimeout > 0 {
 		opts.WriteTimeout = time.Duration(cfg.WriteTimeout) * time.Second
 	}
-
-	client := redis.NewClient(opts)
-
-	// 链路追踪集成
-	config := GetByType[*SysConfig]()
-	if config != nil && config.Tracing != nil && config.Tracing.Enabled {
-		if err := redisotel.InstrumentTracing(client); err != nil {
-			slog.Error("Failed to instrument Redis with OTEL", "error", err)
-		}
-	}
-
-	// 测试连接
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := client.Ping(ctx).Err(); err != nil {
-		slog.Error("Failed to connect to Redis", "error", err, "addr", cfg.Addr)
-		if cfg.Required {
-			_ = client.Close()
-			panic("required redis connection failed: " + err.Error())
-		}
-		return &RedisAdapter{Client: client}
-	}
-
-	slog.Info("Redis connected successfully", "addr", cfg.Addr)
-	return &RedisAdapter{Client: client}
+	return opts
 }
 
 // CacheUtil 缓存操作工具类
@@ -98,22 +126,22 @@ type CacheUtil struct {
 	Adapter *RedisAdapter `inject:"-"`
 }
 
-func (this *CacheUtil) Name() string {
+func (r *CacheUtil) Name() string {
 	return "CacheUtil"
 }
 
 // Set 序列化并存储对象
-func (this *CacheUtil) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+func (r *CacheUtil) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
 	b, err := sonic.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return this.Adapter.Client.Set(ctx, key, b, expiration).Err()
+	return r.Adapter.Client.Set(ctx, key, b, expiration).Err()
 }
 
 // Get 获取并反序列化对象
-func (this *CacheUtil) Get(ctx context.Context, key string, dest interface{}) error {
-	val, err := this.Adapter.Client.Get(ctx, key).Result()
+func (r *CacheUtil) Get(ctx context.Context, key string, dest interface{}) error {
+	val, err := r.Adapter.Client.Get(ctx, key).Result()
 	if err != nil {
 		return err
 	}
@@ -121,6 +149,6 @@ func (this *CacheUtil) Get(ctx context.Context, key string, dest interface{}) er
 }
 
 // Del 删除键
-func (this *CacheUtil) Del(ctx context.Context, keys ...string) error {
-	return this.Adapter.Client.Del(ctx, keys...).Err()
+func (r *CacheUtil) Del(ctx context.Context, keys ...string) error {
+	return r.Adapter.Client.Del(ctx, keys...).Err()
 }

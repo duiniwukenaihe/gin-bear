@@ -2,23 +2,27 @@ package bear
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"reflect"
+	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -28,18 +32,35 @@ import (
 	"gorm.io/gorm"
 )
 
-func resetTestInjector() {
-	injector = &BeanFactory{
-		beans: make(map[reflect.Type]any),
+var _ interface {
+	WithAttrs([]slog.Attr) slog.Handler
+	WithGroup(string) slog.Handler
+} = ContextHandler{}
+
+func randomProductionJWTKey(t *testing.T) string {
+	t.Helper()
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatalf("generate production JWT test key: %v", err)
 	}
-	handlerCache = sync.Map{}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func resetTestInjector() {
+	setDefaultInjector(NewBeanFactory())
 }
 
 func resetGinModeForTest(t *testing.T) {
 	t.Helper()
+	ginRuntimeMu.Lock()
+	strictGinRuntimeMode = ""
 	gin.SetMode(gin.DebugMode)
+	ginRuntimeMu.Unlock()
 	t.Cleanup(func() {
+		ginRuntimeMu.Lock()
+		strictGinRuntimeMode = ""
 		gin.SetMode(gin.DebugMode)
+		ginRuntimeMu.Unlock()
 	})
 }
 
@@ -54,6 +75,20 @@ func TestIgniteAllowsDatabaseDisabledWithoutDSN(t *testing.T) {
 
 	if app == nil {
 		t.Fatal("expected Ignite to return an app")
+	}
+}
+
+func TestIgniteEReturnsValidationError(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	cfg := NewSysConfig()
+	cfg.Server.ReadTimeout = "not-a-duration"
+
+	app, err := IgniteE(cfg)
+	if err == nil || !strings.Contains(err.Error(), "server.read_timeout") {
+		t.Fatalf("IgniteE error = %v, want server.read_timeout validation error", err)
+	}
+	if app != nil {
+		t.Fatal("IgniteE returned an app with invalid configuration")
 	}
 }
 
@@ -160,13 +195,78 @@ func TestRuntimeTimeoutHelpersUseConfiguredValues(t *testing.T) {
 	}
 }
 
+type webSocketTerminalFairing struct{ BaseFairing }
+
+func (f *webSocketTerminalFairing) OnRequest(ctx *gin.Context) error {
+	ctx.String(http.StatusUnauthorized, "unauthorized")
+	return nil
+}
+
+type webSocketTerminalHandler struct {
+	BaseWebSocketHandler
+	connected bool
+}
+
+func (h *webSocketTerminalHandler) OnConnect(*gin.Context, *websocket.Conn) error {
+	h.connected = true
+	return nil
+}
+
+func TestWebSocketFairingTerminal(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		strict bool
+	}{
+		{name: "compatibility", strict: false},
+		{name: "strict", strict: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			config := NewSysConfig()
+			config.SetFrameworkStrict(tt.strict)
+			app := Ignite(config)
+			app.Attach(&webSocketTerminalFairing{})
+			handler := &webSocketTerminalHandler{}
+			app.HandleWS("/ws", handler)
+			server := httptest.NewServer(app)
+			defer server.Close()
+
+			connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws", nil)
+			if connection != nil {
+				connection.Close()
+				t.Fatal("WebSocket upgraded after Fairing wrote a response")
+			}
+			if err == nil {
+				t.Fatal("WebSocket dial succeeded after Fairing wrote a response")
+			}
+			if response == nil || response.StatusCode != http.StatusUnauthorized {
+				status := 0
+				if response != nil {
+					status = response.StatusCode
+				}
+				t.Fatalf("WebSocket response status = %d, want %d", status, http.StatusUnauthorized)
+			}
+			body, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read WebSocket rejection body: %v", readErr)
+			}
+			if string(body) != "unauthorized" {
+				t.Fatalf("WebSocket response body = %q, want unauthorized", body)
+			}
+			if handler.connected {
+				t.Fatal("WebSocket handler ran after Fairing wrote a response")
+			}
+		})
+	}
+}
+
 func TestSetDefaultLoggerUsesConfiguredLevel(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.Log.Level = "debug"
 
-	SetDefaultLogger(cfg)
+	setDefaultLoggerForConfig(cfg)
 	t.Cleanup(func() {
-		SetDefaultLogger(NewSysConfig())
+		setDefaultLoggerForConfig(NewSysConfig())
 	})
 
 	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
@@ -258,6 +358,682 @@ func TestHandleErrorHidesUnexpectedErrorDetails(t *testing.T) {
 	}
 }
 
+func TestParseConfigSupportsStructuredInputs(t *testing.T) {
+	type sampleConfig struct {
+		Name  string `json:"name" yaml:"name"`
+		Count int    `json:"count" yaml:"count"`
+	}
+
+	t.Run("yaml extension", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "application.yaml")
+		if err := os.WriteFile(path, []byte("name: yaml\ncount: 2\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var got sampleConfig
+		if err := ParseConfig(path, &got); err != nil {
+			t.Fatalf("ParseConfig yaml failed: %v", err)
+		}
+		if got.Name != "yaml" || got.Count != 2 {
+			t.Fatalf("unexpected yaml config: %#v", got)
+		}
+	})
+
+	t.Run("json without extension", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "application")
+		if err := os.WriteFile(path, []byte(`{"name":"json","count":3}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var got sampleConfig
+		if err := ParseConfig(path, &got); err != nil {
+			t.Fatalf("ParseConfig json detection failed: %v", err)
+		}
+		if got.Name != "json" || got.Count != 3 {
+			t.Fatalf("unexpected json config: %#v", got)
+		}
+	})
+
+	t.Run("yaml without extension", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "application")
+		if err := os.WriteFile(path, []byte("name: fallback\ncount: 7\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var got sampleConfig
+		if err := ParseConfig(path, &got); err != nil {
+			t.Fatalf("ParseConfig yaml detection failed: %v", err)
+		}
+		if got.Name != "fallback" || got.Count != 7 {
+			t.Fatalf("unexpected fallback config: %#v", got)
+		}
+	})
+}
+
+func TestParseConfigReturnsUsefulErrorsForMissingAndInvalidFiles(t *testing.T) {
+	t.Run("missing file", func(t *testing.T) {
+		err := ParseConfig(filepath.Join(t.TempDir(), "missing.yaml"), &map[string]interface{}{})
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("ParseConfig() error = %v, want not-exist error", err)
+		}
+	})
+
+	t.Run("invalid yaml", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "application.yaml")
+		if err := os.WriteFile(path, []byte("name: ["), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := ParseConfig(path, &map[string]interface{}{})
+		if err == nil || !strings.Contains(err.Error(), "failed to parse YAML config") {
+			t.Fatalf("ParseConfig() error = %v", err)
+		}
+	})
+
+	t.Run("invalid json", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "application.json")
+		if err := os.WriteFile(path, []byte(`{"name":`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := ParseConfig(path, &map[string]interface{}{})
+		if err == nil || !strings.Contains(err.Error(), "failed to parse JSON config") {
+			t.Fatalf("ParseConfig() error = %v", err)
+		}
+	})
+}
+
+func TestGetAbsPathAndJoinRootResolveExistingRelativePaths(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(target, []byte("name: test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, gotPath := range map[string]string{
+		"GetAbsPath": GetAbsPath("config.yaml"),
+		"JoinRoot":   JoinRoot(".", "config.yaml"),
+	} {
+		got, err := filepath.EvalSymlinks(gotPath)
+		if err != nil {
+			t.Fatalf("%s EvalSymlinks failed: %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("%s() = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestGetAbsPathHandlesAbsoluteAndMissingPaths(t *testing.T) {
+	absolute := filepath.Join(t.TempDir(), "existing.txt")
+	if err := os.WriteFile(absolute, []byte("ok"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := GetAbsPath(absolute); got != absolute {
+		t.Fatalf("GetAbsPath(absolute) = %q", got)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	want, err := filepath.Abs("missing.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := GetAbsPath("missing.txt"); got != want {
+		t.Fatalf("GetAbsPath(missing) = %q, want %q", got, want)
+	}
+}
+
+func TestWriteFileAtomicReplacesContentWithPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	if err := WriteFileAtomic(path, []byte("first"), 0600); err != nil {
+		t.Fatalf("initial WriteFileAtomic failed: %v", err)
+	}
+	if err := WriteFileAtomic(path, []byte("second"), 0640); err != nil {
+		t.Fatalf("replacement WriteFileAtomic failed: %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "second" {
+		t.Fatalf("file content = %q", string(content))
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0640 {
+		t.Fatalf("file mode = %o", info.Mode().Perm())
+	}
+}
+
+func TestWriteFileAtomicReturnsErrorWhenParentIsNotADirectory(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parent, []byte("file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := WriteFileAtomic(filepath.Join(parent, "config.yaml"), []byte("data"), 0644)
+	if err == nil || !strings.Contains(err.Error(), "failed to create temp file") {
+		t.Fatalf("WriteFileAtomic() error = %v", err)
+	}
+}
+
+func TestValueHelpersExposeConfiguredTypes(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     interface{}
+		wantStr   string
+		wantInt   int
+		wantInt64 int64
+		wantFloat float64
+		wantBool  bool
+	}{
+		{
+			name:      "int64 value",
+			value:     int64(42),
+			wantStr:   "42",
+			wantInt:   42,
+			wantInt64: 42,
+		},
+		{
+			name:      "int value",
+			value:     int(7),
+			wantStr:   "7",
+			wantInt:   7,
+			wantInt64: 7,
+		},
+		{
+			name:      "int32 value",
+			value:     int32(8),
+			wantStr:   "8",
+			wantInt:   8,
+			wantInt64: 8,
+		},
+		{
+			name:      "float value",
+			value:     9.5,
+			wantStr:   "9.5",
+			wantInt:   9,
+			wantInt64: 9,
+			wantFloat: 9.5,
+		},
+		{
+			name:     "bool value",
+			value:    true,
+			wantStr:  "true",
+			wantBool: true,
+		},
+		{
+			name:    "string value",
+			value:   "bear",
+			wantStr: "bear",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := NewValue("server", "port")
+			v.value = tt.value
+
+			if got := v.GetString(); got != tt.wantStr {
+				t.Fatalf("GetString() = %q, want %q", got, tt.wantStr)
+			}
+			if got := v.GetInt(); got != tt.wantInt {
+				t.Fatalf("GetInt() = %d, want %d", got, tt.wantInt)
+			}
+			if got := v.GetInt64(); got != tt.wantInt64 {
+				t.Fatalf("GetInt64() = %d, want %d", got, tt.wantInt64)
+			}
+			if got := v.GetFloat(); got != tt.wantFloat {
+				t.Fatalf("GetFloat() = %f, want %f", got, tt.wantFloat)
+			}
+			if got := v.GetBool(); got != tt.wantBool {
+				t.Fatalf("GetBool() = %t, want %t", got, tt.wantBool)
+			}
+			if got := v.String(); got != tt.wantStr {
+				t.Fatalf("String() = %q, want %q", got, tt.wantStr)
+			}
+		})
+	}
+}
+
+func TestValueHelpersReturnZeroValuesForNilAndUnsupportedValues(t *testing.T) {
+	var nilValue *Value
+	if nilValue.GetString() != "" || nilValue.GetInt() != 0 || nilValue.GetInt64() != 0 || nilValue.GetFloat() != 0 || nilValue.GetBool() {
+		t.Fatal("nil Value should return zero values")
+	}
+
+	v := NewValue("server", "port")
+	v.value = struct{}{}
+	if v.GetInt() != 0 || v.GetInt64() != 0 || v.GetFloat() != 0 || v.GetBool() {
+		t.Fatalf("unsupported value should return zero values: %#v", v.value)
+	}
+}
+
+func TestGetConfigValueReadsFlatKeysOnly(t *testing.T) {
+	cfg := NewSysConfig()
+	cfg.Config = map[string]interface{}{
+		"server.port": 8080,
+	}
+
+	if got := getConfigValue(cfg, "server.port"); got != 8080 {
+		t.Fatalf("getConfigValue(server.port) = %#v", got)
+	}
+	if got := getConfigValue(cfg, "server.name"); got != nil {
+		t.Fatalf("expected missing key to return nil, got %#v", got)
+	}
+}
+
+func TestRouteTreeMatchesStaticWildcardAndCatchAllRoutes(t *testing.T) {
+	rootFairing := &BaseFairing{}
+	staticFairing := &BaseFairing{}
+	paramFairing := &BaseFairing{}
+	catchAllFairing := &BaseFairing{}
+
+	tree := NewRouteTree()
+	tree.addRoute(http.MethodGet, "/", []Fairing{rootFairing})
+	tree.addRoute(http.MethodGet, "/users/list", []Fairing{staticFairing})
+	tree.addRoute(http.MethodGet, "/users/:id", []Fairing{paramFairing})
+	tree.addRoute(http.MethodGet, "/assets/*filepath", []Fairing{catchAllFairing})
+
+	if got := tree.getRoute(http.MethodGet, "/users/list"); len(got) != 1 || got[0] != staticFairing {
+		t.Fatalf("static route = %#v", got)
+	}
+	if got := tree.getRoute(http.MethodGet, "/users/42"); len(got) != 1 || got[0] != paramFairing {
+		t.Fatalf("param route = %#v", got)
+	}
+	if got := tree.getRoute(http.MethodGet, "/assets/css/app.css"); len(got) != 1 || got[0] != catchAllFairing {
+		t.Fatalf("catch-all route = %#v", got)
+	}
+	if got := tree.getRoute(http.MethodGet, "/"); len(got) != 1 || got[0] != rootFairing {
+		t.Fatalf("root route = %#v", got)
+	}
+	if got := tree.getRoute(http.MethodGet, "/missing"); got != nil {
+		t.Fatalf("expected unmatched route to return nil, got %#v", got)
+	}
+	if got := tree.getRoute(http.MethodPost, "/users/list"); got != nil {
+		t.Fatalf("expected method-specific tree miss, got %#v", got)
+	}
+}
+
+func TestPluginDispatcherOverridesAndRestoresRegisteredRoutes(t *testing.T) {
+	dispatcher := NewPluginDispatcher()
+	dispatcher.Register(http.MethodGet, "/plugins/:name", func(c *gin.Context) {
+		c.String(http.StatusOK, "plugin")
+	})
+
+	router := gin.New()
+	router.Use(dispatcher.Dispatch())
+	router.GET("/plugins/:name", func(c *gin.Context) {
+		c.String(http.StatusOK, "fallback")
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/plugins/bear", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "plugin" {
+		t.Fatalf("registered route response = %d %q", response.Code, response.Body.String())
+	}
+
+	dispatcher.Unregister(http.MethodGet, "/plugins/:name")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "fallback" {
+		t.Fatalf("unregistered route response = %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestResponseHelpersReturnStablePayloads(t *testing.T) {
+	result := Result(201, "created", map[string]string{"id": "1"})
+	if result.Code != 201 || result.Message != "created" {
+		t.Fatalf("Result() = %#v", result)
+	}
+
+	success := Success("ok")
+	if success.Code != 200 || success.Message != "success" || success.Data != "ok" {
+		t.Fatalf("Success() = %#v", success)
+	}
+
+	failure := Error(400, "bad request")
+	if failure.Code != 400 || failure.Message != "bad request" || failure.Data != nil {
+		t.Fatalf("Error() = %#v", failure)
+	}
+}
+
+func TestBearErrorHelpersPreserveBusinessMetadata(t *testing.T) {
+	cause := errors.New("disk full")
+	base := &BearError{Code: 409, Status: http.StatusConflict, Message: "conflict", Key: "error_conflict"}
+
+	withMsg := base.WithMsg("duplicate")
+	if withMsg.Message != "duplicate" || base.Message != "conflict" {
+		t.Fatalf("WithMsg() = %#v, base = %#v", withMsg, base)
+	}
+
+	withErr := base.WithErr(cause)
+	if !errors.Is(withErr, cause) {
+		t.Fatalf("WithErr should unwrap cause: %v", withErr)
+	}
+	if withErr.Unwrap() != cause {
+		t.Fatalf("Unwrap() = %v", withErr.Unwrap())
+	}
+	if !withErr.Is(&BearError{Code: 409}) {
+		t.Fatalf("Is() should match on error code")
+	}
+
+	withArgs := base.WithArgs("user", 7)
+	if len(withArgs.Args) != 2 {
+		t.Fatalf("WithArgs() = %#v", withArgs.Args)
+	}
+
+	response := withMsg.ToResponse()
+	if response.Code != 409 || response.Message != "duplicate" {
+		t.Fatalf("ToResponse() = %#v", response)
+	}
+
+	registry := &ErrorRegistry{errors: map[int]*BearError{}}
+	path := filepath.Join(t.TempDir(), "errors.yaml")
+	if err := os.WriteFile(path, []byte("- code: 499\n  status: 409\n  key: error_custom\n  message: custom message\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.LoadErrorsFromYAML(path); err != nil {
+		t.Fatalf("LoadErrorsFromYAML failed: %v", err)
+	}
+	if got := registry.errors[499]; got == nil || got.Message != "custom message" {
+		t.Fatalf("loaded registry entry = %#v", got)
+	}
+	if err := registry.LoadErrorsFromYAML(filepath.Join(t.TempDir(), "missing.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadErrorsFromYAML(missing) error = %v", err)
+	}
+	invalidPath := filepath.Join(t.TempDir(), "invalid.yaml")
+	if err := os.WriteFile(invalidPath, []byte("["), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.LoadErrorsFromYAML(invalidPath); err == nil {
+		t.Fatal("LoadErrorsFromYAML(invalid) returned nil error")
+	}
+
+	if got := GetDefaultRegistry(); got == nil {
+		t.Fatal("GetDefaultRegistry() returned nil")
+	}
+	if got := GetError(http.StatusNotFound, "resource"); got.Code != http.StatusNotFound || len(got.Args) != 1 {
+		t.Fatalf("GetError(known) = %#v", got)
+	}
+	if got := GetError(9999, "arg"); got.Code != 9999 || got.Status != http.StatusInternalServerError {
+		t.Fatalf("GetError(unknown) = %#v", got)
+	}
+	if got := NewError(418, "teapot", "x"); got.Code != 418 || got.Key != "teapot" {
+		t.Fatalf("NewError() = %#v", got)
+	}
+	if msg := (&BearError{Code: 400, Message: "bad"}).Error(); !strings.Contains(msg, "Error 400: bad") {
+		t.Fatalf("Error() = %q", msg)
+	}
+	if msg := (&BearError{Code: 401, Key: "unauthorized", Err: cause}).Error(); !strings.Contains(msg, "key: unauthorized") || !strings.Contains(msg, "disk full") {
+		t.Fatalf("Error with key = %q", msg)
+	}
+}
+
+func TestParseLogLevelAndWithContextHandleDefaults(t *testing.T) {
+	tests := map[string]slog.Level{
+		"debug":   slog.LevelDebug,
+		"warning": slog.LevelWarn,
+		"error":   slog.LevelError,
+		"other":   slog.LevelInfo,
+	}
+	for raw, want := range tests {
+		if got := parseLogLevel(raw); got != want {
+			t.Fatalf("parseLogLevel(%q) = %v, want %v", raw, got, want)
+		}
+	}
+
+	if got := WithContext(context.TODO()); got == nil {
+		t.Fatal("WithContext(context.TODO()) returned nil logger")
+	}
+
+	ctx := context.WithValue(context.Background(), RequestIDKey, "req-123")
+	logger := WithContext(ctx)
+	if logger == nil {
+		t.Fatal("WithContext(ctx) returned nil logger")
+	}
+}
+
+func TestContextHandlerAndLogWrappersDoNotPanic(t *testing.T) {
+	var sink bytes.Buffer
+	logger := slog.New(&ContextHandler{
+		Handler: slog.NewTextHandler(&sink, nil),
+	})
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0)
+
+	if err := logger.Handler().Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle(background) failed: %v", err)
+	}
+
+	ctx := context.WithValue(context.Background(), RequestIDKey, "req-ctx")
+	recordWithRID := slog.NewRecord(time.Now(), slog.LevelInfo, "world", 0)
+	if err := logger.Handler().Handle(ctx, recordWithRID); err != nil {
+		t.Fatalf("Handle(ctx) failed: %v", err)
+	}
+
+	setDefaultLoggerForConfig(NewSysConfig())
+	Info("info")
+	ErrorLog("error")
+	Warn("warn")
+	Debug("debug")
+	InfoContext(ctx, "info ctx")
+	ErrorContext(ctx, "error ctx")
+	WarnContext(ctx, "warn ctx")
+	DebugContext(ctx, "debug ctx")
+}
+
+func TestAuthTokenManagerNameAndBlacklistKeyAreStable(t *testing.T) {
+	manager := NewAuthTokenManager()
+	if manager.Name() != "AuthTokenManager" {
+		t.Fatalf("Name() = %q", manager.Name())
+	}
+
+	key1 := manager.blacklistKey("token")
+	key2 := manager.blacklistKey("token")
+	key3 := manager.blacklistKey("other")
+	if key1 != key2 {
+		t.Fatalf("blacklistKey should be deterministic: %q vs %q", key1, key2)
+	}
+	if key1 == key3 {
+		t.Fatalf("blacklistKey should vary with token")
+	}
+}
+
+func TestJWTUtilGeneratesAndParsesHS256Tokens(t *testing.T) {
+	util := NewJWTUtil("secret-1234567890", 1)
+	if util.Name() != "JWTUtil" {
+		t.Fatalf("Name() = %q", util.Name())
+	}
+
+	token, err := util.GenerateToken(7, "bear@example.com")
+	if err != nil {
+		t.Fatalf("GenerateToken failed: %v", err)
+	}
+
+	claims, err := util.ParseToken(token)
+	if err != nil {
+		t.Fatalf("ParseToken failed: %v", err)
+	}
+	if claims.UserID != 7 || claims.Email != "bear@example.com" {
+		t.Fatalf("unexpected claims: %#v", claims)
+	}
+}
+
+func TestJWTUtilRejectsUnexpectedSigningMethodWithGeneratedNoneToken(t *testing.T) {
+	util := NewJWTUtil("secret-1234567890", 1)
+	token := jwt.NewWithClaims(jwt.SigningMethodNone, &CustomClaims{UserID: 1})
+	tokenStr, err := token.SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatalf("SignedString failed: %v", err)
+	}
+
+	if _, err := util.ParseToken(tokenStr); err == nil || !strings.Contains(err.Error(), "unexpected signing method") {
+		t.Fatalf("ParseToken error = %v", err)
+	}
+}
+
+func TestMemoryRateLimiterHonorsLimitAndStop(t *testing.T) {
+	limiter := NewMemoryRateLimiter(2, time.Hour)
+	defer limiter.Stop()
+
+	if limiter.Name() != "MemoryRateLimiter" {
+		t.Fatalf("Name() = %q", limiter.Name())
+	}
+	if !limiter.Allow(context.Background(), "127.0.0.1") {
+		t.Fatal("first request should pass")
+	}
+	if !limiter.Allow(context.Background(), "127.0.0.1") {
+		t.Fatal("second request should pass")
+	}
+	if limiter.Allow(context.Background(), "127.0.0.1") {
+		t.Fatal("third request should be limited")
+	}
+	limiter.Stop()
+}
+
+func TestRedisRateLimiterFallbackAndName(t *testing.T) {
+	openLimiter := NewRedisRateLimiter(nil, 3, time.Second)
+	if openLimiter.Name() != "RedisRateLimiter" {
+		t.Fatalf("Name() = %q", openLimiter.Name())
+	}
+	if !openLimiter.Allow(context.Background(), "ip") {
+		t.Fatal("nil adapter should fail open by default")
+	}
+
+	closedLimiter := NewRedisRateLimiter(nil, 3, time.Second)
+	closedLimiter.FailClosed = true
+	if closedLimiter.Allow(context.Background(), "ip") {
+		t.Fatal("nil adapter should fail closed when configured")
+	}
+}
+
+func TestRateLimitMiddlewareReturns429WhenLimiterBlocks(t *testing.T) {
+	limiter := NewMemoryRateLimiter(0, time.Hour)
+	defer limiter.Stop()
+
+	router := gin.New()
+	router.Use(RateLimitMiddleware(limiter))
+	router.GET("/limited", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+
+	req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Too many requests") {
+		t.Fatalf("body = %s", w.Body.String())
+	}
+}
+
+func TestGzipMiddlewareCompressesSupportedResponses(t *testing.T) {
+	router := gin.New()
+	router.Use(GzipMiddleware(128))
+	router.GET("/data", func(c *gin.Context) {
+		c.String(http.StatusOK, strings.Repeat("a", 32))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/data", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q", got)
+	}
+	if got := w.Header().Get("Vary"); got != "Accept-Encoding" {
+		t.Fatalf("Vary = %q", got)
+	}
+}
+
+func TestGzipWriterWriteStringCompressesText(t *testing.T) {
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	writer := &gzipWriter{writer: zw}
+	if _, err := writer.WriteString("hello gzip"); err != nil {
+		t.Fatalf("WriteString failed: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	zr, err := gzip.NewReader(bytes.NewReader(compressed.Bytes()))
+	if err != nil {
+		t.Fatalf("NewReader failed: %v", err)
+	}
+	defer zr.Close()
+	data, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+	if string(data) != "hello gzip" {
+		t.Fatalf("decompressed = %q", string(data))
+	}
+}
+
+func TestMiddlewareHelpersCoverOriginChecksAndRequestIDs(t *testing.T) {
+	if !corsOriginAllowed("https://example.com", []string{"https://example.com"}, true) {
+		t.Fatal("exact origin should pass")
+	}
+	if corsOriginAllowed("https://example.com", []string{"*"}, true) {
+		t.Fatal("wildcard with credentials should not pass")
+	}
+	if !corsOriginAllowed("https://example.com", []string{"*"}, false) {
+		t.Fatal("wildcard without credentials should pass")
+	}
+
+	router := gin.New()
+	router.Use(RequestIDMiddleware())
+	router.GET("/id", func(c *gin.Context) {
+		c.String(http.StatusOK, c.GetString(string(RequestIDKey)))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/id", nil)
+	req.Header.Set("X-Request-ID", "req-1")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if got := w.Header().Get("X-Request-ID"); got != "req-1" {
+		t.Fatalf("header request id = %q", got)
+	}
+}
+
 func TestBindingErrorUsesStableClientMessage(t *testing.T) {
 	resetTestInjector()
 	cfg := NewSysConfig()
@@ -313,7 +1089,7 @@ func TestIgniteConfiguresGinReleaseMode(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	Ignite(cfg)
 
@@ -343,6 +1119,27 @@ func TestIgniteRejectsWeakJWTSecretInProduction(t *testing.T) {
 	Ignite(cfg)
 }
 
+func TestIgniteRejectsScaffoldJWTPlaceholderInRelease(t *testing.T) {
+	resetTestInjector()
+	resetGinModeForTest(t)
+	cfg := NewSysConfig()
+	cfg.DB.Enabled = false
+	cfg.Server.Mode = "release"
+	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected scaffold JWT placeholder panic")
+		}
+		if !strings.Contains(r.(string), "weak jwt secret") {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	Ignite(cfg)
+}
+
 func TestIgniteUsesBearEnvProductionMode(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)
@@ -350,7 +1147,7 @@ func TestIgniteUsesBearEnvProductionMode(t *testing.T) {
 	t.Setenv("GIN_MODE", "")
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	Ignite(cfg)
 
@@ -698,15 +1495,33 @@ func TestGenerateOpenAPIIncludesParametersRequestBodyAndResponseSchema(t *testin
 	}
 }
 
+func TestGenerateOpenAPIUsesDefaultTitleWithoutRegisteredConfig(t *testing.T) {
+	resetTestInjector()
+
+	doc, err := (&Bear{}).GenerateOpenAPI()
+	if err != nil {
+		t.Fatalf("generate openapi: %v", err)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(doc, &spec); err != nil {
+		t.Fatalf("decode openapi: %v\n%s", err, string(doc))
+	}
+	info := spec["info"].(map[string]interface{})
+	if info["title"] != "gin-bear" {
+		t.Fatalf("title = %q, want gin-bear", info["title"])
+	}
+}
+
 func TestGenerateOpenAPIIncludesJWTSecurityScheme(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Name = "secure-openapi-test"
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	app := Ignite(cfg)
+	app.Attach(NewAuthFairing())
 	app.Mount("/api", &openAPITestController{})
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("apply all: %v", err)
@@ -742,9 +1557,10 @@ func TestGenerateOpenAPIMarksPublicPathsWithoutSecurity(t *testing.T) {
 	resetGinModeForTest(t)
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.PublicPaths = []string{"/api/public/*"}
+	cfg.Auth.PublicPaths = stringSlicePointer("/api/public/*")
 
 	app := Ignite(cfg)
+	app.Attach(NewAuthFairing())
 	app.Mount("/api", &openAPIPublicTestController{})
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("apply all: %v", err)
@@ -779,9 +1595,10 @@ func TestGenerateOpenAPIIncludesStandardErrorResponses(t *testing.T) {
 	resetGinModeForTest(t)
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.PublicPaths = []string{"/api/public/*"}
+	cfg.Auth.PublicPaths = stringSlicePointer("/api/public/*")
 
 	app := Ignite(cfg)
+	app.Attach(NewAuthFairing())
 	app.Mount("/api", &openAPIPublicTestController{})
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("apply all: %v", err)
@@ -899,7 +1716,7 @@ func TestAuthFairingUsesConfiguredPublicPaths(t *testing.T) {
 	resetGinModeForTest(t)
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Auth.PublicPaths = []string{"/public/*"}
+	cfg.Auth.PublicPaths = stringSlicePointer("/public/*")
 
 	app := Ignite(cfg)
 	app.Attach(NewAuthFairing())
@@ -916,13 +1733,13 @@ func TestAuthFairingUsesConfiguredPublicPaths(t *testing.T) {
 	privateReq := httptest.NewRequest(http.MethodGet, "/private/ping", nil)
 	privateW := httptest.NewRecorder()
 	app.ServeHTTP(privateW, privateReq)
-	if privateW.Code != http.StatusBadRequest {
+	if privateW.Code != http.StatusUnauthorized {
 		t.Fatalf("private status = %d body = %s", privateW.Code, privateW.Body.String())
 	}
 }
 
 func TestJWTUtilRejectsUnexpectedSigningMethod(t *testing.T) {
-	util := NewJWTUtil("replace-with-at-least-32-random-characters", 24)
+	util := NewJWTUtil(randomProductionJWTKey(t), 24)
 	token := jwt.NewWithClaims(jwt.SigningMethodHS512, CustomClaims{
 		UserID: 1,
 		Email:  "a@example.com",
@@ -1061,7 +1878,7 @@ func TestNewRedisAdapterPanicsWhenRequiredRedisUnavailable(t *testing.T) {
 
 func TestWebSocketOriginPolicyUsesAllowlist(t *testing.T) {
 	cfg := NewSysConfig()
-	cfg.WS.AllowedOrigins = []string{"https://app.example.com"}
+	cfg.WS.AllowedOrigins = stringSlicePointer("https://app.example.com")
 
 	allowed := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	allowed.Header.Set("Origin", "https://app.example.com")
@@ -1082,7 +1899,7 @@ func TestIgniteRejectsDisabledWebSocketOriginCheckInProduction(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
-	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
+	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 	cfg.WS.CheckOrigin = false
 
 	defer func() {
@@ -1090,7 +1907,8 @@ func TestIgniteRejectsDisabledWebSocketOriginCheckInProduction(t *testing.T) {
 		if r == nil {
 			t.Fatal("expected unsafe websocket origin panic")
 		}
-		if !strings.Contains(r.(string), "websocket origin") {
+		message, ok := r.(string)
+		if !ok || !strings.Contains(message, "websocket origin") {
 			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()
@@ -1112,7 +1930,8 @@ func TestProductionValidationChecksWebSocketOriginWhenAuthConfigIsNil(t *testing
 		if r == nil {
 			t.Fatal("expected unsafe websocket origin panic")
 		}
-		if !strings.Contains(r.(string), "websocket origin") {
+		message, ok := r.(string)
+		if !ok || !strings.Contains(message, "websocket origin") {
 			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()
@@ -1274,10 +2093,10 @@ func TestMigrationRunnerRollsBackLatestMigrations(t *testing.T) {
 func TestMigrationRunnerUsesExecutionLock(t *testing.T) {
 	sqlDB := newMigrationTestDB(t)
 	runner := NewMigrationRunner(sqlDB)
-	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks"); err != nil {
+	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks", MigrationDialectSQLite); err != nil {
 		t.Fatalf("ensure lock table: %v", err)
 	}
-	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name) VALUES (?)", defaultMigrationLockName); err != nil {
+	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name, owner) VALUES (?, ?)", defaultMigrationLockName, "held-owner"); err != nil {
 		t.Fatalf("insert held lock: %v", err)
 	}
 
@@ -1295,10 +2114,10 @@ func TestMigrationRunnerUsesExecutionLock(t *testing.T) {
 func TestMigrationRunnerForceUnlockReleasesHeldLock(t *testing.T) {
 	sqlDB := newMigrationTestDB(t)
 	runner := NewMigrationRunner(sqlDB)
-	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks"); err != nil {
+	if err := runner.ensureLockTable(context.Background(), "schema_migration_locks", MigrationDialectSQLite); err != nil {
 		t.Fatalf("ensure lock table: %v", err)
 	}
-	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name) VALUES (?)", defaultMigrationLockName); err != nil {
+	if _, err := sqlDB.ExecContext(context.Background(), "INSERT INTO schema_migration_locks (name, owner) VALUES (?, ?)", defaultMigrationLockName, "held-owner"); err != nil {
 		t.Fatalf("insert held lock: %v", err)
 	}
 
@@ -1416,7 +2235,8 @@ func TestBuildGormConfigAppliesSlowQueryLogger(t *testing.T) {
 
 func TestApplyEnvOverridesProductionSecretsAndDependencies(t *testing.T) {
 	cfg := NewSysConfig()
-	t.Setenv("JWT_SECRET", "env-secret-with-at-least-32-characters")
+	jwtSecret := randomProductionJWTKey(t)
+	t.Setenv("JWT_SECRET", jwtSecret)
 	t.Setenv("REDIS_ADDR", "redis.example:6379")
 	t.Setenv("REDIS_REQUIRED", "true")
 	t.Setenv("POSTGRES_HOST", "db.example")
@@ -1432,7 +2252,7 @@ func TestApplyEnvOverridesProductionSecretsAndDependencies(t *testing.T) {
 
 	applyEnvOverrides(cfg)
 
-	if cfg.Auth.JWTSecret != "env-secret-with-at-least-32-characters" {
+	if cfg.Auth.JWTSecret != jwtSecret {
 		t.Fatalf("jwt secret = %q", cfg.Auth.JWTSecret)
 	}
 	if cfg.Redis.Addr != "redis.example:6379" {

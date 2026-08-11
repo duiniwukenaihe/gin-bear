@@ -8,11 +8,20 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-playground/validator/v10"
 	"gopkg.in/yaml.v2"
 )
 
-var validate = validator.New()
+func stringSlicePointer(values ...string) *[]string {
+	copyOfValues := cloneStringSlice(values)
+	return &copyOfValues
+}
+
+func cloneStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append(make([]string, 0, len(values)), values...)
+}
 
 // Validator 接口允许结构体执行自定义校验逻辑 (如跨字段校验)
 type Validator interface {

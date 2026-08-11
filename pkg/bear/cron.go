@@ -2,6 +2,8 @@ package bear
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -15,7 +17,7 @@ type CronManager struct {
 	logger    *slog.Logger
 }
 
-func (this *CronManager) Name() string {
+func (m *CronManager) Name() string {
 	return "CronManager"
 }
 
@@ -34,33 +36,46 @@ func NewCronManager(adapter *RedisAdapter) *CronManager {
 }
 
 // Init 实现 Initializer 接口，自动启动调度器
-func (this *CronManager) Init(ctx context.Context) error {
-	this.scheduler.Start()
-	this.logger.Info("Cron scheduler started")
+func (m *CronManager) Init(ctx context.Context) error {
+	m.scheduler.Start()
+	m.logger.Info("Cron scheduler started")
 	return nil
 }
 
 // Shutdown 实现 Shutdowner 接口，优雅停止
-func (this *CronManager) Shutdown() error {
-	this.logger.Info("Stopping cron scheduler...")
-	ctx := this.scheduler.Stop()
-	// 等待正在执行的任务完成
-	select {
-	case <-ctx.Done():
-		this.logger.Info("Cron scheduler stopped gracefully")
-	case <-time.After(5 * time.Second):
-		this.logger.Warn("Cron scheduler stop timeout")
+func (m *CronManager) Shutdown() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return m.ShutdownContext(ctx)
+}
+
+// ShutdownContext stops scheduling and waits for active jobs within ctx.
+func (m *CronManager) ShutdownContext(ctx context.Context) error {
+	if m == nil || m.scheduler == nil {
+		return nil
 	}
-	return nil
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.logger.Info("Stopping cron scheduler...")
+	stopped := m.scheduler.Stop()
+	select {
+	case <-stopped.Done():
+		m.logger.Info("Cron scheduler stopped gracefully")
+		return nil
+	case <-ctx.Done():
+		m.logger.Warn("Cron scheduler stop timeout")
+		return fmt.Errorf("cron scheduler shutdown: %w", ctx.Err())
+	}
 }
 
 // AddFunc 添加普通任务 (单机执行，所有节点都会跑)
-func (this *CronManager) AddFunc(spec string, cmd func()) (cron.EntryID, error) {
-	return this.scheduler.AddFunc(spec, func() {
+func (m *CronManager) AddFunc(spec string, cmd func()) (cron.EntryID, error) {
+	return m.scheduler.AddFunc(spec, func() {
 		// 简单的 panic 保护
 		defer func() {
 			if err := recover(); err != nil {
-				this.logger.Error("Cron job panic", "error", err)
+				m.logger.Error("Cron job panic", "error", err)
 			}
 		}()
 		cmd()
@@ -70,48 +85,54 @@ func (this *CronManager) AddFunc(spec string, cmd func()) (cron.EntryID, error) 
 // AddDistributedFunc 添加分布式任务 (集群互斥，同一时刻只有一个节点跑)
 // lockKey: 锁的唯一标识，通常是任务名
 // ttl: 锁的过期时间，防止死锁 (必须大于任务执行时间)
-func (this *CronManager) AddDistributedFunc(spec string, lockKey string, ttl time.Duration, cmd func()) (cron.EntryID, error) {
-	return this.scheduler.AddFunc(spec, func() {
+func (m *CronManager) AddDistributedFunc(spec string, lockKey string, ttl time.Duration, cmd func()) (cron.EntryID, error) {
+	if ttl <= 0 {
+		return 0, fmt.Errorf("distributed cron lock TTL must be positive: %s", ttl)
+	}
+	return m.scheduler.AddFunc(spec, func() {
 		ctx := context.Background()
 		fullKey := "bear:cron:lock:" + lockKey
 
-		// 1. 尝试获取锁 (SetNX)
-		if this.redis == nil {
-			this.logger.Error("Redis adapter not available for distributed job", "job", lockKey)
+		if m.redis == nil || m.redis.Client == nil {
+			m.logger.Error("Redis adapter not available for distributed job", "job", lockKey)
 			return
 		}
 
-		// 使用 SetNX 抢占锁
-		success, err := this.redis.Client.SetNX(ctx, fullKey, "locked", ttl).Result()
+		lock, err := newOwnedCronLock(m.redis.Client, fullKey, ttl)
 		if err != nil {
-			this.logger.Error("Failed to acquire distributed lock", "job", lockKey, "error", err)
+			m.logger.Error("Failed to generate distributed lock owner", "job", lockKey, "error", err)
+			return
+		}
+		if err := lock.Acquire(ctx); errors.Is(err, ErrCronLockHeld) {
+			m.logger.Debug("Distributed job skipped (lock held by another node)", "job", lockKey)
+			return
+		} else if err != nil {
+			m.logger.Error("Failed to acquire distributed lock", "job", lockKey, "error", err)
 			return
 		}
 
-		if !success {
-			// 没抢到锁，说明其他节点正在执行，跳过本次调度
-			this.logger.Debug("Distributed job skipped (lock held by another node)", "job", lockKey)
-			return
-		}
-
-		// 2. 抢到锁，执行任务
-		this.logger.Info("Distributed job started", "job", lockKey)
+		m.logger.Info("Distributed job started", "job", lockKey)
+		warningTimer := time.AfterFunc(cronLockWarningDelay(ttl), func() {
+			m.logger.Warn("Distributed job lock TTL nearing expiration",
+				"job", lockKey,
+				"ttl", ttl,
+			)
+		})
 		defer func() {
-			// 3. 任务完成后释放锁?
-			// 策略选择：
-			// A. 立即释放 (Del)：允许下一个周期立即抢占。但如果任务耗时极短，可能会在同一秒内被其他节点再次抢占？(cron 是整秒触发，基本安全)
-			// B. 等待 TTL 过期：更简单，但如果任务异常退出，需要等 TTL。
-			// 这里选择 A: 主动释放，但也依赖 TTL 防止死锁。
-
-			if err := recover(); err != nil {
-				this.logger.Error("Distributed job panic", "job", lockKey, "error", err)
+			warningTimer.Stop()
+			if recovered := recover(); recovered != nil {
+				m.logger.Error("Distributed job panic", "job", lockKey, "error", recovered)
 			}
-
-			// 只有当自己持有锁时才释放 (虽然 Redis Del 不检查谁持有，但在过期时间极短的情况下可能误删别人的锁? 不，我们用的是 SetNX)
-			this.redis.Client.Del(ctx, fullKey)
-			this.logger.Info("Distributed job finished", "job", lockKey)
+			if err := lock.Release(ctx); err != nil {
+				m.logger.Error("Failed to release distributed lock", "job", lockKey, "error", err)
+			}
+			m.logger.Info("Distributed job finished", "job", lockKey)
 		}()
 
 		cmd()
 	})
+}
+
+func cronLockWarningDelay(ttl time.Duration) time.Duration {
+	return ttl/5*4 + ttl%5*4/5
 }

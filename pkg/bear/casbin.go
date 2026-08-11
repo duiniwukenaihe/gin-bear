@@ -22,7 +22,7 @@ type CasbinEnforcer struct {
 	*casbin.CachedEnforcer
 }
 
-func (this *CasbinEnforcer) Name() string {
+func (c *CasbinEnforcer) Name() string {
 	return "CasbinEnforcer"
 }
 
@@ -63,9 +63,9 @@ m = g(r.sub, p.sub) && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == "*"
 	var e *casbin.CachedEnforcer
 	if adapter != nil {
 		// 使用 GORM 适配器实现持久化存储
-		a, err := gormadapter.NewAdapterByDB(adapter.DB)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create Casbin adapter: %w", err)
+		a, adapterErr := gormadapter.NewAdapterByDB(adapter.DB)
+		if adapterErr != nil {
+			return nil, fmt.Errorf("failed to create Casbin adapter: %w", adapterErr)
 		}
 		e, err = casbin.NewCachedEnforcer(m, a)
 	} else {
@@ -101,7 +101,7 @@ func NewCasbinFairing() *CasbinFairing {
 	return &CasbinFairing{}
 }
 
-func (this *CasbinFairing) OnRequest(ctx *gin.Context) error {
+func (c *CasbinFairing) OnRequest(ctx *gin.Context) error {
 	// 从上下文中获取用户身份 (由 AuthFairing 设置)
 	userID, exists := ctx.Get("current_user_id")
 	if !exists {
@@ -123,17 +123,23 @@ func (this *CasbinFairing) OnRequest(ctx *gin.Context) error {
 	act := ctx.Request.Method
 
 	// 执行权限检查
-	if this.Enforcer == nil {
-		// 尝试手动从容器获取
-		this.Enforcer = GetByType[*CasbinEnforcer]()
+	if c.Enforcer == nil {
+		slog.ErrorContext(ctx.Request.Context(), "Casbin enforcer is not injected",
+			"user", sub,
+			"path", obj,
+			"method", act,
+		)
+		return ErrInternalServer
 	}
-	if this.Enforcer == nil {
-		slog.Error("CasbinEnforcer is nil, please ensure it is injected")
-		return NewError(500, "internal server error: CasbinEnforcer not ready")
-	}
-	allowed, err := this.Enforcer.Enforce(sub, obj, act)
+	allowed, err := c.Enforcer.Enforce(sub, obj, act)
 	if err != nil {
-		return NewError(500, fmt.Sprintf("Casbin enforcement error: %v", err))
+		slog.ErrorContext(ctx.Request.Context(), "Casbin enforcement failed",
+			"error", err,
+			"user", sub,
+			"path", obj,
+			"method", act,
+		)
+		return ErrInternalServer
 	}
 
 	if !allowed {
@@ -144,6 +150,6 @@ func (this *CasbinFairing) OnRequest(ctx *gin.Context) error {
 	return nil
 }
 
-func (this *CasbinFairing) Name() string {
+func (c *CasbinFairing) Name() string {
 	return "CasbinFairing"
 }

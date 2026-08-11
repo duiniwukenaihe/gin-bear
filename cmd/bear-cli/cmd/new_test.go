@@ -1,39 +1,43 @@
 package cmd
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
-func TestRewriteGoModModuleLine(t *testing.T) {
-	input := "module github.com/duiniwukenaihe/gin-bear\n\ngo 1.25.0\n"
-
-	got := rewriteGoModModule(input, "my-app")
-
-	want := "module my-app\n\ngo 1.25.0\n"
-	if got != want {
-		t.Fatalf("go.mod rewrite = %q", got)
+func TestLegacyNewCommandIsThinSharedCLIDelegate(t *testing.T) {
+	contents, err := os.ReadFile("new.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(contents)
+	if !strings.Contains(text, `var newCmd = legacyCommand("new")`) {
+		t.Fatalf("legacy new command does not delegate to internal/cli:\n%s", text)
+	}
+	for _, forbidden := range []string{"func updateFile(", "func rewriteFile(", "func rewriteGoModModule(", "func rewriteGoImports("} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("legacy new command retains unreachable helper %q", forbidden)
+		}
 	}
 }
 
-func TestRewriteGoImports(t *testing.T) {
-	input := `package main
-
-import (
-	"bear/pkg/bear"
-	"github.com/duiniwukenaihe/gin-bear/pkg/bear/gen"
-)
-`
-
-	got := rewriteGoImports(input, "my-app")
-
-	if got == input {
-		t.Fatal("expected imports to change")
+func TestCommandArgumentValidationCoversCLIErrorPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{name: "new requires project name", cmd: newCmd},
+		{name: "gen requires type and name", cmd: genCmd, args: []string{"api"}},
 	}
-	if want := `"my-app/pkg/bear"`; !strings.Contains(got, want) {
-		t.Fatalf("missing %s in %s", want, got)
-	}
-	if want := `"my-app/pkg/bear/gen"`; !strings.Contains(got, want) {
-		t.Fatalf("missing %s in %s", want, got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.cmd.Args(tt.cmd, tt.args); err == nil {
+				t.Fatal("expected args validation error")
+			}
+		})
 	}
 }

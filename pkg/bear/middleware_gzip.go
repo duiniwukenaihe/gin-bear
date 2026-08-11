@@ -33,7 +33,7 @@ func (g *gzipWriter) WriteString(s string) (int, error) {
 	return g.writer.Write([]byte(s))
 }
 
-func (this *GzipFairing) OnRequest(ctx *gin.Context) error {
+func (f *GzipFairing) OnRequest(ctx *gin.Context) error {
 	// 检查客户端是否支持 gzip
 	if !strings.Contains(ctx.GetHeader("Accept-Encoding"), "gzip") {
 		return nil

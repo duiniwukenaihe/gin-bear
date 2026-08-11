@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"runtime/debug"
+	"net/http"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -23,11 +24,13 @@ type ContextKey string
 
 const RequestIDKey ContextKey = "request_id"
 
+var validRequestID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
 // RequestIDMiddleware 为请求注入唯一标识，并传播到 context
 func RequestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rid := c.GetHeader("X-Request-ID")
-		if rid == "" {
+		if !validRequestID.MatchString(rid) {
 			rid = uuid.New().String()
 		}
 		c.Set(RequestIDKey, rid)
@@ -44,7 +47,7 @@ func RequestIDMiddleware() gin.HandlerFunc {
 // CORSMiddleware 处理跨域请求
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cfg := GetByType[*SysConfig]()
+		cfg := corsConfigForRequest(c)
 		if cfg == nil || cfg.CORS == nil || !cfg.CORS.Enabled {
 			c.Next()
 			return
@@ -75,6 +78,18 @@ func CORSMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func corsConfigForRequest(c *gin.Context) *SysConfig {
+	if value, exists := c.Get(runtimeContextKey); exists {
+		runtime, _ := value.(*Runtime)
+		if runtime == nil {
+			return nil
+		}
+		return runtime.Config
+	}
+	// Compatibility for bare Gin engines that do not install Bear ownership.
+	return GetByType[*SysConfig]()
 }
 
 func corsOriginAllowed(origin string, allowedOrigins []string, allowCredentials bool) bool {
@@ -164,7 +179,7 @@ func PerformanceMiddleware() gin.HandlerFunc {
 			// 使用动态日志级别
 			slog.Log(c.Request.Context(), currentLevel, "Request handled",
 				"method", c.Request.Method,
-				"path", c.Request.URL.Path,
+				"route", metricRoute(c),
 				"status", status,
 				"latency", latency.String(),
 				"client_ip", c.ClientIP(),
@@ -179,17 +194,29 @@ func RecoveryMiddleware() gin.HandlerFunc {
 		defer func() {
 			if err := recover(); err != nil {
 				rid, _ := c.Get(RequestIDKey)
-				// 记录完整的堆栈信息，便于排查 Panic 根源
 				slog.ErrorContext(c.Request.Context(), "Panic recovered",
-					"error", err,
-					"stack_trace", string(debug.Stack()),
+					"error_code", "BEAR_RUNTIME_PANIC",
+					"category", runtimePanicCategory(err),
+					"route", metricRoute(c),
 				)
-				c.AbortWithStatusJSON(500, Response{
-					Code:    500,
-					Message: fmt.Sprintf("Internal Server Error (RID: %v)", rid),
-				})
+				abortRecoveredResponse(c, rid)
 			}
 		}()
 		c.Next()
 	}
+}
+
+func abortRecoveredResponse(ctx *gin.Context, rid any) {
+	ctx.Abort()
+	if ctx.Writer.Written() {
+		return
+	}
+	if ctx.Request != nil && ctx.Request.Method == http.MethodHead {
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	ctx.AbortWithStatusJSON(http.StatusInternalServerError, Response{
+		Code:    http.StatusInternalServerError,
+		Message: fmt.Sprintf("Internal Server Error (RID: %v)", rid),
+	})
 }

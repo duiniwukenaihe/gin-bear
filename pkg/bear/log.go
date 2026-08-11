@@ -7,7 +7,60 @@ import (
 	"strings"
 )
 
-var Log *slog.Logger
+var bootstrapLogger = newLogger(nil)
+
+// Log remains the process-wide compatibility logger while delegating each call
+// to the logger in the current atomic legacy facade.
+var Log = slog.New(legacyLogHandler{})
+
+func init() {
+	slog.SetDefault(Log)
+}
+
+type legacyLogHandler struct {
+	operations []legacyLogOperation
+}
+
+type legacyLogOperation struct {
+	attrs []slog.Attr
+	group string
+}
+
+func (h legacyLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.current().Enabled(ctx, level)
+}
+
+func (h legacyLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	return h.current().Handle(ctx, record)
+}
+
+func (h legacyLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	cloned := h.clone()
+	cloned.operations = append(cloned.operations, legacyLogOperation{attrs: sanitizeLogAttrs(attrs)})
+	return cloned
+}
+
+func (h legacyLogHandler) WithGroup(name string) slog.Handler {
+	cloned := h.clone()
+	cloned.operations = append(cloned.operations, legacyLogOperation{group: sanitizeLogKey(name)})
+	return cloned
+}
+
+func (h legacyLogHandler) clone() legacyLogHandler {
+	return legacyLogHandler{operations: append([]legacyLogOperation(nil), h.operations...)}
+}
+
+func (h legacyLogHandler) current() slog.Handler {
+	handler := legacyLoggerTarget().Handler()
+	for _, operation := range h.operations {
+		if operation.group != "" {
+			handler = handler.WithGroup(operation.group)
+		} else {
+			handler = handler.WithAttrs(operation.attrs)
+		}
+	}
+	return handler
+}
 
 // ContextHandler 自动从 context 中提取 request_id 并注入日志
 type ContextHandler struct {
@@ -16,20 +69,38 @@ type ContextHandler struct {
 
 // Handle 实现 slog.Handler 接口
 func (h *ContextHandler) Handle(ctx context.Context, r slog.Record) error {
+	r = sanitizeLogRecord(r)
 	if ctx == nil {
 		return h.Handler.Handle(ctx, r)
 	}
 	if rid, ok := ctx.Value(RequestIDKey).(string); ok {
-		r.AddAttrs(slog.String(string(RequestIDKey), rid))
+		r.AddAttrs(sanitizeLogAttr(slog.String(string(RequestIDKey), rid)))
 	}
 	return h.Handler.Handle(ctx, r)
 }
 
-// SetDefaultLogger 初始化全局上下文感知日志
-func SetDefaultLogger(config ...*SysConfig) {
+func (h ContextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &ContextHandler{Handler: h.Handler.WithAttrs(sanitizeLogAttrs(attrs))}
+}
+
+func (h ContextHandler) WithGroup(name string) slog.Handler {
+	return &ContextHandler{Handler: h.Handler.WithGroup(sanitizeLogKey(name))}
+}
+
+// SetDefaultLogger initializes the legacy global logger with default settings.
+func SetDefaultLogger() {
+	setDefaultLoggerForConfig(nil)
+}
+
+func setDefaultLoggerForConfig(config *SysConfig) {
+	logger := newLogger(config)
+	setDefaultLogger(logger)
+}
+
+func newLogger(config *SysConfig) *slog.Logger {
 	level := slog.LevelInfo
-	if len(config) > 0 && config[0] != nil && config[0].Log != nil {
-		level = parseLogLevel(config[0].Log.Level)
+	if config != nil && config.Log != nil {
+		level = parseLogLevel(config.Log.Level)
 	}
 	opts := &slog.HandlerOptions{
 		Level: level,
@@ -43,8 +114,29 @@ func SetDefaultLogger(config ...*SysConfig) {
 	handler := &ContextHandler{
 		Handler: slog.NewJSONHandler(os.Stdout, opts),
 	}
-	Log = slog.New(handler)
+	return slog.New(handler)
+}
+
+func setDefaultLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = bootstrapLogger
+	}
+	updateDefaultFacade(func(facade legacyFacade) legacyFacade {
+		facade.logger = logger
+		return facade
+	})
 	slog.SetDefault(Log)
+}
+
+func legacyLogger() *slog.Logger {
+	return Log
+}
+
+func legacyLoggerTarget() *slog.Logger {
+	if facade := loadDefaultFacade(); facade != nil && facade.logger != nil {
+		return facade.logger
+	}
+	return bootstrapLogger
 }
 
 func parseLogLevel(raw string) slog.Level {
@@ -61,43 +153,43 @@ func parseLogLevel(raw string) slog.Level {
 }
 
 func Info(msg string, args ...any) {
-	slog.Info(msg, args...)
+	legacyLogger().Info(msg, args...)
 }
 
 func ErrorLog(msg string, args ...any) {
-	slog.Error(msg, args...)
+	legacyLogger().Error(msg, args...)
 }
 
 func Warn(msg string, args ...any) {
-	slog.Warn(msg, args...)
+	legacyLogger().Warn(msg, args...)
 }
 
 func Debug(msg string, args ...any) {
-	slog.Debug(msg, args...)
+	legacyLogger().Debug(msg, args...)
 }
 
 func InfoContext(ctx context.Context, msg string, args ...any) {
-	slog.InfoContext(ctx, msg, args...)
+	legacyLogger().InfoContext(ctx, msg, args...)
 }
 
 func ErrorContext(ctx context.Context, msg string, args ...any) {
-	slog.ErrorContext(ctx, msg, args...)
+	legacyLogger().ErrorContext(ctx, msg, args...)
 }
 
 func WarnContext(ctx context.Context, msg string, args ...any) {
-	slog.WarnContext(ctx, msg, args...)
+	legacyLogger().WarnContext(ctx, msg, args...)
 }
 
 func DebugContext(ctx context.Context, msg string, args ...any) {
-	slog.DebugContext(ctx, msg, args...)
+	legacyLogger().DebugContext(ctx, msg, args...)
 }
 
 func WithContext(ctx context.Context) *slog.Logger {
 	if ctx == nil {
-		return slog.Default()
+		return legacyLogger()
 	}
 	if rid, ok := ctx.Value(RequestIDKey).(string); ok {
-		return slog.Default().With(string(RequestIDKey), rid)
+		return legacyLogger().With(string(RequestIDKey), rid)
 	}
-	return slog.Default()
+	return legacyLogger()
 }

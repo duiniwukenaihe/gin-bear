@@ -2,15 +2,24 @@ package bear
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// ErrInvalidTokenExpiration reports an invalid configured token lifetime.
+var ErrInvalidTokenExpiration = errors.New("token expiration hours must be positive")
+
+const maxJWTTokenBytes = 16 << 10
+
 // JWTConfig JWT 配置
 type JWTConfig struct {
-	Secret  string `yaml:"secret"`
-	Expires int    `yaml:"expires"` // 小时
+	Secret    string        `yaml:"secret" json:"secret"`
+	Expires   int           `yaml:"expires" json:"expires"` // 小时
+	Issuer    string        `yaml:"issuer" json:"issuer"`
+	Audience  string        `yaml:"audience" json:"audience"`
+	ClockSkew time.Duration `yaml:"clock_skew" json:"clock_skew"`
 }
 
 // CustomClaims 自定义载荷
@@ -29,31 +38,86 @@ func NewJWTUtil(secret string, expires int) *JWTUtil {
 	return &JWTUtil{Config: &JWTConfig{Secret: secret, Expires: expires}}
 }
 
+func newJWTUtilFromAuthConfig(config *AuthConfig) *JWTUtil {
+	if config == nil {
+		return NewJWTUtil("", 0)
+	}
+
+	clockSkew := time.Duration(0)
+	if config.JWTClockSkew != "" {
+		clockSkew, _ = time.ParseDuration(config.JWTClockSkew)
+	}
+	return &JWTUtil{Config: &JWTConfig{
+		Secret:    config.JWTSecret,
+		Expires:   config.TokenExpireHours,
+		Issuer:    config.JWTIssuer,
+		Audience:  config.JWTAudience,
+		ClockSkew: clockSkew,
+	}}
+}
+
 // GenerateToken 生成 Token
-func (this *JWTUtil) GenerateToken(userID uint, email string) (string, error) {
+func (j *JWTUtil) GenerateToken(userID uint, email string) (string, error) {
+	if j == nil || j.Config == nil {
+		return "", errors.New("jwt configuration is unavailable")
+	}
+	if err := validateJWTExpiration(j.Config); err != nil {
+		return "", err
+	}
+	now := time.Now()
 	claims := CustomClaims{
 		UserID: userID,
 		Email:  email,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Duration(this.Config.Expires) * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			NotBefore: jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(now.Add(time.Duration(j.Config.Expires) * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			Issuer:    j.Config.Issuer,
 		},
 	}
+	if j.Config.Audience != "" {
+		claims.Audience = jwt.ClaimStrings{j.Config.Audience}
+	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(this.Config.Secret))
+	return token.SignedString([]byte(j.Config.Secret))
 }
 
 // ParseToken 解析 Token
-func (this *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
+func (j *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
+	if j == nil || j.Config == nil {
+		return nil, errors.New("jwt configuration is unavailable")
+	}
+	if len(tokenStr) > maxJWTTokenBytes {
+		return nil, fmt.Errorf("jwt token exceeds maximum size of %d bytes", maxJWTTokenBytes)
+	}
+	if err := validateJWTExpiration(j.Config); err != nil {
+		return nil, err
+	}
+	if j.Config.ClockSkew < 0 || j.Config.ClockSkew > 5*time.Minute {
+		return nil, errors.New("jwt clock skew must be between 0 and 5m")
+	}
+	options := []jwt.ParserOption{
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithLeeway(j.Config.ClockSkew),
+		jwt.WithExpirationRequired(),
+	}
+	if j.Config.Issuer != "" {
+		options = append(options, jwt.WithIssuer(j.Config.Issuer))
+	}
+	if j.Config.Audience != "" {
+		options = append(options, jwt.WithAudience(j.Config.Audience))
+	}
 	token, err := jwt.ParseWithClaims(tokenStr, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if token.Method != jwt.SigningMethodHS256 {
 			return nil, errors.New("unexpected signing method")
 		}
-		return []byte(this.Config.Secret), nil
-	})
+		return []byte(j.Config.Secret), nil
+	}, options...)
 
 	if err != nil {
+		if token != nil && token.Method != nil && token.Method != jwt.SigningMethodHS256 {
+			return nil, errors.New("unexpected signing method")
+		}
 		return nil, err
 	}
 
@@ -64,6 +128,20 @@ func (this *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
 	return nil, errors.New("invalid token")
 }
 
-func (this *JWTUtil) Name() string {
+func validateJWTExpiration(config *JWTConfig) error {
+	if config == nil {
+		return errors.New("jwt configuration is unavailable")
+	}
+	return validateTokenExpirationHours(config.Expires)
+}
+
+func validateTokenExpirationHours(expires int) error {
+	if expires > 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: got %d", ErrInvalidTokenExpiration, expires)
+}
+
+func (j *JWTUtil) Name() string {
 	return "JWTUtil"
 }

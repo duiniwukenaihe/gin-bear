@@ -1,9 +1,15 @@
-.PHONY: all test run swagger
+.PHONY: all test run swagger verify verify-rc
 
 all: test run
 
 test:
 	go test ./...
+
+verify:
+	scripts/release-check.sh
+
+verify-rc:
+	scripts/verify-rc.sh
 
 run:
 	go run cmd/main.go

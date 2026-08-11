@@ -3,7 +3,10 @@ package bear
 import (
 	"fmt"
 	"log/slog"
+	"net/netip"
+	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,19 +16,25 @@ import (
 
 type UserConfig map[string]interface{}
 
+const (
+	frameworkStrictConfigKey = "framework.strict"
+	responseModeConfigKey    = "framework.response_mode"
+)
+
 type ServerConfig struct {
-	Port              int32    `yaml:"port" json:"port" validate:"required,gt=0"`
-	Name              string   `yaml:"name" json:"name" validate:"required"`
-	Mode              string   `yaml:"mode" json:"mode"`
-	TrustedProxies    []string `yaml:"trusted_proxies" json:"trusted_proxies"`
-	HotReload         bool     `yaml:"hot_reload" json:"hot_reload"` // 是否开启热更新监听
-	MachineID         int64    `yaml:"machine_id" json:"machine_id"` // 分布式 ID 机器码 (-1 为自动)
-	ReadHeaderTimeout string   `yaml:"read_header_timeout" json:"read_header_timeout"`
-	ReadTimeout       string   `yaml:"read_timeout" json:"read_timeout"`
-	WriteTimeout      string   `yaml:"write_timeout" json:"write_timeout"`
-	IdleTimeout       string   `yaml:"idle_timeout" json:"idle_timeout"`
-	ShutdownTimeout   string   `yaml:"shutdown_timeout" json:"shutdown_timeout"`
-	MaxHeaderBytes    int      `yaml:"max_header_bytes" json:"max_header_bytes"`
+	Port                int32    `yaml:"port" json:"port"`
+	Name                string   `yaml:"name" json:"name" validate:"required"`
+	Mode                string   `yaml:"mode" json:"mode"`
+	TrustedProxies      []string `yaml:"trusted_proxies" json:"trusted_proxies"`
+	HotReload           bool     `yaml:"hot_reload" json:"hot_reload"` // 是否开启热更新监听
+	MachineID           int64    `yaml:"machine_id" json:"machine_id"` // 分布式 ID 机器码 (-1 为自动)
+	ReadHeaderTimeout   string   `yaml:"read_header_timeout" json:"read_header_timeout"`
+	ReadTimeout         string   `yaml:"read_timeout" json:"read_timeout"`
+	WriteTimeout        string   `yaml:"write_timeout" json:"write_timeout"`
+	IdleTimeout         string   `yaml:"idle_timeout" json:"idle_timeout"`
+	ShutdownTimeout     string   `yaml:"shutdown_timeout" json:"shutdown_timeout"`
+	MaxHeaderBytes      int      `yaml:"max_header_bytes" json:"max_header_bytes"`
+	MaxRequestBodyBytes int64    `yaml:"max_request_body_bytes" json:"max_request_body_bytes"`
 }
 
 type HealthConfig struct {
@@ -36,6 +45,7 @@ type LogConfig struct {
 	Level string `yaml:"level" json:"level"`
 }
 
+// Deprecated: WafConfig is compatibility-only and is not started.
 type WafConfig struct {
 	Enabled     bool   `yaml:"enabled" json:"enabled"`
 	StorageType string `yaml:"storage_type" json:"storage_type"`
@@ -60,6 +70,7 @@ type CORSConfig struct {
 	MaxAge           string   `yaml:"max_age" json:"max_age"`
 }
 
+// Deprecated: GeoIPConfig is compatibility-only and is not loaded.
 type GeoIPConfig struct {
 	Enabled  bool   `yaml:"enabled" json:"enabled"`
 	CityMMDB string `yaml:"city_mmdb" json:"city_mmdb"`
@@ -88,6 +99,7 @@ type OpenAPIApp struct {
 	AppSecret string `yaml:"app_secret" json:"app_secret"`
 }
 
+// Deprecated: BigQueryConfig is compatibility-only and is not started.
 type BigQueryConfig struct {
 	Enabled            bool   `yaml:"enabled" json:"enabled"`
 	ProjectID          string `yaml:"project_id" json:"project_id"`
@@ -102,6 +114,7 @@ type BigQueryConfig struct {
 	Async              bool   `yaml:"async" json:"async"`
 }
 
+// Deprecated: SchemaConfig is compatibility-only and is not loaded.
 type SchemaConfig struct {
 	Enabled     bool   `yaml:"enabled" json:"enabled"`
 	SchemaPath  string `yaml:"schema_path" json:"schema_path"` // directory containing json schemas
@@ -110,6 +123,7 @@ type SchemaConfig struct {
 	FilePath    string `yaml:"file_path" json:"file_path"`
 }
 
+// Deprecated: KafkaConfig is compatibility-only and is not started.
 type KafkaConfig struct {
 	Enabled      bool     `yaml:"enabled" json:"enabled"`
 	Brokers      []string `yaml:"brokers" json:"brokers"`
@@ -152,22 +166,46 @@ type I18nConfig struct {
 }
 
 type AuthConfig struct {
-	StorageType      string   `yaml:"storage_type" json:"storage_type"`
-	JWTSecret        string   `yaml:"jwt_secret" json:"jwt_secret" validate:"required_with=JWT"`
-	TokenExpireHours int      `yaml:"token_expire_hours" json:"token_expire_hours"`
-	PublicPaths      []string `yaml:"public_paths" json:"public_paths"`
+	StorageType      string    `yaml:"storage_type" json:"storage_type"`
+	JWTSecret        string    `yaml:"jwt_secret" json:"jwt_secret" validate:"required_with=JWT"`
+	JWTIssuer        string    `yaml:"jwt_issuer" json:"jwt_issuer"`
+	JWTAudience      string    `yaml:"jwt_audience" json:"jwt_audience"`
+	JWTClockSkew     string    `yaml:"jwt_clock_skew" json:"jwt_clock_skew"`
+	TokenExpireHours int       `yaml:"token_expire_hours" json:"token_expire_hours"`
+	PublicPaths      *[]string `yaml:"public_paths" json:"public_paths"`
+}
+
+// SetPublicPaths replaces public paths without retaining the caller's slice.
+func (c *AuthConfig) SetPublicPaths(paths []string) {
+	if paths == nil {
+		c.PublicPaths = nil
+		return
+	}
+	copyOfPaths := cloneStringSlice(paths)
+	c.PublicPaths = &copyOfPaths
+}
+
+// GetPublicPaths returns a copy of the configured public paths.
+func (c *AuthConfig) GetPublicPaths() []string {
+	if c == nil || c.PublicPaths == nil {
+		return nil
+	}
+	return cloneStringSlice(*c.PublicPaths)
 }
 
 type DBConfig struct {
-	Enabled            bool   `yaml:"enabled" json:"enabled"`
-	Type               string `yaml:"type" json:"type"`         // mysql, postgres (default: mysql)
-	DSN                string `yaml:"dsn" json:"dsn"`           // 直接指定 DSN
-	Host               string `yaml:"host" json:"host"`         // 主机
-	User               string `yaml:"user" json:"user"`         // 用户名
-	Password           string `yaml:"password" json:"password"` // 密码
-	DBName             string `yaml:"dbname" json:"dbname"`     // 数据库名
-	Port               string `yaml:"port" json:"port"`         // 端口
-	SSLMode            string `yaml:"sslmode" json:"sslmode"`   // SSL 模式
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	Type            string `yaml:"type" json:"type"`         // mysql, postgres, sqlite (default: mysql)
+	DSN             string `yaml:"dsn" json:"dsn"`           // 直接指定 DSN
+	Host            string `yaml:"host" json:"host"`         // 主机
+	User            string `yaml:"user" json:"user"`         // 用户名
+	Password        string `yaml:"password" json:"password"` // 密码
+	DBName          string `yaml:"dbname" json:"dbname"`     // 数据库名
+	Port            string `yaml:"port" json:"port"`         // 端口
+	PostgresSSLMode string `yaml:"postgres_sslmode" json:"postgres_sslmode"`
+	TLS             string `yaml:"tls" json:"tls"` // MySQL driver TLS mode or registered config name
+	// Deprecated: use PostgresSSLMode for PostgreSQL or TLS for MySQL.
+	SSLMode            string `yaml:"sslmode" json:"sslmode"`
 	MaxIdleConns       int    `yaml:"max_idle_conns" json:"max_idle_conns"`
 	MaxOpenConns       int    `yaml:"max_open_conns" json:"max_open_conns"`
 	ConnMaxLifetime    int    `yaml:"conn_max_lifetime_minutes" json:"conn_max_lifetime_minutes"`
@@ -180,18 +218,38 @@ type MetricsConfig struct {
 }
 
 type WebSocketConfig struct {
-	HandshakeTimeout int      `yaml:"handshake_timeout_ms" json:"handshake_timeout_ms"`
-	ReadBufferSize   int      `yaml:"read_buffer_size" json:"read_buffer_size"`
-	WriteBufferSize  int      `yaml:"write_buffer_size" json:"write_buffer_size"`
-	CheckOrigin      bool     `yaml:"check_origin" json:"check_origin"`
-	AllowedOrigins   []string `yaml:"allowed_origins" json:"allowed_origins"`
+	HandshakeTimeout int       `yaml:"handshake_timeout_ms" json:"handshake_timeout_ms"`
+	ReadBufferSize   int       `yaml:"read_buffer_size" json:"read_buffer_size"`
+	WriteBufferSize  int       `yaml:"write_buffer_size" json:"write_buffer_size"`
+	CheckOrigin      bool      `yaml:"check_origin" json:"check_origin"`
+	AllowedOrigins   *[]string `yaml:"allowed_origins" json:"allowed_origins"`
 }
 
+// SetAllowedOrigins replaces allowed origins without retaining the caller's slice.
+func (c *WebSocketConfig) SetAllowedOrigins(origins []string) {
+	if origins == nil {
+		c.AllowedOrigins = nil
+		return
+	}
+	copyOfOrigins := cloneStringSlice(origins)
+	c.AllowedOrigins = &copyOfOrigins
+}
+
+// GetAllowedOrigins returns a copy of the configured allowed origins.
+func (c *WebSocketConfig) GetAllowedOrigins() []string {
+	if c == nil || c.AllowedOrigins == nil {
+		return nil
+	}
+	return cloneStringSlice(*c.AllowedOrigins)
+}
+
+// Deprecated: GRPCConfig is compatibility-only. Prefer the supported HTTP lifecycle.
 type GRPCConfig struct {
 	Enabled bool  `yaml:"enabled" json:"enabled"`
 	Port    int32 `yaml:"port" json:"port"`
 }
 
+// Deprecated: CircuitBreakerConfig is compatibility-only and is not started.
 type CircuitBreakerConfig struct {
 	Enabled             bool    `yaml:"enabled" json:"enabled"`
 	MaxRequests         uint32  `yaml:"max_requests" json:"max_requests"`                 // 半开状态下的最大请求数
@@ -200,6 +258,7 @@ type CircuitBreakerConfig struct {
 	ThresholdPercentage float64 `yaml:"threshold_percentage" json:"threshold_percentage"` // 错误率阈值 (0-1)
 }
 
+// Deprecated: ConfigCenterConfig is compatibility-only and is not loaded.
 type ConfigCenterConfig struct {
 	Enabled  bool   `yaml:"enabled" json:"enabled"`
 	Type     string `yaml:"type" json:"type"`         // "redis", "etcd", "consul"
@@ -246,6 +305,7 @@ type SysConfig struct {
 	Config         UserConfig            `yaml:"config" json:"config"`
 }
 
+// Deprecated: MQConfig is compatibility-only and is not started.
 type MQConfig struct {
 	Enabled    bool   `yaml:"enabled" json:"enabled"`
 	Type       string `yaml:"type" json:"type"` // "kafka", "rocketmq", "pulsar", "noop"
@@ -254,6 +314,7 @@ type MQConfig struct {
 	MaxRetries int    `yaml:"max_retries" json:"max_retries"`
 }
 
+// Deprecated: RocketMQConfig is compatibility-only and is not started.
 type RocketMQConfig struct {
 	Enabled     bool     `yaml:"enabled" json:"enabled"`
 	NameServers []string `yaml:"name_servers" json:"name_servers"`
@@ -262,6 +323,7 @@ type RocketMQConfig struct {
 	RetryTimes  int      `yaml:"retry_times" json:"retry_times"` // Added
 }
 
+// Deprecated: PulsarConfig is compatibility-only and is not started.
 type PulsarConfig struct {
 	Enabled          bool   `yaml:"enabled" json:"enabled"`
 	URL              string `yaml:"url" json:"url"`
@@ -278,46 +340,142 @@ type SwaggerConfig struct {
 	BasePath string `yaml:"base_path" json:"base_path"`
 }
 
-func (this *SysConfig) Validate() error {
+func (c *SysConfig) Validate() error {
 	validate := validator.New()
-	if err := validate.Struct(this); err != nil {
+	if err := validate.Struct(c); err != nil {
 		return err
 	}
-	return this.validateSemantic()
+	if err := c.validateRuntimeContract(); err != nil {
+		return err
+	}
+	if err := c.validateSemantic(); err != nil {
+		return err
+	}
+	return validateProductionSecurity(c)
 }
 
-func (this *SysConfig) validateSemantic() error {
-	if this == nil {
+// FrameworkStrict reports whether framework runtime checks are enabled.
+func (c *SysConfig) FrameworkStrict() bool {
+	if c == nil || c.Config == nil {
+		return false
+	}
+	strict, _ := c.Config[frameworkStrictConfigKey].(bool)
+	return strict
+}
+
+// SetFrameworkStrict updates the framework runtime check policy.
+func (c *SysConfig) SetFrameworkStrict(strict bool) {
+	if c == nil {
+		return
+	}
+	if c.Config == nil {
+		c.Config = UserConfig{}
+	}
+	c.Config[frameworkStrictConfigKey] = strict
+}
+
+// ResponseMode reports the configured response contract mode.
+func (c *SysConfig) ResponseMode() string {
+	if c == nil || c.Config == nil {
+		return "raw"
+	}
+	mode, _ := c.Config[responseModeConfigKey].(string)
+	if mode == "" {
+		return "raw"
+	}
+	return mode
+}
+
+// SetResponseMode updates the response contract mode.
+func (c *SysConfig) SetResponseMode(mode string) error {
+	if err := validateResponseMode(mode); err != nil {
+		return err
+	}
+	if c == nil {
+		return fmt.Errorf("configuration is nil")
+	}
+	if c.Config == nil {
+		c.Config = UserConfig{}
+	}
+	c.Config[responseModeConfigKey] = mode
+	return nil
+}
+
+func (c *SysConfig) validateRuntimeContract() error {
+	if c == nil {
 		return nil
 	}
-	if this.Tracing != nil {
-		exporter := strings.ToLower(strings.TrimSpace(this.Tracing.Exporter))
-		switch exporter {
-		case "", "stdout", "console", "otlp", "otlphttp", "none", "noop":
-		default:
+	if err := validateWebSocketConnectionLimit(c); err != nil {
+		return err
+	}
+	if c.Config == nil {
+		return nil
+	}
+	mode, exists := c.Config[responseModeConfigKey]
+	if !exists {
+		return nil
+	}
+	responseMode, ok := mode.(string)
+	if !ok {
+		return fmt.Errorf("%s must be one of raw, envelope", responseModeConfigKey)
+	}
+	return validateResponseMode(responseMode)
+}
+
+func validateResponseMode(mode string) error {
+	if mode != "raw" && mode != "envelope" {
+		return fmt.Errorf("%s must be one of raw, envelope", responseModeConfigKey)
+	}
+	return nil
+}
+
+func (c *SysConfig) validateSemantic() error {
+	if c == nil {
+		return nil
+	}
+	if err := validateCORSConfig(c); err != nil {
+		return err
+	}
+	if c.Tracing != nil {
+		exporter := strings.ToLower(strings.TrimSpace(c.Tracing.Exporter))
+		if !slices.Contains([]string{"", "stdout", "console", "otlp", "otlphttp", "none", "noop"}, exporter) {
 			return fmt.Errorf("tracing.exporter must be one of stdout, otlp, none")
 		}
-		if this.Tracing.SampleRate < 0 || this.Tracing.SampleRate > 1 {
+		if c.Tracing.SampleRate < 0 || c.Tracing.SampleRate > 1 {
 			return fmt.Errorf("tracing.sample_rate must be between 0 and 1")
 		}
+		if c.Tracing.OTLPEndpoint != "" {
+			endpoint, err := url.Parse(strings.TrimSpace(c.Tracing.OTLPEndpoint))
+			if err != nil || endpoint.Host == "" || !slices.Contains([]string{"http", "https"}, strings.ToLower(endpoint.Scheme)) {
+				return fmt.Errorf("tracing.otlp_endpoint must be an absolute http or https URL")
+			}
+		}
 	}
-	if this.Log != nil {
-		switch strings.ToLower(strings.TrimSpace(this.Log.Level)) {
-		case "", "debug", "info", "warn", "warning", "error":
-		default:
+	if c.Log != nil {
+		level := strings.ToLower(strings.TrimSpace(c.Log.Level))
+		if !slices.Contains([]string{"", "debug", "info", "warn", "warning", "error"}, level) {
 			return fmt.Errorf("log.level must be one of debug, info, warn, error")
 		}
 	}
-	if this.Metrics != nil && this.Metrics.Path != "" && !strings.HasPrefix(this.Metrics.Path, "/") {
+	if c.Metrics != nil && c.Metrics.Path != "" && !strings.HasPrefix(c.Metrics.Path, "/") {
 		return fmt.Errorf("metrics.path must start with /")
 	}
-	if this.Server != nil {
+	if c.Server != nil {
+		if c.Server.Port < 1 || c.Server.Port > 65535 {
+			return fmt.Errorf("server.port must be between 1 and 65535")
+		}
+		if c.Server.MaxHeaderBytes < 0 {
+			return fmt.Errorf("server.max_header_bytes must not be negative")
+		}
+		if c.Server.MaxRequestBodyBytes < 0 {
+			return fmt.Errorf("server.max_request_body_bytes must not be negative")
+		}
 		for name, value := range map[string]string{
-			"server.read_header_timeout": this.Server.ReadHeaderTimeout,
-			"server.read_timeout":        this.Server.ReadTimeout,
-			"server.write_timeout":       this.Server.WriteTimeout,
-			"server.idle_timeout":        this.Server.IdleTimeout,
-			"server.shutdown_timeout":    this.Server.ShutdownTimeout,
+			"server.read_header_timeout": c.Server.ReadHeaderTimeout,
+			"server.read_timeout":        c.Server.ReadTimeout,
+			"server.write_timeout":       c.Server.WriteTimeout,
+			"server.idle_timeout":        c.Server.IdleTimeout,
+			"server.shutdown_timeout":    c.Server.ShutdownTimeout,
 		} {
 			if value == "" {
 				continue
@@ -327,24 +485,196 @@ func (this *SysConfig) validateSemantic() error {
 			}
 		}
 	}
-	if this.Health != nil && this.Health.ReadinessTimeout != "" {
-		if _, err := time.ParseDuration(this.Health.ReadinessTimeout); err != nil {
+	if c.GRPC != nil && c.GRPC.Enabled {
+		if c.GRPC.Port < 1 || c.GRPC.Port > 65535 {
+			return fmt.Errorf("grpc.port must be between 1 and 65535")
+		}
+		if c.Server != nil && c.GRPC.Port == c.Server.Port {
+			return fmt.Errorf("grpc.port must differ from server.port")
+		}
+	}
+	if c.Health != nil && c.Health.ReadinessTimeout != "" {
+		if _, err := time.ParseDuration(c.Health.ReadinessTimeout); err != nil {
 			return fmt.Errorf("health.readiness_timeout must be a valid duration: %w", err)
+		}
+	}
+	if c.Auth != nil {
+		if err := validateTokenExpirationHours(c.Auth.TokenExpireHours); err != nil {
+			return err
+		}
+		if c.Auth.JWTClockSkew != "" {
+			skew, err := time.ParseDuration(c.Auth.JWTClockSkew)
+			if err != nil {
+				return fmt.Errorf("auth.jwt_clock_skew must be a valid duration: %w", err)
+			}
+			if skew < 0 || skew > 5*time.Minute {
+				return fmt.Errorf("auth.jwt_clock_skew must be between 0 and 5m")
+			}
+		}
+		if isProductionMode(c) && isWeakProductionJWTSecret(c.Auth.JWTSecret) {
+			return fmt.Errorf("weak jwt secret is not allowed in production")
+		}
+	}
+	if c.DB != nil {
+		if c.DB.MaxOpenConns < 0 {
+			return fmt.Errorf("database.max_open_conns must not be negative")
+		}
+		if c.DB.MaxIdleConns < 0 {
+			return fmt.Errorf("database.max_idle_conns must not be negative")
+		}
+		if c.DB.MaxOpenConns > 0 && c.DB.MaxIdleConns > c.DB.MaxOpenConns {
+			return fmt.Errorf("database.max_idle_conns must not exceed database.max_open_conns when both are positive")
+		}
+		dbType := strings.ToLower(strings.TrimSpace(c.DB.Type))
+		if dbType == "postgres" || dbType == "postgresql" {
+			if _, err := effectivePostgresSSLMode(c.DB); err != nil {
+				return err
+			}
+		}
+		if err := validateProductionDBTLS(c.DB, isProductionMode(c)); err != nil {
+			return err
+		}
+	}
+	if c.Redis != nil {
+		for _, setting := range []struct {
+			name  string
+			value int
+		}{
+			{name: "redis.db", value: c.Redis.DB},
+			{name: "redis.pool_size", value: c.Redis.PoolSize},
+			{name: "redis.min_idle_conns", value: c.Redis.MinIdleConns},
+			{name: "redis.dial_timeout_seconds", value: c.Redis.DialTimeout},
+			{name: "redis.read_timeout_seconds", value: c.Redis.ReadTimeout},
+			{name: "redis.write_timeout_seconds", value: c.Redis.WriteTimeout},
+		} {
+			if setting.value < 0 {
+				return fmt.Errorf("%s must not be negative", setting.name)
+			}
+		}
+		if c.Redis.MinIdleConns > c.Redis.PoolSize {
+			return fmt.Errorf("redis.min_idle_conns must not exceed redis.pool_size")
 		}
 	}
 	return nil
 }
 
-func (this *SysConfig) Name() string {
+func isWeakProductionJWTSecret(secret string) bool {
+	if strings.TrimSpace(secret) == "" {
+		return true
+	}
+	if len(secret) < 32 {
+		return true
+	}
+	switch secret {
+	case "bear-secret",
+		"your-secret-key",
+		"set-with-JWT_SECRET-32-plus-random-chars",
+		"replace-with-at-least-32-random-characters",
+		"replace-with-at-least-64-random-characters",
+		"replace_with_at_least_32_random_characters",
+		"CHANGE-ME-to-a-random-production-secret",
+		"test-only-jwt-key-with-32-random-characters",
+		"release-e2e-jwt-secret-1234567890",
+		"test-production-secret-with-32-characters",
+		"production-secret-with-at-least-32-characters",
+		"env-secret-with-at-least-32-characters":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateCORSConfig(config *SysConfig) error {
+	if config == nil || config.CORS == nil {
+		return nil
+	}
+	if config.CORS.MaxAge != "" {
+		maxAge, err := time.ParseDuration(config.CORS.MaxAge)
+		if err != nil {
+			return fmt.Errorf("cors.max_age must be a valid duration: %w", err)
+		}
+		if maxAge < 0 {
+			return fmt.Errorf("cors.max_age must not be negative")
+		}
+	}
+	if !config.CORS.Enabled || !config.CORS.AllowCredentials {
+		return nil
+	}
+	for _, origin := range config.CORS.AllowOrigins {
+		if origin == "*" {
+			return fmt.Errorf("cors wildcard origin cannot be used with credentials")
+		}
+	}
+	return nil
+}
+
+func validateProductionTrustedProxies(config *SysConfig) error {
+	if config == nil || config.Server == nil {
+		return nil
+	}
+	for _, configuredProxy := range config.Server.TrustedProxies {
+		proxy := strings.TrimSpace(configuredProxy)
+		prefix, prefixErr := netip.ParsePrefix(proxy)
+		if prefixErr == nil {
+			if prefix.Bits() == 0 {
+				return fmt.Errorf("server.trusted_proxies must not contain an all-address prefix: %q", configuredProxy)
+			}
+			continue
+		}
+		if _, err := netip.ParseAddr(proxy); err != nil {
+			return fmt.Errorf("server.trusted_proxies contains invalid address or prefix %q", configuredProxy)
+		}
+	}
+	return nil
+}
+
+func (c *SysConfig) Name() string {
 	return "SysConfig"
 }
 
+func (c *SysConfig) compatibilityWarnings() []string {
+	if c == nil {
+		return nil
+	}
+
+	var warnings []string
+	seen := make(map[string]struct{})
+	add := func(enabled bool, warning string) {
+		if !enabled {
+			return
+		}
+		if _, exists := seen[warning]; exists {
+			return
+		}
+		seen[warning] = struct{}{}
+		warnings = append(warnings, warning)
+	}
+
+	add(c.Waf != nil && c.Waf.Enabled, "waf is compatibility-only and is not started")
+	add(c.GeoIP != nil && c.GeoIP.Enabled, "geoip is compatibility-only and is not loaded")
+	add(c.BigQuery != nil && c.BigQuery.Enabled, "bigquery is compatibility-only and is not started")
+	add(c.MQ != nil && c.MQ.Enabled, "mq is compatibility-only and is not started")
+	add(c.Kafka != nil && c.Kafka.Enabled, "kafka is compatibility-only and is not started")
+	add(c.RocketMQ != nil && c.RocketMQ.Enabled, "rocketmq is compatibility-only and is not started")
+	add(c.Pulsar != nil && c.Pulsar.Enabled, "pulsar is compatibility-only and is not started")
+	add(c.Schema != nil && c.Schema.Enabled, "schema is compatibility-only and is not loaded")
+	add(c.CircuitBreaker != nil && c.CircuitBreaker.Enabled, "circuit_breaker is compatibility-only and is not started")
+	add(c.ConfigCenter != nil && c.ConfigCenter.Enabled, "config_center is compatibility-only and is not loaded")
+	if c.DB != nil {
+		dbType := strings.ToLower(strings.TrimSpace(c.DB.Type))
+		add((dbType == "" || dbType == "mysql") && strings.TrimSpace(c.DB.SSLMode) != "",
+			"database.sslmode is ignored for MySQL; migrate to database.tls")
+	}
+
+	return warnings
+}
+
 // PostProcess 处理配置兼容性与默认值补全
-func (this *SysConfig) PostProcess() {
+func (c *SysConfig) PostProcess() {
 	// 示例：BigQuery 兼容性处理
-	if this.BigQuery != nil && this.BigQuery.Enabled {
-		if this.BigQuery.CredentialsPath != "" && this.BigQuery.Credentials == "" {
-			this.BigQuery.Credentials = this.BigQuery.CredentialsPath
+	if c.BigQuery != nil && c.BigQuery.Enabled {
+		if c.BigQuery.CredentialsPath != "" && c.BigQuery.Credentials == "" {
+			c.BigQuery.Credentials = c.BigQuery.CredentialsPath
 		}
 	}
 
@@ -355,22 +685,24 @@ func (this *SysConfig) PostProcess() {
 func NewSysConfig() *SysConfig {
 	return &SysConfig{
 		Server: &ServerConfig{
-			Port:              8080,
-			Name:              "gin-bear",
-			MachineID:         -1,
-			ReadHeaderTimeout: "5s",
-			ReadTimeout:       "15s",
-			WriteTimeout:      "30s",
-			IdleTimeout:       "60s",
-			ShutdownTimeout:   "5s",
+			Port:                8080,
+			Name:                "gin-bear",
+			MachineID:           -1,
+			ReadHeaderTimeout:   "5s",
+			ReadTimeout:         "15s",
+			WriteTimeout:        "30s",
+			IdleTimeout:         "60s",
+			ShutdownTimeout:     "5s",
+			MaxHeaderBytes:      1 << 20,
+			MaxRequestBodyBytes: 1 << 20,
 		},
 		Auth: &AuthConfig{
 			StorageType:      "file",
 			JWTSecret:        "bear-secret",
 			TokenExpireHours: 24,
-			PublicPaths:      []string{"/health", "/live", "/ready", "/version", "/metrics", "/swagger/*", "/login"},
+			PublicPaths:      stringSlicePointer("/health", "/live", "/ready", "/version", "/swagger/*", "/login"),
 		},
-		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root", SSLMode: "disable"},
+		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root"},
 		Redis:  &RedisConfig{Addr: "localhost:6379", Password: "", DB: 0},
 		Casbin: &CasbinConfig{},
 		CORS: &CORSConfig{
@@ -410,7 +742,7 @@ func NewSysConfig() *SysConfig {
 			Level: "info",
 		},
 		WS: &WebSocketConfig{
-			HandshakeTimeout: 10000,
+			HandshakeTimeout: defaultWebSocketHandshakeTimeoutMilliseconds,
 			ReadBufferSize:   1024,
 			WriteBufferSize:  1024,
 			CheckOrigin:      true,
@@ -454,92 +786,54 @@ func NewSysConfig() *SysConfig {
 			PerformanceLogLevel:  "info", // 日志级别: debug, info, warn, error
 			SlowRequestThreshold: "1s",   // 慢请求阈值
 		},
+		Config: UserConfig{},
 	}
 }
 
-func InitConfig() *SysConfig {
-	config := NewSysConfig()
-
-	// 1. 获取当前环境 (BEAR_ENV 优先, 其次 GIN_MODE)
-	env := os.Getenv("BEAR_ENV")
-	if env == "" {
-		mode := os.Getenv("GIN_MODE")
-		if mode == "release" {
-			env = "prod"
-		} else {
-			env = "dev"
-		}
-	}
-
-	// 2. 加载基础 YAML 配置 (底座)
-	yamlFile := "application.yaml"
-	if _, err := os.Stat(yamlFile); err == nil {
-		if err := ParseConfig(yamlFile, config); err != nil {
-			slog.Error("Failed to unmarshal application.yaml", "error", err)
-		} else {
-			slog.Info("Loaded base config from application.yaml")
-		}
-	}
-
-	// 3. 加载环境特定 YAML 配置并覆盖
-	envYamlFile := fmt.Sprintf("application-%s.yaml", env)
-	if _, err := os.Stat(envYamlFile); err == nil {
-		if err := ParseConfig(envYamlFile, config); err != nil {
-			slog.Error("Failed to unmarshal env config", "file", envYamlFile, "error", err)
-		} else {
-			slog.Info("Loaded env config", "env", env, "file", envYamlFile)
-		}
-	}
-
-	// 4. 兼容 legacy: 如果存在 config.json，则覆盖当前配置
-	jsonFile := "config.json"
-	if _, err := os.Stat(jsonFile); err == nil {
-		if err := ParseConfig(jsonFile, config); err != nil {
-			slog.Error("Failed to unmarshal config.json", "error", err)
-		} else {
-			slog.Info("Loaded and merged config from config.json (legacy mode)")
-		}
-	}
-
-	// 5. 环境变量覆盖
-	applyEnvOverrides(config)
-
-	// 6. 远程配置中心 (已禁用 - 精简模式)
-	// if config.ConfigCenter != nil && config.ConfigCenter.Enabled {
-	// 	loadFromConfigCenter(config)
-	// }
-
-	return validateAndReturn(config)
-}
-
-func applyEnvOverrides(config *SysConfig) {
+func applyEnvOverrides(config *SysConfig) error {
 	if config == nil {
-		return
+		return nil
+	}
+	if portString, configured := os.LookupEnv("BEAR_SERVER_PORT"); configured {
+		port, err := strconv.Atoi(portString)
+		if err != nil {
+			return fmt.Errorf("BEAR_SERVER_PORT must be an integer: %w", err)
+		}
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("BEAR_SERVER_PORT must be between 1 and 65535")
+		}
+		if config.Server != nil {
+			config.Server.Port = int32(port)
+			slog.Info("Config override by env", "BEAR_SERVER_PORT", port)
+		}
 	}
 	if config.Server != nil {
-		if portStr := os.Getenv("BEAR_SERVER_PORT"); portStr != "" {
-			if p, err := strconv.Atoi(portStr); err == nil {
-				config.Server.Port = int32(p)
-				slog.Info("Config override by env", "BEAR_SERVER_PORT", p)
-			}
-		}
 		if timeout := os.Getenv("BEAR_SHUTDOWN_TIMEOUT"); timeout != "" {
 			config.Server.ShutdownTimeout = timeout
 		}
 	}
 	if config.Auth != nil {
-		if secret := os.Getenv("JWT_SECRET"); secret != "" {
+		if secret := os.Getenv("BEAR_AUTH_JWT_SECRET"); secret != "" {
 			config.Auth.JWTSecret = secret
+		} else if secret := os.Getenv("JWT_SECRET"); secret != "" {
+			config.Auth.JWTSecret = secret
+		}
+	}
+	if required, configured := os.LookupEnv("REDIS_REQUIRED"); configured {
+		value, err := strconv.ParseBool(required)
+		if err != nil {
+			return fmt.Errorf("REDIS_REQUIRED must be a boolean: %w", err)
+		}
+		if config.Redis != nil {
+			config.Redis.Required = value
 		}
 	}
 	if config.Redis != nil {
 		if addr := os.Getenv("REDIS_ADDR"); addr != "" {
 			config.Redis.Addr = addr
 		}
-		if required := os.Getenv("REDIS_REQUIRED"); required != "" {
-			if v, err := strconv.ParseBool(required); err == nil {
-				config.Redis.Required = v
-			}
+		if password := os.Getenv("REDIS_PASSWORD"); password != "" {
+			config.Redis.Password = password
 		}
 	}
 	if config.DB != nil {
@@ -558,15 +852,23 @@ func applyEnvOverrides(config *SysConfig) {
 		if dbname := os.Getenv("POSTGRES_DB"); dbname != "" {
 			config.DB.DBName = dbname
 		}
-		if maxOpen := os.Getenv("DB_MAX_OPEN_CONNS"); maxOpen != "" {
-			if v, err := strconv.Atoi(maxOpen); err == nil {
-				config.DB.MaxOpenConns = v
-			}
+	}
+	if maxOpen, configured := os.LookupEnv("DB_MAX_OPEN_CONNS"); configured {
+		value, err := strconv.Atoi(maxOpen)
+		if err != nil {
+			return fmt.Errorf("DB_MAX_OPEN_CONNS must be an integer: %w", err)
 		}
-		if maxIdle := os.Getenv("DB_MAX_IDLE_CONNS"); maxIdle != "" {
-			if v, err := strconv.Atoi(maxIdle); err == nil {
-				config.DB.MaxIdleConns = v
-			}
+		if config.DB != nil {
+			config.DB.MaxOpenConns = value
+		}
+	}
+	if maxIdle, configured := os.LookupEnv("DB_MAX_IDLE_CONNS"); configured {
+		value, err := strconv.Atoi(maxIdle)
+		if err != nil {
+			return fmt.Errorf("DB_MAX_IDLE_CONNS must be an integer: %w", err)
+		}
+		if config.DB != nil {
+			config.DB.MaxIdleConns = value
 		}
 	}
 	if config.Health != nil {
@@ -592,16 +894,5 @@ func applyEnvOverrides(config *SysConfig) {
 			config.Tracing.OTLPEndpoint = endpoint
 		}
 	}
-}
-
-func validateAndReturn(config *SysConfig) *SysConfig {
-	// 兼容性与后处理
-	config.PostProcess()
-
-	// 配置验证
-	if err := config.Validate(); err != nil {
-		slog.Error("Configuration validation failed", "error", err)
-		panic(fmt.Sprintf("Invalid configuration: %v", err))
-	}
-	return config
+	return nil
 }

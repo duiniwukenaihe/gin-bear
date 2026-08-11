@@ -33,15 +33,15 @@ func TracingMiddleware(provider oteltrace.TracerProvider, propagator propagation
 	return func(c *gin.Context) {
 		extracted := propagator.Extract(c.Request.Context(), propagation.HeaderCarrier(c.Request.Header))
 		route := tracingRoute(c)
-		spanName := c.Request.Method + " " + route
+		method := normalizeHTTPMethod(c.Request.Method)
+		spanName := method + " " + route
 		ctx, span := tracer.Start(extracted, spanName,
 			oteltrace.WithSpanKind(oteltrace.SpanKindServer),
 			oteltrace.WithAttributes(
-				attribute.String("http.request.method", c.Request.Method),
-				attribute.String("url.path", c.Request.URL.Path),
-				attribute.String("url.query", c.Request.URL.RawQuery),
+				attribute.String("http.request.method", method),
 				attribute.String("http.route", route),
 				attribute.String("client.address", c.ClientIP()),
+				attribute.String("service.version", Version),
 			),
 		)
 		c.Request = c.Request.WithContext(ctx)
@@ -51,31 +51,53 @@ func TracingMiddleware(provider oteltrace.TracerProvider, propagator propagation
 
 		finalRoute := tracingRoute(c)
 		if finalRoute != route {
-			span.SetName(c.Request.Method + " " + finalRoute)
+			span.SetName(method + " " + finalRoute)
 			span.SetAttributes(attribute.String("http.route", finalRoute))
 		}
 		status := c.Writer.Status()
 		span.SetAttributes(attribute.Int("http.response.status_code", status))
-		if requestID := c.GetHeader("X-Request-ID"); requestID != "" {
+		if requestID := traceRequestID(c); requestID != "" {
 			span.SetAttributes(attribute.String("gin_bear.request_id", requestID))
 		}
 		if status >= http.StatusInternalServerError {
 			span.SetStatus(codes.Error, http.StatusText(status))
 		}
 		for _, ginErr := range c.Errors {
-			span.AddEvent("gin.error", oteltrace.WithAttributes(attribute.String("error.message", ginErr.Error())))
+			category, errorCode := observableErrorMetadata(ginErr.Err, status)
+			span.AddEvent("gin.error", oteltrace.WithAttributes(
+				attribute.String("error.type", category),
+				attribute.Int("http.response.status_code", status),
+				attribute.Int("gin_bear.error_code", errorCode),
+			))
 		}
 	}
+}
+
+func traceRequestID(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if value, ok := c.Get(RequestIDKey); ok {
+		if requestID, ok := value.(string); ok && requestID != "" {
+			return requestID
+		}
+	}
+	if c.Request != nil {
+		if requestID, ok := c.Request.Context().Value(RequestIDKey).(string); ok && requestID != "" {
+			return requestID
+		}
+		if requestID := c.GetHeader("X-Request-ID"); requestID != "" {
+			return requestID
+		}
+	}
+	return ""
 }
 
 func tracingRoute(c *gin.Context) string {
 	if route := c.FullPath(); route != "" {
 		return route
 	}
-	if c.Request != nil && c.Request.URL != nil && c.Request.URL.Path != "" {
-		return c.Request.URL.Path
-	}
-	return "/"
+	return "unmatched"
 }
 
 func newTracerProvider(ctx context.Context, cfg *TracingConfig) (*sdktrace.TracerProvider, error) {
@@ -95,11 +117,15 @@ func newTracerProvider(ctx context.Context, cfg *TracingConfig) (*sdktrace.Trace
 	}
 	options := []sdktrace.TracerProviderOption{
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(sampleRate))),
-		sdktrace.WithResource(resource.NewWithAttributes("", attribute.String("service.name", serviceName))),
+		sdktrace.WithResource(resource.NewWithAttributes("",
+			attribute.String("service.name", serviceName),
+			attribute.String("service.version", Version),
+		)),
 	}
 
-	switch strings.ToLower(strings.TrimSpace(cfg.Exporter)) {
+	switch exporterName := strings.ToLower(strings.TrimSpace(cfg.Exporter)); exporterName {
 	case "", "none", "noop":
+		return sdktrace.NewTracerProvider(options...), nil
 	case "stdout", "console":
 		exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 		if err != nil {

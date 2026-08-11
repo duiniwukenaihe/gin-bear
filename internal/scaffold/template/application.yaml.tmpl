@@ -1,0 +1,32 @@
+server:
+  port: 8080
+  name: {{yamlScalar .Name}}
+  shutdown_timeout: "5s"
+
+config:
+  strict: true
+  framework.strict: true
+  framework.response_mode: "envelope"
+
+database:
+  enabled: false
+
+tracing:
+  enabled: false
+  service_name: {{yamlScalar .Name}}
+  exporter: "stdout"
+  sample_rate: 1.0
+
+auth:
+  jwt_secret: "" # Required via BEAR_AUTH_JWT_SECRET in production.
+  token_expire_hours: 24
+  public_paths:
+    - "/health"
+    - "/live"
+    - "/ready"
+    - "/version"
+    - "/metrics"
+
+metrics:
+  enabled: true
+  path: "/metrics"

@@ -5,11 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
-	"reflect"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	mysqldriver "github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -36,14 +42,19 @@ type VersionedModel interface {
 // GormAdapter 是 GORM v2 的适配器
 type GormAdapter struct {
 	*gorm.DB
+	shutdownOnce sync.Once
+	shutdownErr  error
 }
 
-func (this *GormAdapter) Name() string {
+func (r *GormAdapter) Name() string {
 	return "GormAdapter"
 }
 
 // buildDSN 构建数据库 DSN，支持 MySQL/PostgreSQL 或直接 DSN
 func buildDSN(cfg *DBConfig) (string, error) {
+	if cfg == nil {
+		return "", errors.New("database config is required")
+	}
 	// 如果已配置 DSN，直接使用
 	if cfg.DSN != "" {
 		return cfg.DSN, nil
@@ -71,29 +82,128 @@ func buildDSN(cfg *DBConfig) (string, error) {
 		if port == "" {
 			port = "5432"
 		}
-		sslmode := cfg.SSLMode
-		if sslmode == "" {
-			sslmode = "disable"
+		sslmode, err := effectivePostgresSSLMode(cfg)
+		if err != nil {
+			return "", err
 		}
-		return fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s",
-			host, user, cfg.Password, dbname, port, sslmode), nil
+		postgresURL := &url.URL{
+			Scheme: "postgres",
+			User:   url.UserPassword(user, cfg.Password),
+			Host:   net.JoinHostPort(host, port),
+			Path:   "/" + dbname,
+		}
+		postgresURL.RawPath = "/" + url.PathEscape(dbname)
+		query := postgresURL.Query()
+		query.Set("sslmode", sslmode)
+		postgresURL.RawQuery = query.Encode()
+		return postgresURL.String(), nil
 	case "mysql":
 		if port == "" {
 			port = "3306"
 		}
-		sslmode := cfg.SSLMode
-		if sslmode == "" {
-			sslmode = "disable"
+		driverConfig := mysqldriver.NewConfig()
+		driverConfig.User = user
+		driverConfig.Passwd = cfg.Password
+		driverConfig.Net = "tcp"
+		driverConfig.Addr = net.JoinHostPort(host, port)
+		driverConfig.DBName = dbname
+		driverConfig.Params = map[string]string{"charset": "utf8mb4"}
+		driverConfig.ParseTime = true
+		driverConfig.Loc = time.Local
+		driverConfig.TLSConfig = strings.TrimSpace(cfg.TLS)
+		driverConfig.ClientFoundRows = true
+		dsn := driverConfig.FormatDSN()
+		parsed, err := mysqldriver.ParseDSN(dsn)
+		if err != nil {
+			return "", fmt.Errorf("invalid MySQL DSN configuration: %w", err)
 		}
-		return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local&sslmode=%s",
-			user, cfg.Password, host, port, dbname, sslmode), nil
+		if parsed.User != driverConfig.User || parsed.Passwd != driverConfig.Passwd || parsed.DBName != driverConfig.DBName {
+			return "", errors.New("MySQL user, password, or database name contains characters that cannot be represented safely in a DSN")
+		}
+		return dsn, nil
 	default:
-		return "", fmt.Errorf("unsupported database type: %s, supported: mysql, postgres", dbType)
+		return "", fmt.Errorf("unsupported database type: %s, supported: mysql, postgres, sqlite", dbType)
 	}
+}
+
+func effectivePostgresSSLMode(cfg *DBConfig) (string, error) {
+	sslmode := strings.ToLower(strings.TrimSpace(cfg.PostgresSSLMode))
+	if sslmode == "" {
+		sslmode = strings.ToLower(strings.TrimSpace(cfg.SSLMode))
+	}
+	if sslmode == "" {
+		sslmode = "disable"
+	}
+	switch sslmode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+		return sslmode, nil
+	default:
+		return "", fmt.Errorf("database PostgreSQL sslmode %q is invalid", sslmode)
+	}
+}
+
+// validateProductionDBTLS validates the effective driver configuration so a
+// raw DSN cannot bypass the production TLS policy.
+func validateProductionDBTLS(cfg *DBConfig, production bool) error {
+	if !production || cfg == nil || !cfg.Enabled {
+		return nil
+	}
+
+	dsn, err := buildDSN(cfg)
+	if err != nil {
+		return errors.New("production database DSN is invalid")
+	}
+	dbType := strings.ToLower(strings.TrimSpace(cfg.Type))
+	if dbType == "" {
+		dbType = "mysql"
+	}
+
+	switch dbType {
+	case "postgres", "postgresql":
+		parsed, parseErr := pgconn.ParseConfig(dsn)
+		if parseErr != nil {
+			return errors.New("production PostgreSQL DSN is invalid")
+		}
+		if !postgresTLSVerifiesHostname(parsed) {
+			return errors.New("production PostgreSQL requires sslmode=verify-full")
+		}
+	case "mysql":
+		parsed, parseErr := mysqldriver.ParseDSN(dsn)
+		if parseErr != nil {
+			return errors.New("production MySQL DSN is invalid")
+		}
+		if parsed.TLS == nil || parsed.TLS.InsecureSkipVerify || parsed.AllowFallbackToPlaintext {
+			return errors.New("production MySQL requires TLS with certificate verification")
+		}
+	default:
+		return errors.New("production database type is unsupported")
+	}
+	return nil
+}
+
+func postgresTLSVerifiesHostname(cfg *pgconn.Config) bool {
+	if cfg == nil || cfg.TLSConfig == nil || cfg.TLSConfig.InsecureSkipVerify {
+		return false
+	}
+	for _, fallback := range cfg.Fallbacks {
+		if fallback == nil || fallback.TLSConfig == nil || fallback.TLSConfig.InsecureSkipVerify {
+			return false
+		}
+	}
+	return true
 }
 
 // NewGormAdapter 创建 GORM 适配器
 func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
+	validationCfg := cfg
+	if cfg != nil && !cfg.Enabled {
+		activeCfg := *cfg
+		activeCfg.Enabled = true
+		validationCfg = &activeCfg
+	}
+	if err := validateProductionDBTLS(validationCfg, isProductionMode(nil)); err != nil {
+		return nil, err
+	}
 	dsn, err := buildDSN(cfg)
 	if err != nil {
 		return nil, err
@@ -108,8 +218,12 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 	switch dbType {
 	case "postgres", "postgresql":
 		dialector = postgres.Open(dsn)
-	default:
+	case "mysql", "":
 		dialector = mysql.Open(dsn)
+	case "sqlite", "sqlite3":
+		dialector = sqlite.Open(dsn)
+	default:
+		return nil, fmt.Errorf("unsupported database type: %s", dbType)
 	}
 
 	db, err := gorm.Open(dialector, buildGormConfig(cfg))
@@ -162,23 +276,79 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 }
 
 func buildGormConfig(cfg *DBConfig) *gorm.Config {
+	slowThreshold := 200 * time.Millisecond
+	if cfg != nil && cfg.SlowQueryThreshold != "" {
+		if configured := parseDurationOrDefault(cfg.SlowQueryThreshold, 0); configured > 0 {
+			slowThreshold = configured
+		}
+	}
 	gormCfg := &gorm.Config{
 		NamingStrategy: schema.NamingStrategy{
 			SingularTable: true, // 使用单数表名
 		},
 		PrepareStmt: false, // 禁用预编译语句缓存以兼容旧版驱动或某些插件
-	}
-	if cfg != nil && cfg.SlowQueryThreshold != "" {
-		threshold := parseDurationOrDefault(cfg.SlowQueryThreshold, 0)
-		if threshold > 0 {
-			gormCfg.Logger = logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
-				SlowThreshold: threshold,
-				LogLevel:      logger.Warn,
-				Colorful:      false,
-			})
-		}
+		Logger: newSecureGormLogger(log.New(os.Stdout, "", log.LstdFlags), logger.Config{
+			SlowThreshold:        slowThreshold,
+			LogLevel:             logger.Warn,
+			ParameterizedQueries: true,
+		}),
 	}
 	return gormCfg
+}
+
+type secureGormLogger struct {
+	output *log.Logger
+	config logger.Config
+}
+
+func newSecureGormLogger(output *log.Logger, config logger.Config) logger.Interface {
+	return &secureGormLogger{output: output, config: config}
+}
+
+func (l *secureGormLogger) LogMode(level logger.LogLevel) logger.Interface {
+	cloned := *l
+	cloned.config.LogLevel = level
+	return &cloned
+}
+
+func (l *secureGormLogger) Info(context.Context, string, ...interface{}) {
+	if l.config.LogLevel >= logger.Info {
+		l.output.Print("gorm category=info")
+	}
+}
+
+func (l *secureGormLogger) Warn(context.Context, string, ...interface{}) {
+	if l.config.LogLevel >= logger.Warn {
+		l.output.Print("gorm category=warn")
+	}
+}
+
+func (l *secureGormLogger) Error(context.Context, string, ...interface{}) {
+	if l.config.LogLevel >= logger.Error {
+		l.output.Print("gorm category=error")
+	}
+}
+
+func (l *secureGormLogger) Trace(_ context.Context, begin time.Time, query func() (string, int64), err error) {
+	elapsed := time.Since(begin)
+	category := ""
+	switch {
+	case err != nil && l.config.LogLevel >= logger.Error:
+		category = "error"
+	case l.config.SlowThreshold > 0 && elapsed > l.config.SlowThreshold && l.config.LogLevel >= logger.Warn:
+		category = "slow"
+	case l.config.LogLevel >= logger.Info:
+		category = "trace"
+	default:
+		return
+	}
+
+	_, rows := query()
+	l.output.Printf("gorm category=%s elapsed=%s rows=%d", category, elapsed, rows)
+}
+
+func (*secureGormLogger) ParamsFilter(_ context.Context, sql string, _ ...interface{}) (string, []interface{}) {
+	return sql, nil
 }
 
 // Repository 基础仓库模式 (利用 Generics)
@@ -190,13 +360,8 @@ func NewRepository[T any](adapter *GormAdapter) *Repository[T] {
 	return &Repository[T]{Adapter: adapter}
 }
 
-func (this *Repository[T]) getModelName() string {
-	var t T
-	return reflect.TypeOf(t).String()
-}
-
-func (this *Repository[T]) DB(ctx ...context.Context) *gorm.DB {
-	adapter := this.Adapter
+func (r *Repository[T]) DB(ctx ...context.Context) *gorm.DB {
+	adapter := r.Adapter
 	if adapter == nil {
 		adapter = GetByType[*GormAdapter]()
 	}
@@ -226,19 +391,19 @@ func (this *Repository[T]) DB(ctx ...context.Context) *gorm.DB {
 	return db
 }
 
-func (this *Repository[T]) Create(ctx context.Context, entity *T) error {
-	return this.DB(ctx).Create(entity).Error
+func (r *Repository[T]) Create(ctx context.Context, entity *T) error {
+	return r.DB(ctx).Create(entity).Error
 }
 
-func (this *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error) {
+func (r *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error) {
 	var entity T
-	err := this.DB(ctx).First(&entity, id).Error
+	err := r.DB(ctx).First(&entity, id).Error
 	return &entity, err
 }
 
 // FindOne 根据条件查询单条数据，支持预加载关联模型
-func (this *Repository[T]) FindOne(ctx context.Context, query any, preloads ...string) (*T, error) {
-	db := this.DB(ctx)
+func (r *Repository[T]) FindOne(ctx context.Context, query any, preloads ...string) (*T, error) {
+	db := r.DB(ctx)
 	for _, p := range preloads {
 		db = db.Preload(p)
 	}
@@ -249,8 +414,8 @@ func (this *Repository[T]) FindOne(ctx context.Context, query any, preloads ...s
 }
 
 // FindList 根据条件查询列表数据，支持预加载关联模型
-func (this *Repository[T]) FindList(ctx context.Context, query any, preloads ...string) ([]*T, error) {
-	db := this.DB(ctx)
+func (r *Repository[T]) FindList(ctx context.Context, query any, preloads ...string) ([]*T, error) {
+	db := r.DB(ctx)
 	for _, p := range preloads {
 		db = db.Preload(p)
 	}
@@ -260,17 +425,26 @@ func (this *Repository[T]) FindList(ctx context.Context, query any, preloads ...
 	return list, err
 }
 
-func (this *GormAdapter) Shutdown() error {
-	sqlDB, err := this.DB.DB()
-	if err != nil {
-		return err
+func (r *GormAdapter) Shutdown() error {
+	if r == nil || r.DB == nil {
+		return nil
 	}
-	Info("Closing database connection pool...")
-	return sqlDB.Close()
+	r.shutdownOnce.Do(func() {
+		sqlDB, err := r.DB.DB()
+		if err != nil {
+			r.shutdownErr = err
+			return
+		}
+		Info("Closing database connection pool...")
+		r.shutdownErr = sqlDB.Close()
+	})
+	return r.shutdownErr
 }
 
-func (this *GormAdapter) CheckReady(ctx context.Context) error {
-	sqlDB, err := this.DB.DB()
+func (*GormAdapter) lifecyclePrestarted() bool { return true }
+
+func (r *GormAdapter) CheckReady(ctx context.Context) error {
+	sqlDB, err := r.DB.DB()
 	if err != nil {
 		return err
 	}
@@ -304,35 +478,32 @@ func auditUpdateCallback(db *gorm.DB) {
 
 		if model, ok := db.Statement.Dest.(AuditModel); ok {
 			model.SetUpdatedBy(userID)
+			return
+		}
+		if _, audited := db.Statement.Model.(AuditModel); audited {
+			if _, ok := db.Statement.Dest.(map[string]interface{}); !ok {
+				return
+			}
+			if field := db.Statement.Schema.LookUpField("UpdatedBy"); field != nil {
+				db.Statement.SetColumn(field.DBName, userID)
+			}
 		}
 	}
 }
 
 // getUserIDFromContext 尝试从上下文中提取用户 ID
 func getUserIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	// 尝试适配多种 Key 规范
-	if v := ctx.Value("user_id"); v != nil {
-		return v.(string)
-	}
-	if v := ctx.Value("sub"); v != nil {
-		return v.(string)
-	}
-	// 兼容 Gin Context 的传值 (通过 context.WithValue 传递下来的)
-	// 注意：在 Middleware 中我们通常不仅 Set 到 gin.Context，也应该 Set 到 Request.Context
-	return ""
+	userID, _ := UserIDFromContext(ctx)
+	return userID
 }
 
 // Update 更新实体，支持乐观锁
-func (this *Repository[T]) Update(ctx context.Context, entity *T) error {
-	db := this.DB(ctx)
+func (r *Repository[T]) Update(ctx context.Context, entity *T) error {
+	db := r.DB(ctx)
 
 	// 乐观锁检查
 	if v, ok := any(entity).(VersionedModel); ok {
 		currentVersion := v.GetVersion()
-		// 自动递增版本号
 		v.SetVersion(currentVersion + 1)
 
 		// 执行 CAS 更新: UPDATE table SET ..., version = currentVersion + 1 WHERE id = ? AND version = currentVersion
@@ -341,12 +512,11 @@ func (this *Repository[T]) Update(ctx context.Context, entity *T) error {
 		// 为了安全，我们显式指定 WHERE 条件为旧版本号。
 		result := db.Model(entity).Where("version = ?", currentVersion).Updates(entity)
 		if result.Error != nil {
+			v.SetVersion(currentVersion)
 			return result.Error
 		}
 		if result.RowsAffected == 0 {
-			// 如果更新失败，说明版本号不对，可能是并发修改了。
-			// 此时实体已经被修改为新版本号，是否需要回滚？
-			// 不，因为这是内存对象。用户可以重新 Fetch 后重试。
+			v.SetVersion(currentVersion)
 			return ErrOptimisticLock
 		}
 		return nil
@@ -363,48 +533,57 @@ func (this *Repository[T]) Update(ctx context.Context, entity *T) error {
 }
 
 // Delete 删除实体
-func (this *Repository[T]) Delete(ctx context.Context, entity *T) error {
-	return this.DB(ctx).Delete(entity).Error
+func (r *Repository[T]) Delete(ctx context.Context, entity *T) error {
+	return r.DB(ctx).Delete(entity).Error
 }
 
 // FindUnscoped 查询包含已删除的数据 (软删除)
-func (this *Repository[T]) FindUnscoped(ctx context.Context, id interface{}) (*T, error) {
+func (r *Repository[T]) FindUnscoped(ctx context.Context, id interface{}) (*T, error) {
 	var entity T
-	err := this.DB(ctx).Unscoped().First(&entity, id).Error
+	err := r.DB(ctx).Unscoped().First(&entity, id).Error
 	return &entity, err
 }
 
 // Restore 恢复已删除的数据
-func (this *Repository[T]) Restore(ctx context.Context, id interface{}) error {
+func (r *Repository[T]) Restore(ctx context.Context, id interface{}) error {
 	// GORM 恢复软删除通常是 Update DeletedAt = null
 	var entity T
-	return this.DB(ctx).Unscoped().Model(&entity).Where("id = ?", id).Update("deleted_at", nil).Error
+	return r.DB(ctx).Unscoped().Model(&entity).Where("id = ?", id).Update("deleted_at", nil).Error
 }
 
 // UpdateByID 根据 ID 更新（使用 map 避免全量更新）
-func (this *Repository[T]) UpdateByID(ctx context.Context, id interface{}, updates map[string]interface{}) error {
+func (r *Repository[T]) UpdateByID(ctx context.Context, id interface{}, updates map[string]interface{}) error {
 	var entity T
-	return this.DB(ctx).Model(&entity).Where("id = ?", id).Updates(updates).Error
+	db := r.DB(ctx)
+	clonedUpdates := make(map[string]interface{}, len(updates))
+	for key, value := range updates {
+		clonedUpdates[key] = value
+	}
+	result := db.Model(&entity).Where("id = ?", id).Updates(clonedUpdates)
+	if result.Error != nil || result.RowsAffected > 0 {
+		return result.Error
+	}
+	return gorm.ErrRecordNotFound
 }
 
 // DeleteByID 根据 ID 删除
-func (this *Repository[T]) DeleteByID(ctx context.Context, id interface{}) error {
+func (r *Repository[T]) DeleteByID(ctx context.Context, id interface{}) error {
 	var entity T
-	return this.DB(ctx).Delete(&entity, id).Error
+	return r.DB(ctx).Delete(&entity, id).Error
 }
 
 // Count 统计数量
-func (this *Repository[T]) Count(ctx context.Context) (int64, error) {
+func (r *Repository[T]) Count(ctx context.Context) (int64, error) {
 	var entity T
 	var count int64
-	err := this.DB(ctx).Model(&entity).Count(&count).Error
+	err := r.DB(ctx).Model(&entity).Count(&count).Error
 	return count, err
 }
 
 // Exists 检查记录是否存在
-func (this *Repository[T]) Exists(ctx context.Context, id interface{}) (bool, error) {
+func (r *Repository[T]) Exists(ctx context.Context, id interface{}) (bool, error) {
 	var entity T
 	var count int64
-	err := this.DB(ctx).Model(&entity).Where("id = ?", id).Count(&count).Error
+	err := r.DB(ctx).Model(&entity).Where("id = ?", id).Count(&count).Error
 	return count > 0, err
 }
