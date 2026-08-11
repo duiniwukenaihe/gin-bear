@@ -53,6 +53,10 @@ func (f errorFairing) OnRequest(*gin.Context) error {
 	return f.err
 }
 
+type authoritativeIDRequest struct {
+	ID int64 `uri:"id" json:"id" form:"id"`
+}
+
 func TestHandleKeepsBoundReceiverIdentity(t *testing.T) {
 	a := &receiverHandler{value: "a"}
 	b := &receiverHandler{value: "b"}
@@ -157,6 +161,100 @@ func TestBindingAllowsTrailingJSONWhitespace(t *testing.T) {
 		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
 	}
 	assertDecodedJSON(t, response.Body.Bytes(), "a")
+}
+
+func TestURIValueWins(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	app.Handle(http.MethodPost, "/users/:id", func(request authoritativeIDRequest) int64 {
+		return request.ID
+	})
+
+	request := newJSONRequest("/users/41?id=42", `{"id":43}`)
+	response := performRequest(app, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	assertDecodedJSON(t, response.Body.Bytes(), float64(41))
+}
+
+func TestBufferedSuccessReturnsInternalServerErrorBeforeCommit(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	app.Handle(http.MethodGet, "/unencodable", func() interface{} {
+		return map[string]interface{}{"bad": func() {}}
+	})
+
+	response := performRequest(app, httptest.NewRequest(http.MethodGet, "/unencodable", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	assertSingleJSONValue(t, response.Body.Bytes())
+}
+
+func TestResponseModeEnvelopeWrapsOrdinaryValues(t *testing.T) {
+	config := NewSysConfig()
+	if err := config.SetResponseMode("envelope"); err != nil {
+		t.Fatal(err)
+	}
+	app := Ignite(config)
+	app.Handle(http.MethodGet, "/value", func() string { return "value" })
+
+	response := performRequest(app, httptest.NewRequest(http.MethodGet, "/value", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	var body Response
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != http.StatusOK || body.Message != "success" {
+		t.Fatalf("body = %#v", body)
+	}
+	data, ok := body.Data.(string)
+	if !ok || data != "value" {
+		t.Fatalf("body data = %#v", body.Data)
+	}
+}
+
+func TestStatusResponseWritesStatus(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	app.Handle(http.MethodPost, "/users", func() StatusResponse {
+		return WithStatus(http.StatusCreated, "created")
+	})
+
+	response := performRequest(app, httptest.NewRequest(http.MethodPost, "/users", nil))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	assertDecodedJSON(t, response.Body.Bytes(), "created")
+}
+
+func TestBufferedSuccessSkipsBodiesWhenHTTPForbidsThem(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		status int
+	}{
+		{name: "no content", method: http.MethodGet, status: http.StatusNoContent},
+		{name: "not modified", method: http.MethodGet, status: http.StatusNotModified},
+		{name: "head", method: http.MethodHead, status: http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := Ignite(NewSysConfig())
+			app.Handle(tt.method, "/value", func() StatusResponse {
+				return WithStatus(tt.status, "ignored")
+			})
+
+			response := performRequest(app, httptest.NewRequest(tt.method, "/value", nil))
+			if response.Code != tt.status {
+				t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+			}
+			if response.Body.Len() != 0 {
+				t.Fatalf("body = %q, want empty", response.Body.String())
+			}
+		})
+	}
 }
 
 func TestHandleERejectsInvalidSignaturesDuringConstruction(t *testing.T) {

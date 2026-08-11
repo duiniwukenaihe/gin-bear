@@ -1,6 +1,8 @@
 package bear
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +16,17 @@ type Responder interface {
 
 // JSONResponse adapts a context-aware Response producer.
 type JSONResponse func(*gin.Context) Response
+
+// StatusResponse lets a handler set the HTTP status for a successful response.
+type StatusResponse struct {
+	Status int
+	Value  any
+}
+
+// WithStatus returns a successful response with an explicit HTTP status.
+func WithStatus(status int, value any) StatusResponse {
+	return StatusResponse{Status: status, Value: value}
+}
 
 func (r JSONResponse) RespondTo() gin.HandlerFunc {
 	return Convert(func(ctx *gin.Context) (interface{}, error) {
@@ -51,9 +64,32 @@ func Convert(handler interface{}) gin.HandlerFunc {
 }
 
 func writeSuccess(ctx *gin.Context, result interface{}) {
+	var config *SysConfig
+	if ctx != nil {
+		if value, ok := ctx.Get(runtimeContextKey); ok {
+			if runtime, ok := value.(*Runtime); ok && runtime != nil {
+				config = runtime.Config
+			}
+		}
+	}
+	writeSuccessWithConfig(ctx, config, result)
+}
+
+func writeSuccessWithConfig(ctx *gin.Context, config *SysConfig, result any) {
 	if ctx == nil || ctx.Writer.Written() {
 		return
 	}
+
+	status := http.StatusOK
+	if response, ok := result.(StatusResponse); ok {
+		status = response.Status
+		result = response.Value
+	}
+	if status < http.StatusOK || status > 599 {
+		WriteError(ctx, fmt.Errorf("invalid successful response status %d", status))
+		return
+	}
+
 	if response, ok := result.(Response); ok {
 		if localizer := GetLocalizer(ctx); localizer != nil && response.Message != "" {
 			translated, err := localizer.Localize(&i18n.LocalizeConfig{MessageID: response.Message})
@@ -61,12 +97,24 @@ func writeSuccess(ctx *gin.Context, result interface{}) {
 				response.Message = translated
 			}
 		}
-		ctx.JSON(http.StatusOK, response)
+		result = response
+	} else if config != nil && config.ResponseMode() == "envelope" {
+		result = Response{Code: status, Message: "success", Data: result}
+	} else if result == nil {
+		result = Response{Code: status, Message: "success"}
+	}
+
+	if status == http.StatusNoContent || status == http.StatusNotModified || ctx.Request != nil && ctx.Request.Method == http.MethodHead {
+		ctx.Status(status)
 		return
 	}
-	if result == nil {
-		ctx.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "success"})
+
+	body, err := json.Marshal(result)
+	if err != nil {
+		WriteError(ctx, fmt.Errorf("marshal successful response: %w", err))
 		return
 	}
-	ctx.JSON(http.StatusOK, result)
+	ctx.Header("Content-Type", "application/json; charset=utf-8")
+	ctx.Status(status)
+	_, _ = ctx.Writer.Write(body)
 }

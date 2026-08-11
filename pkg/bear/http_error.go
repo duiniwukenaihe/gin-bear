@@ -19,11 +19,11 @@ func WriteError(ctx *gin.Context, err error) {
 		return
 	}
 	ctx.Abort()
+	status, response := errorResponse(ctx, err)
+	logHTTPError(ctx, err, status, response.Code)
 	if ctx.Writer.Written() {
 		return
 	}
-	status, response := errorResponse(ctx, err)
-	logHTTPError(ctx, err, status, response.Code)
 	ctx.AbortWithStatusJSON(status, response)
 }
 

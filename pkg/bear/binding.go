@@ -145,9 +145,6 @@ func isSignedInteger(kind reflect.Kind) bool {
 }
 
 func bindRequest(ctx *gin.Context, request interface{}) error {
-	if err := bindURIFields(ctx, request); err != nil {
-		return err
-	}
 	if err := bindQueryFields(ctx, request); err != nil {
 		return err
 	}
@@ -174,6 +171,9 @@ func bindRequest(ctx *gin.Context, request interface{}) error {
 			}
 			return fmt.Errorf("invalid trailing JSON content: %w", err)
 		}
+	}
+	if err := bindURIFields(ctx, request); err != nil {
+		return err
 	}
 	if binding.Validator != nil {
 		return binding.Validator.ValidateStruct(request)
