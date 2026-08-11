@@ -122,6 +122,7 @@ type Bear struct {
 	pluginMode                bool // 标记当前是否处于插件加载模式
 	metricsRegistered         atomic.Bool
 	tracingRegistered         atomic.Bool
+	webSocketRoutes           atomic.Int64
 }
 
 type applyState uint8
@@ -654,6 +655,9 @@ func validateProductionSecurity(config *SysConfig) error {
 	if config == nil {
 		return nil
 	}
+	if err := validateProductionTrustedProxies(config); err != nil {
+		return err
+	}
 	if config.Auth != nil {
 		if isWeakProductionJWTSecret(config.Auth.JWTSecret) {
 			return fmt.Errorf("weak jwt secret is not allowed in production")
@@ -921,6 +925,16 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 		// 3. 获取 WS 配置并初始化升级程序
 		config := b.runtime.Config
 		policy := webSocketPolicyForConfig(config)
+		if !b.runtime.acquireWebSocketConnection(policy.maxConnections) {
+			WriteError(ctx, NewStatusError(
+				http.StatusServiceUnavailable,
+				http.StatusServiceUnavailable,
+				"websocket connection limit reached",
+				nil,
+			))
+			return
+		}
+		defer b.runtime.releaseWebSocketConnection(policy.maxConnections)
 		var wsConfig *WebSocketConfig
 		if config != nil {
 			wsConfig = config.WS
@@ -988,6 +1002,7 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 			}
 		}
 	})
+	b.webSocketRoutes.Add(1)
 	return b
 }
 
@@ -1402,11 +1417,31 @@ func (b *Bear) buildStrictApplication(ctx context.Context) error {
 		if err := b.injectStrictBeans(); err != nil {
 			return err
 		}
+		if err := b.validateStrictWebSocketRoutes(); err != nil {
+			return err
+		}
 		if b.sealStableStrictBuild(version, beanCount) {
 			return nil
 		}
 	}
 	return ErrBuildRegistrationLoop
+}
+
+func (b *Bear) validateStrictWebSocketRoutes() error {
+	if b == nil || b.webSocketRoutes.Load() == 0 {
+		return nil
+	}
+	config := b.runtime.Config
+	if config == nil || config.WS == nil {
+		return errors.New("websocket.allowed_origins must contain an explicit origin when strict WebSocket routes are registered")
+	}
+	for _, origin := range config.WS.GetAllowedOrigins() {
+		origin = strings.TrimSpace(origin)
+		if origin != "" && origin != "*" {
+			return nil
+		}
+	}
+	return errors.New("websocket.allowed_origins must contain an explicit origin when strict WebSocket routes are registered")
 }
 
 func (b *Bear) injectStrictBeans() error {

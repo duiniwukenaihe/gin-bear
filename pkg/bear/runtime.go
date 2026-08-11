@@ -18,17 +18,18 @@ type HTTPMetrics = httpMetricsRegistry
 
 // Runtime contains state owned by one Bear application.
 type Runtime struct {
-	Config            *SysConfig
-	Logger            *slog.Logger
-	Container         *BeanFactory
-	Lifecycle         *Lifecycle
-	Metrics           *HTTPMetrics
-	TracerProvider    oteltrace.TracerProvider
-	TextMapPropagator propagation.TextMapPropagator
-	readinessChecks   *readinessCheckCoordinator
-	hijackedMu        sync.Mutex
-	hijacked          map[io.Closer]struct{}
-	hijackedClosing   bool
+	Config               *SysConfig
+	Logger               *slog.Logger
+	Container            *BeanFactory
+	Lifecycle            *Lifecycle
+	Metrics              *HTTPMetrics
+	TracerProvider       oteltrace.TracerProvider
+	TextMapPropagator    propagation.TextMapPropagator
+	readinessChecks      *readinessCheckCoordinator
+	hijackedMu           sync.Mutex
+	hijacked             map[io.Closer]struct{}
+	hijackedClosing      bool
+	webSocketConnections atomic.Int64
 }
 
 type legacyFacade struct {
@@ -76,6 +77,28 @@ func (r *Runtime) trackHijackedConnection(connection io.Closer) bool {
 	r.hijacked[connection] = struct{}{}
 	r.hijackedMu.Unlock()
 	return true
+}
+
+func (r *Runtime) acquireWebSocketConnection(limit int64) bool {
+	if r == nil || limit <= 0 {
+		return true
+	}
+	for {
+		current := r.webSocketConnections.Load()
+		if current >= limit {
+			return false
+		}
+		if r.webSocketConnections.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+func (r *Runtime) releaseWebSocketConnection(limit int64) {
+	if r == nil || limit <= 0 {
+		return
+	}
+	r.webSocketConnections.Add(-1)
 }
 
 func (r *Runtime) beginHijackedShutdown() {
