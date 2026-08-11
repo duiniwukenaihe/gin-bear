@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -198,12 +199,24 @@ func RecoveryMiddleware() gin.HandlerFunc {
 					"category", runtimePanicCategory(err),
 					"route", metricRoute(c),
 				)
-				c.AbortWithStatusJSON(500, Response{
-					Code:    500,
-					Message: fmt.Sprintf("Internal Server Error (RID: %v)", rid),
-				})
+				abortRecoveredResponse(c, rid)
 			}
 		}()
 		c.Next()
 	}
+}
+
+func abortRecoveredResponse(ctx *gin.Context, rid any) {
+	ctx.Abort()
+	if ctx.Writer.Written() {
+		return
+	}
+	if ctx.Request != nil && ctx.Request.Method == http.MethodHead {
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	ctx.AbortWithStatusJSON(http.StatusInternalServerError, Response{
+		Code:    http.StatusInternalServerError,
+		Message: fmt.Sprintf("Internal Server Error (RID: %v)", rid),
+	})
 }

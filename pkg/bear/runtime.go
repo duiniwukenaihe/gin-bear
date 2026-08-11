@@ -2,7 +2,6 @@ package bear
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -225,14 +224,7 @@ func runtimeRecoveryMiddleware(runtime *Runtime) gin.HandlerFunc {
 					"category", runtimePanicCategory(recovered),
 					"route", metricRoute(ctx),
 				)
-				ctx.Abort()
-				if ctx.Writer.Written() {
-					return
-				}
-				ctx.AbortWithStatusJSON(500, Response{
-					Code:    500,
-					Message: fmt.Sprintf("Internal Server Error (RID: %v)", rid),
-				})
+				abortRecoveredResponse(ctx, rid)
 			}
 		}()
 		ctx.Next()
