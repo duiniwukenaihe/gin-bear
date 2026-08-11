@@ -144,6 +144,9 @@ func strictFairingStateFor(ctx *gin.Context) *strictFairingState {
 }
 
 func runEnteredRequestFairings(ctx *gin.Context, state *strictFairingState, fairings []Fairing) error {
+	if state == nil || requestFairingTerminal(ctx) {
+		return nil
+	}
 	for _, fairing := range fairings {
 		if requestFairingTerminal(ctx) {
 			return nil
@@ -160,6 +163,9 @@ func runEnteredRequestFairings(ctx *gin.Context, state *strictFairingState, fair
 }
 
 func runEnteredResponseFairings(state *strictFairingState, result any) (any, error) {
+	if state == nil {
+		return result, nil
+	}
 	response := result
 	for i := len(state.entered) - 1; i >= 0; i-- {
 		transformed, err := state.entered[i].OnResponse(response)

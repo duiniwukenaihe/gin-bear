@@ -94,22 +94,34 @@ func (c *terminalController) Build(app *Bear) {
 }
 
 func TestControllerFairingTerminal(t *testing.T) {
-	called := false
-	app := Ignite(NewSysConfig())
-	app.Mount("/api", &terminalController{
-		fairing: &terminalControllerFairing{},
-		called:  &called,
-	})
-	if err := app.ApplyAll(context.Background()); err != nil {
-		t.Fatalf("ApplyAll() error = %v", err)
-	}
+	for _, tt := range []struct {
+		name   string
+		strict bool
+	}{
+		{name: "compatibility", strict: false},
+		{name: "strict", strict: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			config := NewSysConfig()
+			config.SetFrameworkStrict(tt.strict)
+			app := Ignite(config)
+			app.Mount("/api", &terminalController{
+				fairing: &terminalControllerFairing{},
+				called:  &called,
+			})
+			if err := app.ApplyAll(context.Background()); err != nil {
+				t.Fatalf("ApplyAll() error = %v", err)
+			}
 
-	response := performRequest(app, httptest.NewRequest(http.MethodGet, "/api/direct", nil))
-	if response.Code != http.StatusForbidden || response.Body.String() != "blocked" {
-		t.Fatalf("response = %d %q", response.Code, response.Body.String())
-	}
-	if called {
-		t.Fatal("direct controller handler ran after Fairing wrote a response")
+			response := performRequest(app, httptest.NewRequest(http.MethodGet, "/api/direct", nil))
+			if response.Code != http.StatusForbidden || response.Body.String() != "blocked" {
+				t.Fatalf("response = %d %q", response.Code, response.Body.String())
+			}
+			if called {
+				t.Fatal("direct controller handler ran after Fairing wrote a response")
+			}
+		})
 	}
 }
 

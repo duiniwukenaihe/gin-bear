@@ -207,30 +207,50 @@ func (h *webSocketTerminalHandler) OnConnect(*gin.Context, *websocket.Conn) erro
 }
 
 func TestWebSocketFairingTerminal(t *testing.T) {
-	app := Ignite(NewSysConfig())
-	app.Attach(&webSocketTerminalFairing{})
-	handler := &webSocketTerminalHandler{}
-	app.HandleWS("/ws", handler)
-	server := httptest.NewServer(app)
-	defer server.Close()
+	for _, tt := range []struct {
+		name   string
+		strict bool
+	}{
+		{name: "compatibility", strict: false},
+		{name: "strict", strict: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			config := NewSysConfig()
+			config.SetFrameworkStrict(tt.strict)
+			app := Ignite(config)
+			app.Attach(&webSocketTerminalFairing{})
+			handler := &webSocketTerminalHandler{}
+			app.HandleWS("/ws", handler)
+			server := httptest.NewServer(app)
+			defer server.Close()
 
-	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws", nil)
-	if connection != nil {
-		connection.Close()
-		t.Fatal("WebSocket upgraded after Fairing wrote a response")
-	}
-	if err == nil {
-		t.Fatal("WebSocket dial succeeded after Fairing wrote a response")
-	}
-	if response == nil || response.StatusCode != http.StatusUnauthorized {
-		status := 0
-		if response != nil {
-			status = response.StatusCode
-		}
-		t.Fatalf("WebSocket response status = %d, want %d", status, http.StatusUnauthorized)
-	}
-	if handler.connected {
-		t.Fatal("WebSocket handler ran after Fairing wrote a response")
+			connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws", nil)
+			if connection != nil {
+				connection.Close()
+				t.Fatal("WebSocket upgraded after Fairing wrote a response")
+			}
+			if err == nil {
+				t.Fatal("WebSocket dial succeeded after Fairing wrote a response")
+			}
+			if response == nil || response.StatusCode != http.StatusUnauthorized {
+				status := 0
+				if response != nil {
+					status = response.StatusCode
+				}
+				t.Fatalf("WebSocket response status = %d, want %d", status, http.StatusUnauthorized)
+			}
+			body, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read WebSocket rejection body: %v", readErr)
+			}
+			if string(body) != "unauthorized" {
+				t.Fatalf("WebSocket response body = %q, want unauthorized", body)
+			}
+			if handler.connected {
+				t.Fatal("WebSocket handler ran after Fairing wrote a response")
+			}
+		})
 	}
 }
 

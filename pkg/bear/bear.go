@@ -941,6 +941,9 @@ func (b *Bear) frameworkStrict() bool {
 }
 
 func (b *Bear) runStrictGlobalFairings(ctx *gin.Context, state *strictFairingState) error {
+	if state == nil || requestFairingTerminal(ctx) {
+		return nil
+	}
 	if state.globalStarted {
 		return nil
 	}
@@ -951,6 +954,9 @@ func (b *Bear) runStrictGlobalFairings(ctx *gin.Context, state *strictFairingSta
 func (b *Bear) runPipelineRequestFairings(ctx *gin.Context, routeFairings []Fairing) error {
 	if !b.frameworkStrict() {
 		return b.runRequestFairings(ctx, routeFairings)
+	}
+	if requestFairingTerminal(ctx) {
+		return nil
 	}
 	state := strictFairingStateFor(ctx)
 	if err := b.runStrictGlobalFairings(ctx, state); err != nil {
@@ -969,6 +975,9 @@ func (b *Bear) runPipelineResponseFairings(ctx *gin.Context, result any, routeFa
 			return nil, err
 		}
 		return runResponseFairings(routeFairings, response)
+	}
+	if ctx == nil {
+		return result, nil
 	}
 	return runEnteredResponseFairings(strictFairingStateFor(ctx), result)
 }
