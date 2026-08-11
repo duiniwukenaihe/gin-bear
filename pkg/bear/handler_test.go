@@ -228,6 +228,45 @@ func TestStatusResponseWritesStatus(t *testing.T) {
 	assertDecodedJSON(t, response.Body.Bytes(), "created")
 }
 
+func TestStatusResponseRejectsInvalidStatus(t *testing.T) {
+	for _, status := range []int{199, 600} {
+		t.Run(fmt.Sprintf("status %d", status), func(t *testing.T) {
+			app := Ignite(NewSysConfig())
+			app.Handle(http.MethodGet, "/value", func() StatusResponse {
+				return WithStatus(status, "ignored")
+			})
+
+			response := performRequest(app, httptest.NewRequest(http.MethodGet, "/value", nil))
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+			}
+			assertSingleJSONValue(t, response.Body.Bytes())
+		})
+	}
+}
+
+func TestEnvelopeResponseIsNotWrappedAgain(t *testing.T) {
+	config := NewSysConfig()
+	if err := config.SetResponseMode("envelope"); err != nil {
+		t.Fatal(err)
+	}
+	app := Ignite(config)
+	want := Response{Code: 701, Message: "custom", Data: "value"}
+	app.Handle(http.MethodGet, "/value", func() Response { return want })
+
+	response := performRequest(app, httptest.NewRequest(http.MethodGet, "/value", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	var body Response
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != want.Code || body.Message != want.Message || body.Data != want.Data {
+		t.Fatalf("body = %#v, want %#v", body, want)
+	}
+}
+
 func TestBufferedSuccessSkipsBodiesWhenHTTPForbidsThem(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -253,6 +292,33 @@ func TestBufferedSuccessSkipsBodiesWhenHTTPForbidsThem(t *testing.T) {
 			if response.Body.Len() != 0 {
 				t.Fatalf("body = %q, want empty", response.Body.String())
 			}
+		})
+	}
+}
+
+func TestNoBodyResponsesValidatePayloadBeforeCommit(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		status int
+	}{
+		{name: "no content", method: http.MethodGet, status: http.StatusNoContent},
+		{name: "not modified", method: http.MethodGet, status: http.StatusNotModified},
+		{name: "head", method: http.MethodHead, status: http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := Ignite(NewSysConfig())
+			app.Handle(tt.method, "/value", func() StatusResponse {
+				return WithStatus(tt.status, func() {})
+			})
+
+			response := performRequest(app, httptest.NewRequest(tt.method, "/value", nil))
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+			}
+			assertSingleJSONValue(t, response.Body.Bytes())
 		})
 	}
 }

@@ -104,14 +104,13 @@ func writeSuccessWithConfig(ctx *gin.Context, config *SysConfig, result any) {
 		result = Response{Code: status, Message: "success"}
 	}
 
-	if status == http.StatusNoContent || status == http.StatusNotModified || ctx.Request != nil && ctx.Request.Method == http.MethodHead {
-		ctx.Status(status)
-		return
-	}
-
 	body, err := json.Marshal(result)
 	if err != nil {
 		WriteError(ctx, fmt.Errorf("marshal successful response: %w", err))
+		return
+	}
+	if status == http.StatusNoContent || status == http.StatusNotModified || ctx.Request != nil && ctx.Request.Method == http.MethodHead {
+		ctx.Status(status)
 		return
 	}
 	ctx.Header("Content-Type", "application/json; charset=utf-8")
