@@ -656,8 +656,6 @@ func (b *Bear) MountE(group string, classes ...IClass) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
-	b.eRegistrationMu.Lock()
-	defer b.eRegistrationMu.Unlock()
 	beans := make([]Bean, 0, len(classes))
 	for _, class := range classes {
 		beans = append(beans, class)
@@ -666,6 +664,8 @@ func (b *Bear) MountE(group string, classes ...IClass) error {
 	if err != nil {
 		return fmt.Errorf("register mounted controllers: %w", err)
 	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
 	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
 		return fmt.Errorf("register mounted controllers: %w", err)
 	}
@@ -708,12 +708,12 @@ func (b *Bear) BeansE(beans ...Bean) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
-	b.eRegistrationMu.Lock()
-	defer b.eRegistrationMu.Unlock()
 	values, names, err := prepareStrictBeans(beans)
 	if err != nil {
 		return err
 	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
 	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
 		return fmt.Errorf("register beans: %w", err)
 	}
@@ -778,8 +778,6 @@ func (b *Bear) AddModuleE(modules ...Module) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
-	b.eRegistrationMu.Lock()
-	defer b.eRegistrationMu.Unlock()
 	for index, mod := range modules {
 		if mod == nil || isNilBean(mod) {
 			return fmt.Errorf("module item %d (%T) must not be nil", index, mod)
@@ -795,6 +793,8 @@ func (b *Bear) AddModuleE(modules ...Module) error {
 	if err != nil {
 		return fmt.Errorf("register modules: %w", err)
 	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
 	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
 		return fmt.Errorf("register modules: %w", err)
 	}

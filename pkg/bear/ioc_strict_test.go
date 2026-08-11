@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear/testfixtures/staticinjectora"
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear/testfixtures/staticinjectorb"
@@ -90,6 +91,31 @@ func (b *strictLifecycleClosingBean) Name() string {
 	b.once.Do(b.onName)
 	return "lifecycle-closing"
 }
+
+type strictReentrantBean struct {
+	name   string
+	onName func()
+	once   sync.Once
+}
+
+func (b *strictReentrantBean) Name() string {
+	b.once.Do(b.onName)
+	return b.name
+}
+
+type strictReentrantModule struct {
+	name    string
+	beans   []Bean
+	onBeans func()
+	once    sync.Once
+}
+
+func (m *strictReentrantModule) Name() string { return m.name }
+func (m *strictReentrantModule) Beans() []Bean {
+	m.once.Do(m.onBeans)
+	return m.beans
+}
+func (*strictReentrantModule) Build(*Bear) {}
 
 type strictConcurrentBean[T any] struct {
 	name string
@@ -533,6 +559,56 @@ func TestStrictIOCConcurrentERegistration(t *testing.T) {
 	if mounted["/concurrent-a"] != 3 || mounted["/concurrent-b"] != 3 {
 		t.Fatalf("mount metadata = %#v, want both groups with 3 classes", mounted)
 	}
+}
+
+func TestStrictIOCUserCallbacksCanReenterERegistration(t *testing.T) {
+	t.Run("bean name callback", func(t *testing.T) {
+		app := Ignite(NewSysConfig())
+		inner := &strictBatchOtherBean{name: "reentrant-name-inner"}
+		outer := &strictReentrantBean{
+			name: "reentrant-name-outer",
+			onName: func() {
+				if err := app.BeansE(inner); err != nil {
+					t.Errorf("nested BeansE() error = %v", err)
+				}
+			},
+		}
+
+		done := make(chan error, 1)
+		go func() { done <- app.BeansE(outer) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("BeansE() error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("BeansE() deadlocked while Bean.Name re-entered strict registration")
+		}
+	})
+
+	t.Run("module beans callback", func(t *testing.T) {
+		app := Ignite(NewSysConfig())
+		inner := &strictBatchOtherBean{name: "reentrant-module-inner"}
+		module := &strictReentrantModule{
+			name: "reentrant-module",
+			onBeans: func() {
+				if err := app.BeansE(inner); err != nil {
+					t.Errorf("nested BeansE() error = %v", err)
+				}
+			},
+		}
+
+		done := make(chan error, 1)
+		go func() { done <- app.AddModuleE(module) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("AddModuleE() error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("AddModuleE() deadlocked while Module.Beans re-entered strict registration")
+		}
+	})
 }
 
 func TestStrictIOCLateEmptyRegistrationChecksLifecycle(t *testing.T) {
