@@ -2,7 +2,7 @@
 
 All notable changes to gin-bear are documented in this file.
 
-## [v0.10.0-rc.1] - Unreleased
+## [v0.9.2] - Unreleased
 
 ### Added
 
@@ -12,6 +12,9 @@ All notable changes to gin-bear are documented in this file.
   generated OpenAPI validation.
 - A CLI-only release process for `cmd/bear` archives, SHA-256 checksums, source
   archives, and release metadata.
+- Opt-in strict runtime contracts through `framework.strict`, independent raw
+  or envelope responses through `framework.response_mode`, and
+  error-returning `IgniteE` and `Serve` startup APIs.
 
 ### Changed
 
@@ -20,11 +23,28 @@ All notable changes to gin-bear are documented in this file.
 - MySQL uses `database.tls`; legacy `database.sslmode` is ignored for MySQL.
 - Redis-backed token revocation reports a typed availability error when Redis
   is not configured.
+- Existing applications retain the compatibility defaults
+  `framework.strict: false` and `framework.response_mode: raw`. Strict mode is
+  an explicit migration; the security boundary fixes below apply in both
+  modes.
+- JWT input is capped at 16 KiB before parsing, request context reaches Redis
+  revocation checks, and Casbin enforcement uses only the current Bear
+  container's injected enforcer.
+- Production rejects unsafe WebSocket origins and out-of-range resource
+  limits. Strict and production runtimes default to 1,024 concurrent
+  WebSocket connections; compatibility development remains unlimited when no
+  limit is configured.
+- Strict route Fairings and WebSocket handlers now fail startup on missing
+  dependencies, module Beans are injected before Build, and cancellation no
+  longer hides rollback failures.
+- A Bear serving lifecycle is single-use, and an established strict Gin mode
+  cannot be overwritten by a compatibility instance with a conflicting mode.
 
 ### Upgrade Notes
 
-Read [the v0.9 to v0.10 migration guide](docs/migration-v0.9-to-v0.10.md)
-before deploying. It records exact behavior changes and rollback steps.
+Read [the v0.9.2 strict migration guide](docs/migration-v0.9-to-v0.10.md)
+before deploying. It separates compatibility defaults, strict opt-in behavior,
+forced security changes, and rollback steps.
 
 ### Release Candidate Verification
 
@@ -48,8 +68,9 @@ before deploying. It records exact behavior changes and rollback steps.
   used a dirty worktree and is retained only as development-time validation;
   it is not evidence for the current commit. Formal release-candidate evidence
   requires a complete `make verify-rc` run from the clean, committed fixes.
-- The candidate awaits human review. It is not published, no release tag has
-  been created, and no branch or artifact has been pushed by this verification.
+- The candidate awaits human review. It has not been pushed, tagged, or
+  published; the documentation and focused tests are not final release-gate
+  evidence.
 
 ## [0.9.1]
 

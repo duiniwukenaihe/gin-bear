@@ -131,7 +131,7 @@ func createLegacyFixture(t *testing.T, repository string) string {
 
 go 1.25.0
 
-require github.com/duiniwukenaihe/gin-bear v0.10.0-rc.1
+require github.com/duiniwukenaihe/gin-bear v0.9.2
 
 replace github.com/duiniwukenaihe/gin-bear => %s
 `, repository))
@@ -147,7 +147,7 @@ func createGeneratedFixture(t *testing.T, repository, bearCLI string) string {
 		"new", "generated-release-check",
 		"--module", "example.com/generated-release-check",
 		"--directory", directory,
-		"--framework-version", "v0.10.0-rc.1",
+		"--framework-version", "v0.9.2",
 	)
 	appPath := filepath.Join(directory, "internal", "app", "app.go")
 	generatedApp := readFile(t, appPath)

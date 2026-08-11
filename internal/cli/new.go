@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const developmentFrameworkVersion = "v0.10.0-rc.1"
+const developmentFrameworkVersion = "v0.9.2"
 
 func defaultFrameworkVersion() string {
 	version := strings.TrimSpace(bear.Version)

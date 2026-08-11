@@ -1,15 +1,60 @@
-# Migrating From v0.9 To v0.10
+# Migrating v0.9 Applications To v0.9.2
 
-v0.10 strengthens production defaults and changes several operational
-contracts. Test the configuration and deployment in staging before switching
-traffic. The examples in `examples/migration`, `examples/basic`, and
-`examples/auth` are compiled by `go test ./...`.
+The established filename is retained for existing links, but this revision
+documents the unpublished `v0.9.2` candidate. It has not been pushed, tagged,
+or published. v0.9.2 strengthens production defaults, adds opt-in runtime
+contracts, and changes several operational boundaries. Test the configuration
+and deployment in staging before switching traffic. The examples in
+`examples/migration`, `examples/basic`, and `examples/auth` are compiled by
+`go test ./...`.
+
+## Strict Migration
+
+The compatibility defaults are `framework.strict: false` and
+`framework.response_mode: raw`. Existing applications keep their historical
+IoC, Fairing, lifecycle, and bare-response behavior until each runtime contract
+is enabled. The `framework.strict` and `framework.response_mode` keys are
+independent. Use this strict migration sequence in staging:
+
+1. Keep configuration loading strict with `config.strict: true`. Production
+   forces this setting and rejects `false`.
+2. Replace panic-based startup with `LoadConfig` plus `IgniteE`, and propagate
+   startup errors to the process boundary.
+3. Set `framework.strict: true`, then resolve every missing, duplicate, or
+   ambiguous dependency reported by `ApplyAll` or `Serve`.
+4. Keep `framework.response_mode: raw` while validating handlers. Change it to
+   `envelope` only after clients accept the response envelope.
+5. Move process signal ownership to the application entry point and call
+   `Serve(ctx)`. `Launch` remains the signal-aware compatibility wrapper.
+6. Register each `CasbinEnforcer` in its current Bear container before
+   attaching `CasbinFairing`; there is no process-global fallback.
+7. Validate the 16 KiB JWT cap and every documented WebSocket boundary,
+   including `websocket.max_connections`, before production rollout.
+
+```yaml
+config:
+  strict: true
+  framework.strict: true
+  framework.response_mode: envelope
+  websocket.max_message_bytes: 1048576
+  websocket.read_timeout: 60s
+  websocket.write_timeout: 10s
+  websocket.ping_interval: 30s
+  websocket.max_connections: 1024
+```
+
+The forced security changes apply in both compatibility and strict modes:
+Fairings stop after Abort or a committed response, URI values remain
+authoritative, response writers do not append a second JSON value, production
+rejects wildcard WebSocket origins and all-network trusted proxies, JWT input
+is capped at 16 KiB, request context reaches Redis revocation checks, and
+Casbin authorization is isolated to the current Bear container.
 
 ## Compatibility Changes
 
 ### Strict Production Configuration
 
-v0.10 uses **strict production configuration**. `LoadConfig(paths...)` returns
+v0.9.2 uses **strict production configuration**. `LoadConfig(paths...)` returns
 file-read, syntax, unknown-field, and validation errors; YAML unknown fields
 and JSON unknown fields are rejected. Production also rejects
 `config.strict: false`. `InitConfig()` keeps its v0.9 signature but panics
@@ -31,7 +76,7 @@ Increase the specific value only for workloads that require larger requests.
 
 ### MySQL TLS
 
-For **MySQL TLS**, v0.10 reads `database.tls` as the driver TLS mode or a
+For **MySQL TLS**, v0.9.2 reads `database.tls` as the driver TLS mode or a
 registered TLS configuration name. `database.sslmode` remains a deprecated
 PostgreSQL compatibility setting and is ignored for MySQL, with a warning.
 Move MySQL settings to `database.tls` before deployment.
@@ -61,9 +106,35 @@ Redis client exists, but `RevokeToken` and `IsTokenBlacklisted` return
 `errors.Is(err, bear.ErrTokenRevocationUnavailable)` and treat it as a failed
 logout/revocation operation rather than assuming the token was revoked.
 
+JWT parsing rejects inputs larger than 16 KiB before signature or claims
+processing. Request authentication uses `ParseTokenContext` so cancellation and
+deadlines reach Redis blacklist operations; the legacy `ParseToken` remains a
+`context.Background()` compatibility wrapper for non-request callers.
+
+### Casbin Container Injection
+
+`CasbinFairing` now requires a `CasbinEnforcer` injected from the current Bear
+container. Register the enforcer before `ApplyAll` or `Serve`; do not rely on
+`GetByType` or a different Bear instance. Missing injection fails strict
+startup. Compatibility mode fails the request with a generic 500, and internal
+Casbin enforcement errors are logged without exposing their cause to clients.
+Policy denials remain 403.
+
+### WebSocket Boundaries
+
+Production rejects wildcard `websocket.allowed_origins`; strict applications
+that register a WebSocket route require an explicit allowlist before lifecycle
+initialization. An omitted or zero handshake timeout uses the 10-second runtime
+default; explicit values accept 100-30000 ms. The other fixed limits are 1
+byte-16 MiB messages, 1s-5m reads, 100ms-1m writes, and 1s-5m pings strictly
+shorter than the read timeout. `websocket.max_connections` accepts 1-100000 and
+defaults to 1024 in strict or production mode. Compatibility development mode
+remains unlimited only when the key is omitted. A full runtime returns 503
+without upgrading.
+
 ### Dynamic Plugins
 
-In v0.10, dynamic Go plugins remain experimental and are loaded only before
+In v0.9.2, dynamic Go plugins remain experimental and are loaded only before
 `ApplyAll`. A running application returns
 `bear.ErrPluginHotReloadUnsupported` from `LoadPlugin` and `ReloadPlugin`.
 Deploy a changed plugin by starting a new instance, passing readiness checks,
@@ -71,12 +142,13 @@ and rolling traffic over; do not attempt an in-process plugin replacement.
 
 ### Comparable Configuration Collection Fields
 
-During the v0.10 prerelease, `AuthConfig.PublicPaths` and
-`WebSocketConfig.AllowedOrigins` changed from `[]string` to `*[]string`. This
-preserves v0.9 struct comparability: a struct containing a slice cannot be
-compared with `==`, while a struct containing a pointer to a slice can.
+`AuthConfig.PublicPaths` and `WebSocketConfig.AllowedOrigins` are new in v0.9.2;
+v0.9.1 did not expose these fields. They use `*[]string` so the containing
+configuration structs preserve v0.9 struct comparability: a struct containing
+a slice cannot be compared with `==`, while a struct containing a pointer to a
+slice can.
 
-Source assignments must be migrated. Prefer the copy-safe accessors:
+New code should prefer the copy-safe accessors:
 
 ```go
 config.Auth.SetPublicPaths([]string{"/health", "/login"})
@@ -87,8 +159,9 @@ origins := config.WS.GetAllowedOrigins()
 ```
 
 `SetPublicPaths` and `GetPublicPaths`, and `SetAllowedOrigins` and
-`GetAllowedOrigins`, make defensive copies. Existing direct assignments can
-instead take the address of a local slice, but then the caller owns aliasing:
+`GetAllowedOrigins`, make defensive copies. Code that used an early unpublished
+candidate with direct slice assignments must migrate to the accessors or take
+the address of a local slice, in which case the caller owns aliasing:
 
 ```go
 paths := []string{"/health", "/login"}
@@ -111,20 +184,23 @@ not provide value-equality semantics.
    JWT secret.
 4. Decide whether metrics should be enabled and protect the metrics endpoint.
 5. Update logout flows to detect `ErrTokenRevocationUnavailable`.
-6. Migrate direct collection assignments to the new setter/getter APIs.
-7. Run `GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify` and deploy
+6. Only if the application used an early unpublished v0.9.2 candidate, migrate
+   direct collection assignments to the new setter/getter APIs.
+7. Follow the strict migration above, including current-container Casbin
+   injection and explicit response-mode client testing.
+8. Run `GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify` and deploy
    through a readiness-checked rollout.
 
 ## Rollback
 
-1. Stop routing traffic to v0.10 and restore the previous v0.9.1 archive.
+1. Stop routing traffic to v0.9.2 and restore the previous v0.9.1 archive.
 2. Restore the v0.9 configuration expected by the previous binary: use
    `database.sslmode` for MySQL if that deployment relied on it, remove
-   v0.10-only strict configuration keys, and restore the prior request limit
+   v0.9.2-only strict runtime keys, and restore the prior request limit
    only after evaluating its security impact.
 3. Keep the existing database schema; framework rollback does not require an
    automatic schema rollback. Use reviewed migration `Down` SQL only when a
    separately deployed schema migration must be reverted.
 4. Verify `/ready` and `/version` on the restored binary before routing traffic
-   back. Record the failed v0.10 commit, configuration diff, and token
+   back. Record the failed v0.9.2 commit, configuration diff, and token
    revocation availability for follow-up.

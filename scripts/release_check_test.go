@@ -340,7 +340,7 @@ func TestReleaseExpectedVersionComesFromPushedTag(t *testing.T) {
 	if !strings.Contains(workflow, "RC_EXPECTED_VERSION: ${{ github.ref_name }}") {
 		t.Fatalf("release workflow does not pass the pushed tag as the expected module version:\n%s", workflow)
 	}
-	if strings.Contains(workflow, "RC_EXPECTED_VERSION: v0.10.0-rc.1") {
+	if strings.Contains(workflow, "RC_EXPECTED_VERSION: v0.9.2") {
 		t.Fatalf("release workflow pins every v* tag to rc.1:\n%s", workflow)
 	}
 	if !strings.Contains(workflow, `CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/exp/cmd/apidiff@`) ||
@@ -690,8 +690,8 @@ func TestVerifyRCRejectsBaseThatIsNotHEADAncestor(t *testing.T) {
 func TestVerifyRCValidatesAnnotatedReleaseTagAndRecordsSignatureBoundary(t *testing.T) {
 	repository, artifact, state := fakeRCRepository(t)
 	output, err := runFakeRC(repository, artifact, state,
-		"RC_RELEASE_TAG=v0.10.0-rc.1",
-		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+		"RC_RELEASE_TAG=v0.9.2",
+		"RC_EXPECTED_VERSION=v0.9.2",
 		"RC_VERIFY_TAG_SIGNATURE=false",
 	)
 	if err != nil {
@@ -699,7 +699,7 @@ func TestVerifyRCValidatesAnnotatedReleaseTagAndRecordsSignatureBoundary(t *test
 	}
 	metadata := readTestFile(t, filepath.Join(artifact, "metadata.txt"))
 	for _, want := range []string{
-		"release_tag=v0.10.0-rc.1",
+		"release_tag=v0.9.2",
 		"release_tag_type=tag",
 		"release_tag_target=fixture-commit",
 		"signature_policy=false",
@@ -716,8 +716,8 @@ func TestVerifyRCValidatesAnnotatedReleaseTagAndRecordsSignatureBoundary(t *test
 func TestVerifyRCRequiresExplicitSignaturePolicyForReleaseTags(t *testing.T) {
 	repository, artifact, state := fakeRCRepository(t)
 	output, err := runFakeRC(repository, artifact, state,
-		"RC_RELEASE_TAG=v0.10.0-rc.1",
-		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+		"RC_RELEASE_TAG=v0.9.2",
+		"RC_EXPECTED_VERSION=v0.9.2",
 	)
 	if err == nil {
 		t.Fatalf("verify-rc.sh accepted a release tag without an explicit signature policy:\n%s", output)
@@ -730,8 +730,8 @@ func TestVerifyRCRequiresExplicitSignaturePolicyForReleaseTags(t *testing.T) {
 func TestVerifyRCSignatureVerificationRequiresTrustedKeyring(t *testing.T) {
 	repository, artifact, state := fakeRCRepository(t)
 	output, err := runFakeRC(repository, artifact, state,
-		"RC_RELEASE_TAG=v0.10.0-rc.1",
-		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+		"RC_RELEASE_TAG=v0.9.2",
+		"RC_EXPECTED_VERSION=v0.9.2",
 		"RC_VERIFY_TAG_SIGNATURE=true",
 	)
 	if err == nil {
@@ -749,8 +749,8 @@ func TestVerifyRCSignatureVerificationRequiresTrustedStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, err := runFakeRC(repository, artifact, state,
-		"RC_RELEASE_TAG=v0.10.0-rc.1",
-		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+		"RC_RELEASE_TAG=v0.9.2",
+		"RC_EXPECTED_VERSION=v0.9.2",
 		"RC_VERIFY_TAG_SIGNATURE=true",
 		"RC_TRUSTED_KEYRING="+keyring,
 		"RC_TEST_SIGNATURE_UNTRUSTED=1",
@@ -770,8 +770,8 @@ func TestVerifyRCRecordsTrustedSignatureVerification(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, err := runFakeRC(repository, artifact, state,
-		"RC_RELEASE_TAG=v0.10.0-rc.1",
-		"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+		"RC_RELEASE_TAG=v0.9.2",
+		"RC_EXPECTED_VERSION=v0.9.2",
 		"RC_VERIFY_TAG_SIGNATURE=true",
 		"RC_TRUSTED_KEYRING="+keyring,
 	)
@@ -799,8 +799,8 @@ func TestVerifyRCRejectsInvalidReleaseTagContracts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			repository, artifact, state := fakeRCRepository(t)
 			environment := []string{
-				"RC_RELEASE_TAG=v0.10.0-rc.1",
-				"RC_EXPECTED_VERSION=v0.10.0-rc.1",
+				"RC_RELEASE_TAG=v0.9.2",
+				"RC_EXPECTED_VERSION=v0.9.2",
 				"RC_VERIFY_TAG_SIGNATURE=false",
 			}
 			environment = append(environment, test.env...)
@@ -847,13 +847,22 @@ func TestVerifyRCRejectsSignaturePolicyWithoutReleaseTag(t *testing.T) {
 
 func TestVerifyRCHygieneRejectsUnexpectedLocalBranch(t *testing.T) {
 	repository, artifact, state := fakeRCRepository(t)
-	branches := "main,codex/production-baseline,codex/production-framework-v010,codex/unreviewed"
+	branches := "main,codex/production-baseline,codex/v09x-framework-hardening,codex/unreviewed"
 	output, err := runFakeRC(repository, artifact, state, "RC_TEST_LOCAL_BRANCHES="+branches)
 	if err == nil {
 		t.Fatalf("verify-rc.sh accepted unexpected local branch:\n%s", output)
 	}
 	if !strings.Contains(string(output), "unexpected local branch: codex/unreviewed") {
 		t.Fatalf("local-branch failure is not actionable:\n%s", output)
+	}
+}
+
+func TestVerifyRCHygieneAcceptsV092CandidateBranch(t *testing.T) {
+	repository, artifact, state := fakeRCRepository(t)
+	branches := "main,codex/production-baseline,codex/v09x-framework-hardening"
+	output, err := runFakeRC(repository, artifact, state, "RC_TEST_LOCAL_BRANCHES="+branches)
+	if err != nil {
+		t.Fatalf("verify-rc.sh rejected the v0.9.2 candidate branches: %v\n%s", err, output)
 	}
 }
 
@@ -1507,11 +1516,11 @@ case "${1:-}" in
 		fi
 		;;
 	for-each-ref)
-		branches="${RC_TEST_LOCAL_BRANCHES:-main,codex/production-baseline,codex/production-framework-v010}"
+		branches="${RC_TEST_LOCAL_BRANCHES:-main,codex/production-baseline,codex/v09x-framework-hardening}"
 		printf '%s\n' "${branches}" | tr ',' '\n'
 		;;
 	branch)
-		branches="${RC_TEST_LOCAL_BRANCHES:-main,codex/production-baseline,codex/production-framework-v010}"
+		branches="${RC_TEST_LOCAL_BRANCHES:-main,codex/production-baseline,codex/v09x-framework-hardening}"
 		printf '%s\n' "${branches}" | tr ',' '\n'
 		;;
 	ls-remote)

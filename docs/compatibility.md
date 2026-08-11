@@ -27,10 +27,35 @@ The ID generator is retained as a deprecated method without an enabled config
 flag. gRPC remains a compatibility-only API; its current launch path is not a
 no-op, so enabling it does not produce a no-op warning.
 
-## v0.10 Security Behavior Changes
+## Runtime Modes And Additive APIs
 
-The following changes intentionally tighten runtime behavior without removing
-the v0 public API:
+When the extension keys are absent, the compatibility defaults are
+`framework.strict: false` and `framework.response_mode: raw`. Compatibility
+mode preserves the historical Fairing order, IoC failure timing, lifecycle
+retry behavior, build/init ordering, and bare handler responses. Applications
+opt into strict runtime checks with `framework.strict: true` and opt into
+automatic response envelopes independently with
+`framework.response_mode: envelope`.
+
+`framework.strict` is not the same setting as `config.strict`. The latter
+controls unknown configuration fields and is forced on in production; the
+former controls strict framework runtime behavior and remains opt-in for an
+existing application.
+
+`IgniteE` is the error-returning startup alternative to `Ignite`; the legacy
+API remains a panic-compatible wrapper. `Serve` is the signal-free,
+single-owner serving API; `Launch` remains the signal-aware compatibility
+wrapper. Existing public signatures remain available, while strict migrations
+can use the additive error-returning registration and resolution APIs.
+After a successful serving lifecycle, the Bear instance is not restartable;
+create a new instance for a replacement process. An established strict Gin
+mode also prevents compatibility instances from changing that process-global
+mode.
+
+## v0.9.2 Security Behavior Changes
+
+The following forced security changes intentionally tighten runtime behavior
+in both compatibility and strict modes without removing the v0 public API:
 
 - `LoadConfig(paths ...string) (*SysConfig, error)` is the new error-returning
   loader. `InitConfig()` keeps its old signature but now panics when a present
@@ -53,10 +78,20 @@ the v0 public API:
   rejects that combination.
 - JWT validation remains HS256-only and can require `auth.jwt_issuer` and
   `auth.jwt_audience`. `auth.jwt_clock_skew` is optional and capped at five
-  minutes.
+  minutes. JWT input is capped at 16 KiB before parsing.
 - JWT validation no longer requires Redis to exist. Revocation without Redis
   returns `ErrTokenRevocationUnavailable` instead of dereferencing a nil
-  client.
+  client. Request authentication propagates its context to Redis checks.
+- Casbin authorization uses only the `CasbinEnforcer` injected from the current
+  Bear container. There is no process-global fallback, and internal enforcement
+  errors return a generic client 500.
+- Production WebSocket configuration rejects wildcard origins and all
+  out-of-range timeout, message, and connection limits. Strict WebSocket routes
+  require an explicit origin allowlist, and strict or production runtimes
+  default `websocket.max_connections` to 1024.
+- Fairings stop after Abort or a committed response, URI bindings remain
+  authoritative over query/form/JSON values, and response handling cannot
+  append a second JSON value after commitment.
 - `/metrics` was removed from the default `auth.public_paths`. Add it back
   explicitly only when another access-control boundary protects it.
 - The production example now requires PostgreSQL `sslmode: verify-full`, leaves

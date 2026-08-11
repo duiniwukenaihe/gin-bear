@@ -20,10 +20,18 @@
 4. Build the application binary with `VERSION`, `COMMIT`, and `BUILD_TIME` linker flags.
 5. Confirm `/live`, `/ready`, `/version`, and `/metrics` in the target environment.
 6. Confirm `server.shutdown_timeout`, `health.readiness_timeout`, `log.level`, and `redis.required` match the service's dependency profile.
-7. For a tag release, confirm `.goreleaser.yml` still builds only `cmd/bear`
+7. Confirm the intended `framework.strict` and `framework.response_mode`
+   values. Existing applications default to compatibility mode and raw
+   responses; strict mode and envelope responses require separate migration.
+8. Confirm production startup uses `IgniteE`, the process entry point owns its
+   signal context for `Serve`, and no second serving owner can start.
+9. Confirm each `CasbinFairing` receives a `CasbinEnforcer` from the current
+   Bear container, JWT inputs over 16 KiB are rejected, and WebSocket origin,
+   message, timeout, and connection boundaries match the production guide.
+10. For a tag release, confirm `.goreleaser.yml` still builds only `cmd/bear`
    archives for Linux, macOS, and Windows, plus SHA-256 checksums, source
    archive, changelog text, and release metadata.
-8. Before publishing, run the pinned local snapshot check:
+11. Before publishing, run the pinned local snapshot check:
 
    ```bash
    GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run github.com/goreleaser/goreleaser/v2@v2.17.0 release --snapshot --clean
@@ -58,7 +66,7 @@ workflow exemption, not signature verification. A local release operator with
 an isolated trusted `GNUPGHOME` must run:
 
 ```bash
-RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.10.0-rc.1 RC_EXPECTED_VERSION=v0.10.0-rc.1 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
+RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.9.2 RC_EXPECTED_VERSION=v0.9.2 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
 ```
 
 When `RC_RELEASE_TAG` is non-empty, `RC_VERIFY_TAG_SIGNATURE` is mandatory and
@@ -89,9 +97,12 @@ database root, and records the canonical database and manifest identities.
 The RC path always enforces total coverage `70.0` and every critical group
 `80.0`; lower caller-provided environment values do not reduce these gates.
 
-## v0.10.0-rc.1 Candidate Audit
+## v0.9.2 Candidate Audit
 
-The `v0.10.0-rc.1` candidate is under local verification. It is not tagged or published.
+The `v0.9.2` candidate is under local implementation and focused verification.
+It has not been pushed, tagged, or published. The historical diagnostics below
+are not final gate evidence for the current shared worktree; the main task must
+run the complete candidate gate after all parallel implementation is combined.
 All commands use `GOSUMDB=sum.golang.org` and `GOTOOLCHAIN=go1.25.12`, run in
 the foreground, and complete before the next command starts.
 
@@ -200,7 +211,7 @@ SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_
 By default logs are retained in a `mktemp` directory outside the repository;
 CI sets `RC_ARTIFACT_DIR` under `runner.temp` and uploads it. The final hygiene
 step permits only local `main`, `codex/production-baseline`, and
-`codex/production-framework-v010` branches, including in detached-HEAD CI. It
+`codex/v09x-framework-hardening` branches, including in detached-HEAD CI. It
 limits remote heads to `main` and `codex/production-baseline`, rejects
 container/Kubernetes/Helm files and `coverage.out` at any depth outside `.git`,
 and requires both initial and final worktree status to be empty.
@@ -238,7 +249,7 @@ performed.
 3. Check `/ready` before restoring traffic.
 4. Review `/version` to confirm the running commit.
 5. For framework behavior changes, follow the exact configuration and rollback
-   sequence in [the v0.9 to v0.10 migration guide](migration-v0.9-to-v0.10.md).
+   sequence in [the v0.9.2 strict migration guide](migration-v0.9-to-v0.10.md).
 
 ## Migration Recovery
 

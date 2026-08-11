@@ -439,7 +439,7 @@ check_repository_hygiene() {
 	while IFS= read -r branch; do
 		[[ -z "${branch}" ]] && continue
 		case "${branch}" in
-		main | codex/production-baseline | codex/production-framework-v010) ;;
+		main | codex/production-baseline | codex/v09x-framework-hardening) ;;
 		*)
 			printf 'unexpected local branch: %s\n' "${branch}" >&2
 			failed=1

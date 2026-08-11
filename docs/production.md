@@ -54,6 +54,61 @@ The tested production-loading pattern is in
 `LoadConfig` and returns startup errors to the caller instead of relying on the
 legacy panic behavior.
 
+## Framework Runtime Contract
+
+Configuration-file strictness and framework runtime strictness are separate
+controls. `config.strict` decides whether the loader accepts unknown fields;
+production always forces that setting on. `framework.strict` enables strict
+IoC, Fairing, build, lifecycle, and serving contracts. It does not weaken or
+replace production configuration validation.
+
+Existing applications keep the compatibility defaults
+`framework.strict: false` and `framework.response_mode: raw`. Opt into each
+runtime contract explicitly during migration:
+
+```yaml
+config:
+  strict: true
+  framework.strict: true
+  framework.response_mode: envelope
+```
+
+`framework.response_mode` accepts only `raw` or `envelope`. Raw mode preserves
+existing bare object and array responses. Envelope mode wraps ordinary handler
+results in the framework response envelope; an explicitly returned `Response`
+is not wrapped a second time. Strict mode and response mode are independent.
+
+Use the error-returning startup APIs in production. `IgniteE` returns
+configuration and Gin runtime construction errors instead of panicking. Strict
+dependency, build, and lifecycle errors are returned by `ApplyAll` or `Serve`.
+`Serve` owns one service loop without installing process signal handlers:
+
+```go
+config, err := bear.LoadConfig("application.yaml", "application-prod.yaml")
+if err != nil {
+    return err
+}
+application, err := bear.IgniteE(config)
+if err != nil {
+    return err
+}
+if err := application.Serve(ctx); err != nil {
+    return err
+}
+```
+
+`Ignite` remains a panic-compatible wrapper around `IgniteE`. `Launch` remains
+the signal-aware compatibility wrapper around `Serve`. A second concurrent
+`Serve` or `Launch` on the same Bear returns `ErrAlreadyServing` and does not
+stop the active owner. Once `Serve` has initialized successfully, that Bear is
+single-use; after it exits, create a new Bear instance instead of attempting to
+restart stopped lifecycle components. A repeated call returns
+`ErrAlreadyServing` before binding a listener.
+
+Gin mode is process-global. Once a strict Bear establishes the process mode,
+any later strict or compatibility instance requesting a different mode fails
+with `ErrGinRuntimeConflict` before mutating Gin global state.
+
 ## HTTP Security Defaults
 
 Request headers and bodies default to 1 MiB limits. Tune either bound only for
@@ -83,8 +138,9 @@ browser requests.
 
 ## JWT Authentication
 
-JWT parsing accepts HS256 only. Issuer, audience, and clock skew checks are
-optional; configured clock skew must be between zero and five minutes:
+JWT parsing accepts HS256 only. Tokens larger than 16 KiB are rejected before
+parsing. Issuer, audience, and clock skew checks are optional; configured clock
+skew must be between zero and five minutes:
 
 ```yaml
 auth:
@@ -107,6 +163,20 @@ validation still succeeds. `RevokeToken` and direct blacklist checks return
 instead of panicking. Treat that error as a failed logout/revocation operation.
 The tested typed-error handling pattern is in
 [`examples/auth/main.go`](../examples/auth/main.go).
+
+Request authentication passes the HTTP request context through token parsing
+and Redis blacklist checks. Cancellation and deadlines therefore stop
+revocation I/O instead of being replaced with `context.Background()`.
+
+## Casbin Isolation
+
+Register the `CasbinEnforcer` in the current Bear container before attaching
+`CasbinFairing`. Authorization no longer falls back to the process-wide
+container, so two Bear runtimes cannot accidentally share policy state. In
+strict mode a missing injection fails startup; compatibility mode returns a
+generic HTTP 500 at request time. Casbin enforcement errors are logged with
+internal detail but return only a generic 500 to the client, while policy
+denials remain HTTP 403.
 
 ## Logging
 
@@ -413,7 +483,9 @@ type UpdateUserRequest struct {
 }
 ```
 
-The framework binds URI values first, query/form values second, JSON or form body values third, and then runs validation once.
+The framework binds query/form and JSON body values before URI values, then
+runs validation once. URI values are therefore authoritative and cannot be
+overridden by query, form, or JSON input.
 
 ## WebSocket Origin Policy
 
@@ -421,12 +493,39 @@ Keep `websocket.check_origin: true` in production. Use `websocket.allowed_origin
 
 ```yaml
 websocket:
+  handshake_timeout_ms: 10000
   check_origin: true
   allowed_origins:
     - "https://example.com"
+
+config:
+  websocket.max_message_bytes: 1048576
+  websocket.read_timeout: 60s
+  websocket.write_timeout: 10s
+  websocket.ping_interval: 30s
+  websocket.max_connections: 1024
 ```
 
-Production startup rejects `check_origin: false` unless an explicit allowlist is configured.
+Production rejects `*` in the allowlist and rejects `check_origin: false`
+unless an explicit allowlist is configured. After strict route discovery, a
+strict application with WebSocket routes must have an explicit allowlist.
+
+The enforced WebSocket resource boundaries are:
+
+| Setting | Default | Allowed range |
+| --- | --- | --- |
+| `websocket.handshake_timeout_ms` | 10000 ms | 0/omitted for default, or 100 ms to 30000 ms in production |
+| `websocket.max_message_bytes` | 1 MiB | 1 byte to 16 MiB |
+| `websocket.read_timeout` | 60s | 1s to 5m |
+| `websocket.write_timeout` | 10s | 100ms to 1m |
+| `websocket.ping_interval` | 30s | 1s to 5m and less than the read timeout |
+| `websocket.max_connections` | 1024 in strict or production mode | 1 to 100000 |
+
+Compatibility development mode remains unlimited only when
+`websocket.max_connections` is omitted. A configured zero or negative value is
+invalid. The connection slot is acquired before Upgrade; exceeding the limit
+returns HTTP 503 without upgrading, and failed upgrades or closed connections
+release their slot.
 
 ## Rate Limiting
 
@@ -451,7 +550,7 @@ plugins:
 
 Plugin paths are resolved to absolute paths and must live inside one of the configured directories.
 
-For v0.10, dynamic plugins are a startup-only, experimental integration point.
+For v0.9.2, dynamic plugins are a startup-only, experimental integration point.
 Load every required plugin before `ApplyAll`. Once startup begins, `LoadPlugin` and
 `ReloadPlugin` return `bear.ErrPluginHotReloadUnsupported`; Go plugins cannot
 safely replace lifecycle-owned resources in a live process. Publish the new

@@ -9,7 +9,19 @@ import (
 func TestReleaseDocumentationNamesEveryCompatibilityChange(t *testing.T) {
 	text := readDocumentationFile(t, "../docs/migration-v0.9-to-v0.10.md")
 	for _, phrase := range []string{
+		"v0.9.2",
 		"strict production configuration",
+		"strict migration",
+		"`framework.strict`",
+		"`framework.response_mode`",
+		"`IgniteE`",
+		"`Serve`",
+		"`CasbinFairing`",
+		"`CasbinEnforcer`",
+		"16 KiB",
+		"`websocket.max_connections`",
+		"compatibility defaults",
+		"forced security changes",
 		"trusted proxies",
 		"request body limit",
 		"MySQL TLS",
@@ -19,6 +31,74 @@ func TestReleaseDocumentationNamesEveryCompatibilityChange(t *testing.T) {
 	} {
 		if !strings.Contains(text, phrase) {
 			t.Fatalf("migration guide missing %q", phrase)
+		}
+	}
+}
+
+func TestReleaseDocumentationCoversV092RuntimeContracts(t *testing.T) {
+	tests := []struct {
+		path    string
+		phrases []string
+	}{
+		{
+			path: "../docs/production.md",
+			phrases: []string{
+				"`framework.strict`",
+				"`framework.response_mode`",
+				"`IgniteE`",
+				"`Serve`",
+				"`ErrAlreadyServing`",
+				"`ErrGinRuntimeConflict`",
+				"create a new Bear instance",
+				"16 KiB",
+				"`websocket.max_connections`",
+				"`CasbinEnforcer`",
+			},
+		},
+		{
+			path: "../docs/compatibility.md",
+			phrases: []string{
+				"`framework.strict: false`",
+				"`framework.response_mode: raw`",
+				"forced security changes",
+				"`IgniteE`",
+				"`Serve`",
+				"16 KiB",
+				"Casbin",
+				"WebSocket",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		text := readDocumentationFile(t, tt.path)
+		for _, phrase := range tt.phrases {
+			if !strings.Contains(text, phrase) {
+				t.Errorf("%s missing runtime contract %q", tt.path, phrase)
+			}
+		}
+	}
+}
+
+func TestReleaseVersionReferencesUseV092Candidate(t *testing.T) {
+	for _, path := range []string{
+		"../README.md",
+		"../CHANGELOG.md",
+		"../SECURITY.md",
+		"../docs/production.md",
+		"../docs/runbook.md",
+		"../examples/migration/main.go",
+		"../internal/cli/new.go",
+		"../internal/scaffold/scaffold_test.go",
+		"release_check_test.go",
+		"releasee2e/release_e2e_test.go",
+	} {
+		text := readDocumentationFile(t, path)
+		if strings.Contains(text, "v0.10.0-rc.1") {
+			t.Errorf("%s still names stale unpublished candidate v0.10.0-rc.1", path)
+		}
+		if !strings.Contains(text, "v0.9.2") {
+			t.Errorf("%s does not name unpublished candidate v0.9.2", path)
 		}
 	}
 }
@@ -47,7 +127,9 @@ func TestMigrationDocumentsComparableCollectionFieldSourceChange(t *testing.T) {
 	for _, phrase := range []string{
 		"`AuthConfig.PublicPaths`",
 		"`WebSocketConfig.AllowedOrigins`",
-		"`[]string` to `*[]string`",
+		"new in v0.9.2",
+		"v0.9.1 did not expose these fields",
+		"early unpublished candidate",
 		"`SetPublicPaths` and `GetPublicPaths`",
 		"`SetAllowedOrigins` and `GetAllowedOrigins`",
 		"pointer identity",
@@ -55,6 +137,36 @@ func TestMigrationDocumentsComparableCollectionFieldSourceChange(t *testing.T) {
 	} {
 		if !strings.Contains(text, phrase) {
 			t.Fatalf("migration collection guidance missing %q", phrase)
+		}
+	}
+	if strings.Contains(text, "Source assignments must be migrated") {
+		t.Fatal("migration guide presents an unpublished candidate field shape as a v0.9.1 source migration")
+	}
+}
+
+func TestProductionDocumentationSeparatesIgniteAndServeErrorStages(t *testing.T) {
+	text := strings.Join(strings.Fields(readDocumentationFile(t, "../docs/production.md")), " ")
+	for _, phrase := range []string{
+		"`IgniteE` returns configuration and Gin runtime construction errors",
+		"Strict dependency, build, and lifecycle errors are returned by `ApplyAll` or `Serve`",
+	} {
+		if !strings.Contains(text, phrase) {
+			t.Fatalf("production guide missing startup error-stage contract %q", phrase)
+		}
+	}
+	if strings.Contains(text, "`IgniteE` returns configuration, dependency, and runtime conflicts") {
+		t.Fatal("production guide overstates IgniteE dependency validation")
+	}
+}
+
+func TestV092CandidateBranchPolicyHasNoV010Residue(t *testing.T) {
+	for _, path := range []string{"verify-rc.sh", "release_check_test.go", "../docs/runbook.md"} {
+		text := readDocumentationFile(t, path)
+		if !strings.Contains(text, "codex/v09x-framework-hardening") {
+			t.Errorf("%s does not allow the current v0.9.2 candidate branch", path)
+		}
+		if strings.Contains(text, "codex/production-framework-v010") {
+			t.Errorf("%s still names the superseded v010 candidate branch", path)
 		}
 	}
 }
@@ -65,7 +177,7 @@ func TestReadmeUsesTestedExamplesAndCanonicalCLInstallPath(t *testing.T) {
 		"examples/basic/main.go",
 		"examples/auth/main.go",
 		"examples/migration/main.go",
-		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.10.0",
+		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.1",
 		"go test ./...",
 	} {
 		if !strings.Contains(text, phrase) {
@@ -77,34 +189,32 @@ func TestReadmeUsesTestedExamplesAndCanonicalCLInstallPath(t *testing.T) {
 func TestReleaseDocumentationSeparatesPublishedAndUpcomingVersions(t *testing.T) {
 	readme := readDocumentationFile(t, "../README.md")
 	security := readDocumentationFile(t, "../SECURITY.md")
-	normalizedReadme := strings.ToLower(readme)
+	normalizedReadme := strings.ToLower(strings.Join(strings.Fields(readme), " "))
 	for _, phrase := range []string{
 		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.1",
-		"v0.10.0-rc.1",
+		"v0.9.2",
 		"after publication",
+		"not been pushed, tagged, or published",
 	} {
 		if !strings.Contains(normalizedReadme, strings.ToLower(phrase)) {
 			t.Fatalf("README missing publication-state guidance %q", phrase)
 		}
 	}
-	if strings.Contains(readme, "go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.10.0\n") {
-		t.Fatal("README must not present the unpublished release candidate as currently installable")
-	}
-	for _, phrase := range []string{"v0.9.1", "current", "v0.10", "upcoming", "unreleased"} {
+	for _, phrase := range []string{"v0.9.1", "current", "v0.9.2", "upcoming", "unreleased"} {
 		if !strings.Contains(strings.ToLower(security), strings.ToLower(phrase)) {
 			t.Fatalf("SECURITY.md missing publication-state guidance %q", phrase)
 		}
 	}
 }
 
-func TestChangelogKeepsV010ReleaseCandidateUnreleased(t *testing.T) {
+func TestReleaseChangelogKeepsV092CandidateUnreleased(t *testing.T) {
 	changelog := readDocumentationFile(t, "../CHANGELOG.md")
-	const expectedHeading = "## [v0.10.0-rc.1] - Unreleased"
+	const expectedHeading = "## [v0.9.2] - Unreleased"
 	if !strings.Contains(changelog, expectedHeading) {
-		t.Fatalf("CHANGELOG.md missing unreleased release-candidate heading %q", expectedHeading)
+		t.Fatalf("CHANGELOG.md missing unreleased candidate heading %q", expectedHeading)
 	}
-	if strings.Contains(changelog, "## [0.10.0] - 2026-07-11") {
-		t.Fatal("CHANGELOG.md must not claim the v0.10 release candidate is dated or published")
+	if strings.Contains(changelog, "## [v0.9.2] - 2026-") {
+		t.Fatal("CHANGELOG.md must not claim the v0.9.2 candidate is dated or published")
 	}
 }
 
@@ -191,8 +301,9 @@ func TestRunbookUsesPinnedVerificationAndChecksReleaseChecksums(t *testing.T) {
 
 func TestReleaseCandidateResultIsAuditableAndStillUnpublished(t *testing.T) {
 	runbook := readDocumentationFile(t, "../docs/runbook.md")
+	normalizedRunbook := strings.Join(strings.Fields(runbook), " ")
 	for _, phrase := range []string{
-		"v0.10.0-rc.1",
+		"v0.9.2",
 		"75.8%",
 		"critical coverage handler 82.9%",
 		"critical coverage binding 88.5%",
@@ -200,16 +311,17 @@ func TestReleaseCandidateResultIsAuditableAndStillUnpublished(t *testing.T) {
 		"scripts/check-api-compat.sh",
 		"SHUFFLE_SEED=20260711",
 		"BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e",
-		"not tagged or published",
+		"not been pushed, tagged, or published",
 	} {
-		if !strings.Contains(runbook, phrase) {
+		if !strings.Contains(normalizedRunbook, phrase) {
 			t.Fatalf("runbook missing RC audit evidence %q", phrase)
 		}
 	}
 
 	changelog := readDocumentationFile(t, "../CHANGELOG.md")
-	for _, phrase := range []string{"local release-candidate verification", "awaits human review", "not published"} {
-		if !strings.Contains(strings.ToLower(changelog), phrase) {
+	normalizedChangelog := strings.ToLower(strings.Join(strings.Fields(changelog), " "))
+	for _, phrase := range []string{"local release-candidate verification", "awaits human review", "not been pushed, tagged, or published"} {
+		if !strings.Contains(normalizedChangelog, phrase) {
 			t.Fatalf("changelog missing RC publication state %q", phrase)
 		}
 	}

@@ -19,13 +19,13 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-func TestGenerateProjectBuildsTestsAndServesHealth(t *testing.T) {
+func TestScaffoldGenerateProjectBuildsTestsAndServesHealth(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "billing-api")
 	err := Generate(context.Background(), Options{
 		Name:             "billing-api",
 		Module:           "example.com/billing-api",
 		Directory:        dir,
-		FrameworkVersion: "v0.10.0-rc.1",
+		FrameworkVersion: "v0.9.2",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestGenerateProjectBuildsTestsAndServesHealth(t *testing.T) {
 	}
 	for _, want := range []string{
 		"module example.com/billing-api",
-		"require github.com/duiniwukenaihe/gin-bear v0.10.0-rc.1",
+		"require github.com/duiniwukenaihe/gin-bear v0.9.2",
 	} {
 		if !strings.Contains(string(goMod), want) {
 			t.Fatalf("generated go.mod missing %q:\n%s", want, goMod)
@@ -61,7 +61,7 @@ func TestGeneratedProjectProvidesConfigureExtensionPoint(t *testing.T) {
 		Name:             "extension-api",
 		Module:           "example.com/extension-api",
 		Directory:        dir,
-		FrameworkVersion: "v0.10.0-rc.1",
+		FrameworkVersion: "v0.9.2",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestResourceGenerationUsesInternalPackagesDecimalAndAtomicWrites(t *testing
 		Name:             "orders-api",
 		Module:           "example.com/orders-api",
 		Directory:        project,
-		FrameworkVersion: "v0.10.0-rc.1",
+		FrameworkVersion: "v0.9.2",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestGeneratedAPIHandlesRealCRUDRequestsWithSQLite(t *testing.T) {
 		Name:             "crud-api",
 		Module:           "example.com/crud-api",
 		Directory:        project,
-		FrameworkVersion: "v0.10.0-rc.1",
+		FrameworkVersion: "v0.9.2",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +468,7 @@ func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
 		Name:             "secure-api",
 		Module:           "example.com/secure-api",
 		Directory:        project,
-		FrameworkVersion: "v0.10.0-rc.1",
+		FrameworkVersion: "v0.9.2",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -494,8 +494,11 @@ func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
 	if err == nil {
 		t.Fatalf("generated production server started without BEAR_AUTH_JWT_SECRET:\n%s", output)
 	}
-	if ctx.Err() != nil || !strings.Contains(string(output), "weak jwt secret") {
+	if ctx.Err() != nil || !strings.Contains(string(output), "internal_error") {
 		t.Fatalf("generated production startup did not fail closed: context=%v err=%v\n%s", ctx.Err(), err, output)
+	}
+	if strings.Contains(string(output), "weak jwt secret") || strings.Contains(string(output), "bear-secret") {
+		t.Fatalf("generated production startup leaked internal security diagnostics:\n%s", output)
 	}
 }
 
