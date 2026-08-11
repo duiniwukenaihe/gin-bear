@@ -90,16 +90,22 @@ func writeSuccessWithConfig(ctx *gin.Context, config *SysConfig, result any) {
 		return
 	}
 
-	if response, ok := result.(Response); ok {
-		if localizer := GetLocalizer(ctx); localizer != nil && response.Message != "" {
-			translated, err := localizer.Localize(&i18n.LocalizeConfig{MessageID: response.Message})
-			if err == nil {
-				response.Message = translated
-			}
+	envelopeMode := config != nil && config.ResponseMode() == "envelope"
+	hasEnvelope := false
+	switch response := result.(type) {
+	case Response:
+		result = localizeSuccessResponse(ctx, response)
+		hasEnvelope = true
+	case *Response:
+		if response != nil {
+			result = localizeSuccessResponse(ctx, *response)
+			hasEnvelope = true
+		} else if envelopeMode {
+			result = nil
 		}
-		result = response
-	} else if config != nil && config.ResponseMode() == "envelope" {
-		result = Response{Code: status, Message: "success", Data: result}
+	}
+	if envelopeMode && !hasEnvelope {
+		result = Response{Code: status, Message: http.StatusText(status), Data: result}
 	} else if result == nil {
 		result = Response{Code: status, Message: "success"}
 	}
@@ -116,4 +122,14 @@ func writeSuccessWithConfig(ctx *gin.Context, config *SysConfig, result any) {
 	ctx.Header("Content-Type", "application/json; charset=utf-8")
 	ctx.Status(status)
 	_, _ = ctx.Writer.Write(body)
+}
+
+func localizeSuccessResponse(ctx *gin.Context, response Response) Response {
+	if localizer := GetLocalizer(ctx); localizer != nil && response.Message != "" {
+		translated, err := localizer.Localize(&i18n.LocalizeConfig{MessageID: response.Message})
+		if err == nil {
+			response.Message = translated
+		}
+	}
+	return response
 }

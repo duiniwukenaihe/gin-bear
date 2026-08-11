@@ -27,6 +27,21 @@ func TestErrForbiddenWritesHTTP403(t *testing.T) {
 	}
 }
 
+func TestHEADHandlerErrorWritesEmptyBody(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	app.Handle(http.MethodHead, "/error", func() (string, error) {
+		return "", errors.New("handler failure")
+	})
+
+	response := performRequest(app, httptest.NewRequest(http.MethodHead, "/error", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	if response.Body.Len() != 0 {
+		t.Fatalf("body = %q, want empty", response.Body.String())
+	}
+}
+
 func TestCommittedErrorLogsWithoutAppending(t *testing.T) {
 	var logs bytes.Buffer
 	recorder := httptest.NewRecorder()

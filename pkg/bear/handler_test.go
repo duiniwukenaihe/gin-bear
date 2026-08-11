@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/nicksnyder/go-i18n/v2/i18n"
+	"golang.org/x/text/language"
 )
 
 type receiverHandler struct {
@@ -195,23 +197,39 @@ func TestResponseModeEnvelopeWrapsOrdinaryValues(t *testing.T) {
 	if err := config.SetResponseMode("envelope"); err != nil {
 		t.Fatal(err)
 	}
-	app := Ignite(config)
-	app.Handle(http.MethodGet, "/value", func() string { return "value" })
+	tests := []struct {
+		name    string
+		result  any
+		status  int
+		message string
+	}{
+		{name: "ok", result: "value", status: http.StatusOK, message: "OK"},
+		{name: "created", result: WithStatus(http.StatusCreated, "value"), status: http.StatusCreated, message: "Created"},
+	}
 
-	response := performRequest(app, httptest.NewRequest(http.MethodGet, "/value", nil))
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
-	}
-	var body Response
-	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body.Code != http.StatusOK || body.Message != "success" {
-		t.Fatalf("body = %#v", body)
-	}
-	data, ok := body.Data.(string)
-	if !ok || data != "value" {
-		t.Fatalf("body data = %#v", body.Data)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(response)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/value", nil)
+
+			writeSuccessWithConfig(ctx, config, tt.result)
+
+			if response.Code != tt.status {
+				t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+			}
+			var body Response
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Code != tt.status || body.Message != tt.message {
+				t.Fatalf("body = %#v", body)
+			}
+			data, ok := body.Data.(string)
+			if !ok || data != "value" {
+				t.Fatalf("body data = %#v", body.Data)
+			}
+		})
 	}
 }
 
@@ -245,25 +263,69 @@ func TestStatusResponseRejectsInvalidStatus(t *testing.T) {
 	}
 }
 
-func TestEnvelopeResponseIsNotWrappedAgain(t *testing.T) {
+func TestEnvelopeResponseValueAndPointerAreNotWrappedAgain(t *testing.T) {
 	config := NewSysConfig()
 	if err := config.SetResponseMode("envelope"); err != nil {
 		t.Fatal(err)
 	}
-	app := Ignite(config)
-	want := Response{Code: 701, Message: "custom", Data: "value"}
-	app.Handle(http.MethodGet, "/value", func() Response { return want })
-
-	response := performRequest(app, httptest.NewRequest(http.MethodGet, "/value", nil))
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	bundle := i18n.NewBundle(language.English)
+	if err := bundle.AddMessages(language.English, &i18n.Message{ID: "custom", Other: "translated"}); err != nil {
+		t.Fatal(err)
 	}
+
+	for _, pointer := range []bool{false, true} {
+		name := "value"
+		if pointer {
+			name = "pointer"
+		}
+		t.Run(name, func(t *testing.T) {
+			original := &Response{Code: 701, Message: "custom", Data: "value"}
+			var result any = *original
+			if pointer {
+				result = original
+			}
+			response := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(response)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/value", nil)
+			ctx.Set(LocalizerKey, i18n.NewLocalizer(bundle, "en"))
+
+			writeSuccessWithConfig(ctx, config, result)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+			}
+			var body Response
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Code != original.Code || body.Message != "translated" || body.Data != original.Data {
+				t.Fatalf("body = %#v", body)
+			}
+			if original.Message != "custom" {
+				t.Fatalf("caller response was mutated: %#v", original)
+			}
+		})
+	}
+}
+
+func TestEnvelopeNilResponsePointerUsesDefaultEnvelope(t *testing.T) {
+	config := NewSysConfig()
+	if err := config.SetResponseMode("envelope"); err != nil {
+		t.Fatal(err)
+	}
+	var result *Response
+	response := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(response)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/value", nil)
+
+	writeSuccessWithConfig(ctx, config, result)
+
 	var body Response
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Code != want.Code || body.Message != want.Message || body.Data != want.Data {
-		t.Fatalf("body = %#v, want %#v", body, want)
+	if body.Code != http.StatusOK || body.Message != "OK" || body.Data != nil {
+		t.Fatalf("body = %#v", body)
 	}
 }
 
@@ -304,7 +366,6 @@ func TestNoBodyResponsesValidatePayloadBeforeCommit(t *testing.T) {
 	}{
 		{name: "no content", method: http.MethodGet, status: http.StatusNoContent},
 		{name: "not modified", method: http.MethodGet, status: http.StatusNotModified},
-		{name: "head", method: http.MethodHead, status: http.StatusOK},
 	}
 
 	for _, tt := range tests {
@@ -320,6 +381,21 @@ func TestNoBodyResponsesValidatePayloadBeforeCommit(t *testing.T) {
 			}
 			assertSingleJSONValue(t, response.Body.Bytes())
 		})
+	}
+}
+
+func TestHEADSerializationFailureWritesEmpty500(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	app.Handle(http.MethodHead, "/value", func() StatusResponse {
+		return WithStatus(http.StatusOK, func() {})
+	})
+
+	response := performRequest(app, httptest.NewRequest(http.MethodHead, "/value", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	if response.Body.Len() != 0 {
+		t.Fatalf("body = %q, want empty", response.Body.String())
 	}
 }
 

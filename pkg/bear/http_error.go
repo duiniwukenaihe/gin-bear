@@ -24,6 +24,10 @@ func WriteError(ctx *gin.Context, err error) {
 	if ctx.Writer.Written() {
 		return
 	}
+	if ctx.Request != nil && ctx.Request.Method == http.MethodHead {
+		ctx.AbortWithStatus(status)
+		return
+	}
 	ctx.AbortWithStatusJSON(status, response)
 }
 
