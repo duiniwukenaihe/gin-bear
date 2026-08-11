@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 var (
@@ -59,6 +61,140 @@ func TestDirectLaunchStartsAndStopsRegisteredLifecycleComponents(t *testing.T) {
 	}
 	if got := hookCalls.Load(); got != 1 {
 		t.Fatalf("shutdown hook calls = %d, want 1", got)
+	}
+}
+
+func TestServeStartsAndStopsWithoutInstallingSignalHandlers(t *testing.T) {
+	config := NewSysConfig()
+	config.Server.Port = int32(availableTCPPort(t))
+	component := &countedLifecycleComponent{name: "direct-serve"}
+	app := Ignite(config).Beans(component)
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- app.Serve(ctx) }()
+
+	waitForAtomicCount(t, &component.starts, 1, "direct Serve component start")
+	cancel()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	if got := component.stops.Load(); got != 1 {
+		t.Fatalf("component stops = %d, want 1", got)
+	}
+}
+
+func TestConcurrentApplyAndServeShareOneInitialization(t *testing.T) {
+	config := NewSysConfig()
+	config.Server.Port = int32(availableTCPPort(t))
+	component := &gatedInitializer{
+		name:    "concurrent-apply-serve",
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	app := Ignite(config).Beans(component)
+	applyDone := make(chan error, 1)
+	go func() { applyDone <- app.ApplyAll(context.Background()) }()
+	<-component.entered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- app.Serve(ctx) }()
+	close(component.release)
+	if err := <-applyDone; err != nil {
+		cancel()
+		<-serveDone
+		t.Fatalf("ApplyAll() error = %v", err)
+	}
+	if got := component.starts.Load(); got != 1 {
+		cancel()
+		<-serveDone
+		t.Fatalf("initializer calls = %d, want 1", got)
+	}
+	cancel()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+}
+
+func TestSecondServeReturnsAlreadyServingWithoutStoppingOwner(t *testing.T) {
+	config := NewSysConfig()
+	config.Server.Port = int32(availableTCPPort(t))
+	component := &countedLifecycleComponent{name: "serve-owner"}
+	app := Ignite(config).Beans(component)
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- app.Serve(ctx) }()
+	waitForAtomicCount(t, &component.starts, 1, "first Serve component start")
+
+	if err := app.Serve(context.Background()); !errors.Is(err, ErrAlreadyServing) {
+		cancel()
+		<-firstDone
+		t.Fatalf("second Serve() error = %v, want ErrAlreadyServing", err)
+	}
+	if got := component.stops.Load(); got != 0 {
+		cancel()
+		<-firstDone
+		t.Fatalf("rejected Serve stopped owner lifecycle %d times", got)
+	}
+	cancel()
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Serve() error = %v", err)
+	}
+}
+
+func TestSecondLaunchDoesNotStopFirstServingOwner(t *testing.T) {
+	config := NewSysConfig()
+	config.Server.Port = int32(availableTCPPort(t))
+	component := &countedLifecycleComponent{name: "launch-owner"}
+	app := Ignite(config).Beans(component)
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- app.Launch(ctx) }()
+	waitForAtomicCount(t, &component.starts, 1, "first Launch component start")
+
+	if err := app.Launch(context.Background()); !errors.Is(err, ErrAlreadyServing) {
+		cancel()
+		<-firstDone
+		t.Fatalf("second Launch() error = %v, want ErrAlreadyServing", err)
+	}
+	if got := component.stops.Load(); got != 0 {
+		cancel()
+		<-firstDone
+		t.Fatalf("rejected Launch stopped owner lifecycle %d times", got)
+	}
+	cancel()
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Launch() error = %v", err)
+	}
+}
+
+func TestGinRuntimeConflictIsRejectedBeforeGlobalModeMutation(t *testing.T) {
+	firstMode := "debug"
+	ginRuntimeMu.Lock()
+	if strictGinRuntimeMode != "" {
+		firstMode = strictGinRuntimeMode
+	}
+	ginRuntimeMu.Unlock()
+	first := NewSysConfig()
+	first.SetFrameworkStrict(true)
+	first.Server.Mode = firstMode
+	if _, err := IgniteE(first); err != nil {
+		t.Fatalf("first IgniteE() error = %v", err)
+	}
+
+	conflictingMode := gin.TestMode
+	if firstMode == gin.TestMode {
+		conflictingMode = "debug"
+	}
+	second := NewSysConfig()
+	second.SetFrameworkStrict(true)
+	second.Server.Mode = conflictingMode
+	before := gin.Mode()
+	if _, err := IgniteE(second); !errors.Is(err, ErrGinRuntimeConflict) {
+		t.Fatalf("conflicting IgniteE() error = %v, want ErrGinRuntimeConflict", err)
+	}
+	if got := gin.Mode(); got != before {
+		t.Fatalf("conflicting IgniteE changed gin mode from %q to %q", before, got)
 	}
 }
 

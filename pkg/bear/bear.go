@@ -80,6 +80,14 @@ type routeRegistrationContext struct {
 
 var signalNotifyContext = signal.NotifyContext
 var ginRuntimeMu sync.Mutex
+var strictGinRuntimeMode string
+
+var (
+	// ErrAlreadyServing reports a second Serve or Launch call for one Bear.
+	ErrAlreadyServing = errors.New("bear is already serving")
+	// ErrGinRuntimeConflict reports incompatible strict Gin process modes.
+	ErrGinRuntimeConflict = errors.New("strict gin runtime mode conflict")
+)
 
 // Bear 是核心框架引擎
 type Bear struct {
@@ -100,10 +108,14 @@ type Bear struct {
 	strictBuiltMounts         int
 	strictBuildComplete       bool
 	strictPluginModules       map[int]struct{}
+	strictInjectionMu         sync.Mutex
+	strictInjectionAttempts   map[any]*strictInjectionAttempt
 	applyMu                   sync.Mutex
 	applyState                applyState
 	applyErr                  error
 	applyAttempt              *applyAttempt
+	servingMu                 sync.Mutex
+	serving                   bool
 	pluginBarrier             *pluginRegistrationBarrier
 	pluginDispatcher          *PluginDispatcher
 	pluginManager             *PluginManager
@@ -115,6 +127,11 @@ type Bear struct {
 type applyState uint8
 
 type applyAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+type strictInjectionAttempt struct {
 	done chan struct{}
 	err  error
 }
@@ -317,14 +334,24 @@ func (b *Bear) Launch(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := b.launchApplyError(); err != nil {
-		return err
+	signalCtx, stopSignals := signalNotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	return b.Serve(signalCtx)
+}
+
+// Serve runs the application without installing process signal handlers.
+func (b *Bear) Serve(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if err := b.closePluginRegistration(ctx); err != nil {
-		return err
+	if !b.acquireServing() {
+		return ErrAlreadyServing
 	}
-	b.runtime.Lifecycle.sealRegistration()
-	if err := b.runtime.Lifecycle.Start(ctx); err != nil {
+	defer b.releaseServing()
+	if err := b.ApplyAll(ctx); err != nil {
+		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return err
 	}
 	config := b.runtime.Config
@@ -360,8 +387,6 @@ func (b *Bear) Launch(ctx context.Context) error {
 		serverCount++
 	}
 	serveResults := make(chan serveResult, serverCount)
-	signalCtx, stopSignals := signalNotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
 	go func() {
 		logger.Info("WhiteBear is emerging from ice", "addr", httpListener.Addr().String(), "name", config.Server.Name)
 		err := server.Serve(httpListener)
@@ -389,7 +414,7 @@ func (b *Bear) Launch(ctx context.Context) error {
 		if result.err != nil {
 			launchErrors = append(launchErrors, fmt.Errorf("%s serve failed: %w", result.name, result.err))
 		}
-	case <-signalCtx.Done():
+	case <-ctx.Done():
 		logger.Info("Context cancelled, shutting down...")
 	}
 
@@ -433,6 +458,28 @@ func (b *Bear) Launch(ctx context.Context) error {
 
 	logger.Info("WhiteBear returning to ice")
 	return errors.Join(launchErrors...)
+}
+
+func (b *Bear) acquireServing() bool {
+	if b == nil {
+		return false
+	}
+	b.servingMu.Lock()
+	defer b.servingMu.Unlock()
+	if b.serving {
+		return false
+	}
+	b.serving = true
+	return true
+}
+
+func (b *Bear) releaseServing() {
+	if b == nil {
+		return
+	}
+	b.servingMu.Lock()
+	b.serving = false
+	b.servingMu.Unlock()
 }
 
 func (b *Bear) cleanupLaunchFailure(config *SysConfig, cause error, listeners ...net.Listener) error {
@@ -561,7 +608,16 @@ func newGinEngine(config *SysConfig) (engine *gin.Engine, err error) {
 			err = fmt.Errorf("construct gin engine: %v", recovered)
 		}
 	}()
-	gin.SetMode(configuredGinMode(config))
+	mode := configuredGinMode(config)
+	if config != nil && config.FrameworkStrict() {
+		if strictGinRuntimeMode != "" && strictGinRuntimeMode != mode {
+			return nil, fmt.Errorf("%w: active=%s requested=%s", ErrGinRuntimeConflict, strictGinRuntimeMode, mode)
+		}
+		if strictGinRuntimeMode == "" {
+			strictGinRuntimeMode = mode
+		}
+	}
+	gin.SetMode(mode)
 	gin.DefaultWriter = io.Discard
 	gin.DefaultErrorWriter = os.Stderr
 	return gin.New(), nil
@@ -1305,9 +1361,6 @@ func (b *Bear) buildStrictApplication(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := b.injectStrictBeans(); err != nil {
-			return err
-		}
 
 		modules, moduleStart, moduleEnd, pluginModules := b.strictModuleBuildBatch()
 		for offset, mod := range modules {
@@ -1328,9 +1381,6 @@ func (b *Bear) buildStrictApplication(ctx context.Context) error {
 		}
 		b.markStrictModulesBuilt(moduleEnd)
 
-		if err := b.injectStrictBeans(); err != nil {
-			return err
-		}
 		mounts, mountEnd := b.strictMountBuildBatch()
 		for _, mount := range mounts {
 			for _, class := range mount.Classes {
@@ -1379,7 +1429,22 @@ func (b *Bear) applyStrictObject(value any) error {
 	if v.Kind() != reflect.Ptr || v.IsNil() || v.Elem().Kind() != reflect.Struct {
 		return nil
 	}
-	return b.runtime.Container.ApplyE(value)
+	b.strictInjectionMu.Lock()
+	if b.strictInjectionAttempts == nil {
+		b.strictInjectionAttempts = make(map[any]*strictInjectionAttempt)
+	}
+	if attempt := b.strictInjectionAttempts[value]; attempt != nil {
+		b.strictInjectionMu.Unlock()
+		<-attempt.done
+		return attempt.err
+	}
+	attempt := &strictInjectionAttempt{done: make(chan struct{})}
+	b.strictInjectionAttempts[value] = attempt
+	b.strictInjectionMu.Unlock()
+
+	attempt.err = b.runtime.Container.ApplyE(value)
+	close(attempt.done)
+	return attempt.err
 }
 
 func (b *Bear) strictModuleBuildBatch() ([]Module, int, int, map[int]struct{}) {

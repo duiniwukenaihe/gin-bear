@@ -236,9 +236,6 @@ func (p *PluginManager) registerModuleInRegistration(mod Module) error {
 		if err := p.bear.addModulesE(false, mod); err != nil {
 			return fmt.Errorf("register strict plugin module %T: %w", mod, err)
 		}
-		if err := p.bear.injectStrictBeans(); err != nil {
-			return fmt.Errorf("inject strict plugin beans for %T: %w", mod, err)
-		}
 		if err := p.bear.applyStrictObject(mod); err != nil {
 			return fmt.Errorf("inject strict plugin module %T: %w", mod, err)
 		}
