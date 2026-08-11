@@ -653,8 +653,8 @@ func TestJWTClockSkewValidationRunsAtIgnite(t *testing.T) {
 
 	defer func() {
 		recovered := recover()
-		err, ok := recovered.(error)
-		if !ok || !strings.Contains(err.Error(), "auth.jwt_clock_skew") {
+		message, ok := recovered.(string)
+		if !ok || !strings.Contains(message, "auth.jwt_clock_skew") {
 			t.Fatalf("unexpected panic = %v", recovered)
 		}
 	}()

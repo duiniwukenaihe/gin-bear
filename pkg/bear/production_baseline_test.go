@@ -1835,8 +1835,8 @@ func TestIgniteRejectsDisabledWebSocketOriginCheckInProduction(t *testing.T) {
 		if r == nil {
 			t.Fatal("expected unsafe websocket origin panic")
 		}
-		err, ok := r.(error)
-		if !ok || !strings.Contains(err.Error(), "websocket origin") {
+		message, ok := r.(string)
+		if !ok || !strings.Contains(message, "websocket origin") {
 			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()
@@ -1858,8 +1858,8 @@ func TestProductionValidationChecksWebSocketOriginWhenAuthConfigIsNil(t *testing
 		if r == nil {
 			t.Fatal("expected unsafe websocket origin panic")
 		}
-		err, ok := r.(error)
-		if !ok || !strings.Contains(err.Error(), "websocket origin") {
+		message, ok := r.(string)
+		if !ok || !strings.Contains(message, "websocket origin") {
 			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()

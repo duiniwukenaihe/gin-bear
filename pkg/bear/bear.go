@@ -138,7 +138,7 @@ func (b *Bear) Runtime() *Runtime {
 func Ignite(args ...any) *Bear {
 	app, err := IgniteE(args...)
 	if err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 	return app
 }
