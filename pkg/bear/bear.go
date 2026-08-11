@@ -45,11 +45,25 @@ type Module interface {
 	Build(bear *Bear)
 }
 
+// ModuleBuilderE lets strict startup report module construction failures.
+type ModuleBuilderE interface {
+	BuildE(bear *Bear) error
+}
+
 // IClass 定义了控制器接口
 type IClass interface {
 	Bean
 	Build(bear *Bear)
 }
+
+// ClassBuilderE lets strict startup report controller construction failures.
+type ClassBuilderE interface {
+	BuildE(bear *Bear) error
+}
+
+// ErrBuildRegistrationLoop reports discovery that does not converge within the
+// strict startup round limit.
+var ErrBuildRegistrationLoop = errors.New("strict build registration did not converge")
 
 type MountMetadata struct {
 	Group   string
@@ -70,27 +84,32 @@ var ginRuntimeMu sync.Mutex
 // Bear 是核心框架引擎
 type Bear struct {
 	*gin.Engine
-	g                 *gin.RouterGroup
-	exprData          map[string]interface{}
-	fairingHandler    *FairingHandler
-	routeTree         *RouteTree // 路由树，用于存储路由级别的 Fairing
-	routeRegistry     []RouteMetadata
-	registration      *routeRegistrationContext
-	grpcServices      []GRPCService
-	mounts            []MountMetadata
-	modules           []Module
-	runtime           *Runtime
-	eRegistrationMu   sync.Mutex
-	applyMu           sync.Mutex
-	applyState        applyState
-	applyErr          error
-	applyDone         chan struct{}
-	pluginBarrier     *pluginRegistrationBarrier
-	pluginDispatcher  *PluginDispatcher
-	pluginManager     *PluginManager
-	pluginMode        bool // 标记当前是否处于插件加载模式
-	metricsRegistered atomic.Bool
-	tracingRegistered atomic.Bool
+	g                         *gin.RouterGroup
+	exprData                  map[string]interface{}
+	fairingHandler            *FairingHandler
+	routeTree                 *RouteTree // 路由树，用于存储路由级别的 Fairing
+	routeRegistry             []RouteMetadata
+	registration              *routeRegistrationContext
+	grpcServices              []GRPCService
+	mounts                    []MountMetadata
+	modules                   []Module
+	runtime                   *Runtime
+	eRegistrationMu           sync.Mutex
+	strictRegistrationVersion uint64
+	strictBuiltModules        int
+	strictBuiltMounts         int
+	strictBuildComplete       bool
+	strictPluginModules       map[int]struct{}
+	applyMu                   sync.Mutex
+	applyState                applyState
+	applyErr                  error
+	applyDone                 chan struct{}
+	pluginBarrier             *pluginRegistrationBarrier
+	pluginDispatcher          *PluginDispatcher
+	pluginManager             *PluginManager
+	pluginMode                bool // 标记当前是否处于插件加载模式
+	metricsRegistered         atomic.Bool
+	tracingRegistered         atomic.Bool
 }
 
 type applyState uint8
@@ -671,6 +690,7 @@ func (b *Bear) MountE(group string, classes ...IClass) error {
 	}
 	publishBeanMetadata(b.exprData, beans, names)
 	b.mounts = append(b.mounts, MountMetadata{Group: group, Classes: classes})
+	b.strictRegistrationVersion++
 	return nil
 }
 
@@ -718,6 +738,7 @@ func (b *Bear) BeansE(beans ...Bean) error {
 		return fmt.Errorf("register beans: %w", err)
 	}
 	publishBeanMetadata(b.exprData, beans, names)
+	b.strictRegistrationVersion++
 	return nil
 }
 
@@ -775,6 +796,10 @@ func (b *Bear) AddModule(modules ...Module) *Bear {
 
 // AddModuleE registers module beans before publishing the module metadata.
 func (b *Bear) AddModuleE(modules ...Module) error {
+	return b.addModulesE(false, modules...)
+}
+
+func (b *Bear) addModulesE(pluginModules bool, modules ...Module) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
@@ -802,7 +827,14 @@ func (b *Bear) AddModuleE(modules ...Module) error {
 	for index, mod := range modules {
 		b.runtime.Logger.Info("Loading module", "name", moduleNames[index])
 		b.modules = append(b.modules, mod)
+		if pluginModules {
+			if b.strictPluginModules == nil {
+				b.strictPluginModules = make(map[int]struct{})
+			}
+			b.strictPluginModules[len(b.modules)-1] = struct{}{}
+		}
 	}
+	b.strictRegistrationVersion++
 	return nil
 }
 
@@ -1200,7 +1232,11 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 	lifecycleStartFailed := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			resultErr = fmt.Errorf("ApplyAll failed while building application: %v", recovered)
+			if recoveredErr, ok := recovered.(error); ok {
+				resultErr = fmt.Errorf("ApplyAll failed while building application: %w", recoveredErr)
+			} else {
+				resultErr = fmt.Errorf("ApplyAll failed while building application: %v", recovered)
+			}
 		}
 		if resultErr != nil && !lifecycleStartFailed {
 			rollbackErr := runShutdownPhase(shutdownTimeout(b.runtime.Config), b.runtime.Lifecycle.Stop)
@@ -1210,43 +1246,38 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 		}
 	}()
 	if b.frameworkStrict() {
-		if err := b.runtime.Container.strictConflictError(); err != nil {
+		if !b.strictBuildComplete {
+			if err := b.buildStrictApplication(ctx); err != nil {
+				return err
+			}
+		}
+		b.runtime.Logger.Info("Executing component initializers...")
+		if err := b.runtime.Lifecycle.Start(ctx); err != nil {
+			lifecycleStartFailed = true
 			return err
 		}
+		return nil
 	}
 
-	// 1. 第一遍遍历：执行字段注入
+	// Compatibility mode preserves the historical inject, Init, then Build order.
 	for _, bean := range b.runtime.Container.orderedBeans() {
 		v := reflect.ValueOf(bean)
 		if v.Kind() == reflect.Ptr && v.Elem().Kind() == reflect.Struct {
-			if b.frameworkStrict() {
-				if err := b.runtime.Container.ApplyE(bean); err != nil {
-					return err
-				}
-			} else {
-				b.runtime.Container.Apply(bean)
-			}
+			b.runtime.Container.Apply(bean)
 		}
 	}
 
-	// 2. 第二遍遍历：执行 Init 初始化钩子
 	b.runtime.Logger.Info("Executing component initializers...")
 	if err := b.runtime.Lifecycle.Start(ctx); err != nil {
 		lifecycleStartFailed = true
 		return err
 	}
 
-	// 3. 构建路由 (确保在注入之后)
 	b.runtime.Logger.Info("Building routes...")
-
-	// 3.1 先处理模块 (模块的 Build() 可能会调用 b.Mount() 添加控制器)
 	for _, mod := range b.modules {
-		// 模块构建前重置当前 group 为根路径
 		b.g = &b.Engine.RouterGroup
 		mod.Build(b)
 	}
-
-	// 3.2 后处理 mounts (包括模块中添加的控制器)
 	for _, m := range b.mounts {
 		for _, class := range m.Classes {
 			group := b.Engine.Group(m.Group)
@@ -1255,6 +1286,193 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 	}
 
 	return nil
+}
+
+const strictBuildRoundLimit = 32
+
+func (b *Bear) buildStrictApplication(ctx context.Context) error {
+	b.runtime.Logger.Info("Building routes...")
+	for round := 1; round <= strictBuildRoundLimit; round++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := b.injectStrictBeans(); err != nil {
+			return err
+		}
+
+		modules, moduleStart, moduleEnd, pluginModules := b.strictModuleBuildBatch()
+		for offset, mod := range modules {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			moduleIndex := moduleStart + offset
+			if _, alreadyBuilt := pluginModules[moduleIndex]; alreadyBuilt {
+				continue
+			}
+			if err := b.applyStrictObject(mod); err != nil {
+				return fmt.Errorf("inject module %T: %w", mod, err)
+			}
+			b.g = &b.Engine.RouterGroup
+			if err := b.buildModuleStrict(mod); err != nil {
+				return err
+			}
+		}
+		b.markStrictModulesBuilt(moduleEnd)
+
+		if err := b.injectStrictBeans(); err != nil {
+			return err
+		}
+		mounts, mountEnd := b.strictMountBuildBatch()
+		for _, mount := range mounts {
+			for _, class := range mount.Classes {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				group := b.Engine.Group(mount.Group)
+				if err := b.buildControllerE(group, mount.Group, class); err != nil {
+					return err
+				}
+			}
+		}
+		b.markStrictMountsBuilt(mountEnd)
+
+		stable, version, beanCount := b.strictBuildSnapshot()
+		if !stable {
+			continue
+		}
+		if err := b.injectStrictBeans(); err != nil {
+			return err
+		}
+		if b.sealStableStrictBuild(version, beanCount) {
+			return nil
+		}
+	}
+	return ErrBuildRegistrationLoop
+}
+
+func (b *Bear) injectStrictBeans() error {
+	if err := b.runtime.Container.strictConflictError(); err != nil {
+		return err
+	}
+	for _, bean := range b.runtime.Container.orderedBeans() {
+		if err := b.applyStrictObject(bean); err != nil {
+			return err
+		}
+	}
+	return b.runtime.Container.strictConflictError()
+}
+
+func (b *Bear) applyStrictObject(value any) error {
+	if value == nil || isNilBean(value) {
+		return nil
+	}
+	v := reflect.ValueOf(value)
+	if v.Kind() != reflect.Ptr || v.IsNil() || v.Elem().Kind() != reflect.Struct {
+		return nil
+	}
+	return b.runtime.Container.ApplyE(value)
+}
+
+func (b *Bear) strictModuleBuildBatch() ([]Module, int, int, map[int]struct{}) {
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	start := b.strictBuiltModules
+	end := len(b.modules)
+	modules := append([]Module(nil), b.modules[start:end]...)
+	pluginModules := make(map[int]struct{}, len(b.strictPluginModules))
+	for index := range b.strictPluginModules {
+		pluginModules[index] = struct{}{}
+	}
+	return modules, start, end, pluginModules
+}
+
+func (b *Bear) markStrictModulesBuilt(end int) {
+	b.eRegistrationMu.Lock()
+	if end > b.strictBuiltModules {
+		b.strictBuiltModules = end
+	}
+	b.eRegistrationMu.Unlock()
+}
+
+func (b *Bear) strictMountBuildBatch() ([]MountMetadata, int) {
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	start := b.strictBuiltMounts
+	end := len(b.mounts)
+	mounts := make([]MountMetadata, 0, end-start)
+	for _, mount := range b.mounts[start:end] {
+		mounts = append(mounts, MountMetadata{
+			Group:   mount.Group,
+			Classes: append([]IClass(nil), mount.Classes...),
+		})
+	}
+	return mounts, end
+}
+
+func (b *Bear) markStrictMountsBuilt(end int) {
+	b.eRegistrationMu.Lock()
+	if end > b.strictBuiltMounts {
+		b.strictBuiltMounts = end
+	}
+	b.eRegistrationMu.Unlock()
+}
+
+func (b *Bear) strictBuildSnapshot() (bool, uint64, int) {
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	stable := b.strictBuiltModules == len(b.modules) && b.strictBuiltMounts == len(b.mounts)
+	return stable, b.strictRegistrationVersion, len(b.runtime.Container.orderedBeans())
+}
+
+func (b *Bear) sealStableStrictBuild(version uint64, beanCount int) bool {
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	if b.strictBuiltModules != len(b.modules) || b.strictBuiltMounts != len(b.mounts) {
+		return false
+	}
+	if b.strictRegistrationVersion != version || len(b.runtime.Container.orderedBeans()) != beanCount {
+		return false
+	}
+	b.runtime.Lifecycle.sealRegistration()
+	b.strictBuildComplete = true
+	return true
+}
+
+func (b *Bear) buildModuleStrict(mod Module) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = strictBuildPanicError("module", mod, recovered)
+		}
+	}()
+	if builder, ok := mod.(ModuleBuilderE); ok {
+		if err := builder.BuildE(b); err != nil {
+			return fmt.Errorf("module BuildE failed [%T]: %w", mod, err)
+		}
+		return nil
+	}
+	mod.Build(b)
+	return nil
+}
+
+func (b *Bear) markStrictPluginModuleBuilt(mod Module) {
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	if b.strictPluginModules == nil {
+		b.strictPluginModules = make(map[int]struct{})
+	}
+	for index := len(b.modules) - 1; index >= 0; index-- {
+		if sameBeanInstance(b.modules[index], mod) {
+			b.strictPluginModules[index] = struct{}{}
+			return
+		}
+	}
+}
+
+func strictBuildPanicError(kind string, target any, recovered any) error {
+	if recoveredErr, ok := recovered.(error); ok {
+		return fmt.Errorf("%s build panic [%T]: %w", kind, target, recoveredErr)
+	}
+	return fmt.Errorf("%s build panic [%T]: %v", kind, target, recovered)
 }
 
 func (b *Bear) launchApplyError() error {
@@ -1309,6 +1527,25 @@ func (b *Bear) Group(relativePath string, classes ...IClass) *gin.RouterGroup {
 }
 
 func (b *Bear) buildController(group *gin.RouterGroup, groupName string, class IClass) {
+	if err := b.buildControllerE(group, groupName, class); err != nil {
+		panic(err)
+	}
+}
+
+func (b *Bear) buildControllerE(group *gin.RouterGroup, groupName string, class IClass) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if !b.frameworkStrict() {
+				panic(recovered)
+			}
+			err = strictBuildPanicError("controller", class, recovered)
+		}
+	}()
+	if b.frameworkStrict() {
+		if err := b.applyStrictObject(class); err != nil {
+			return fmt.Errorf("inject controller %T: %w", class, err)
+		}
+	}
 	parent := b.registration
 	fairings := make([]Fairing, 0)
 	if parent != nil {
@@ -1318,7 +1555,13 @@ func (b *Bear) buildController(group *gin.RouterGroup, groupName string, class I
 	if inter, ok := class.(IInterceptors); ok {
 		ownFairings = append([]Fairing(nil), inter.Interceptors()...)
 		for _, fairing := range ownFairings {
-			b.runtime.Container.Apply(fairing)
+			if b.frameworkStrict() {
+				if err := b.applyStrictObject(fairing); err != nil {
+					return fmt.Errorf("inject controller fairing %T: %w", fairing, err)
+				}
+			} else {
+				b.runtime.Container.Apply(fairing)
+			}
 		}
 		fairings = append(fairings, ownFairings...)
 	}
@@ -1376,7 +1619,16 @@ func (b *Bear) buildController(group *gin.RouterGroup, groupName string, class I
 			})
 		}
 	}
+	if b.frameworkStrict() {
+		if builder, ok := class.(ClassBuilderE); ok {
+			if err := builder.BuildE(b); err != nil {
+				return fmt.Errorf("controller BuildE failed [%T]: %w", class, err)
+			}
+			return nil
+		}
+	}
 	class.Build(b)
+	return nil
 }
 
 // POST 注册 POST 路由 (自动感知当前的挂载点)

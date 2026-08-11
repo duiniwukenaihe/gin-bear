@@ -232,6 +232,25 @@ func (p *PluginManager) withRegistration(register func() error) error {
 }
 
 func (p *PluginManager) registerModuleInRegistration(mod Module) error {
+	if p.bear.frameworkStrict() {
+		if err := p.bear.addModulesE(false, mod); err != nil {
+			return fmt.Errorf("register strict plugin module %T: %w", mod, err)
+		}
+		if err := p.bear.injectStrictBeans(); err != nil {
+			return fmt.Errorf("inject strict plugin beans for %T: %w", mod, err)
+		}
+		if err := p.bear.applyStrictObject(mod); err != nil {
+			return fmt.Errorf("inject strict plugin module %T: %w", mod, err)
+		}
+		p.bear.pluginMode = true
+		defer func() { p.bear.pluginMode = false }()
+		if err := p.bear.buildModuleStrict(mod); err != nil {
+			return err
+		}
+		p.bear.markStrictPluginModuleBuilt(mod)
+		return nil
+	}
+
 	beans := mod.Beans()
 	// 1. 注册 Beans 到主 IoC 容器
 	for _, bean := range beans {
