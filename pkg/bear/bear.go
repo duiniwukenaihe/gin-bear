@@ -103,7 +103,7 @@ type Bear struct {
 	applyMu                   sync.Mutex
 	applyState                applyState
 	applyErr                  error
-	applyDone                 chan struct{}
+	applyAttempt              *applyAttempt
 	pluginBarrier             *pluginRegistrationBarrier
 	pluginDispatcher          *PluginDispatcher
 	pluginManager             *PluginManager
@@ -113,6 +113,11 @@ type Bear struct {
 }
 
 type applyState uint8
+
+type applyAttempt struct {
+	done chan struct{}
+	err  error
+}
 
 const (
 	applyNotStarted applyState = iota
@@ -1185,32 +1190,36 @@ func (b *Bear) ApplyAll(ctx context.Context) error {
 		b.applyMu.Unlock()
 		return err
 	case applyRunning:
-		done := b.applyDone
+		attempt := b.applyAttempt
 		b.applyMu.Unlock()
 		select {
-		case <-done:
-			b.applyMu.Lock()
-			err := b.applyErr
-			b.applyMu.Unlock()
-			return err
+		case <-attempt.done:
+			return attempt.err
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	default:
 		b.applyState = applyRunning
-		b.applyDone = make(chan struct{})
+		b.applyErr = nil
+		b.applyAttempt = &applyAttempt{done: make(chan struct{})}
 		b.applyMu.Unlock()
 	}
 
 	err := b.applyAll(ctx)
 	b.applyMu.Lock()
 	if err != nil {
-		b.applyState = applyFailed
+		if b.frameworkStrict() && b.runtime.Lifecycle.canRetryStart() {
+			b.applyState = applyNotStarted
+		} else {
+			b.applyState = applyFailed
+		}
 		b.applyErr = err
 	} else {
 		b.applyState = applySucceeded
+		b.applyErr = nil
 	}
-	close(b.applyDone)
+	b.applyAttempt.err = err
+	close(b.applyAttempt.done)
 	b.applyMu.Unlock()
 	return err
 }

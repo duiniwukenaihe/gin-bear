@@ -42,9 +42,10 @@ var defaultFacade atomic.Pointer[legacyFacade]
 const runtimeContextKey = "bear_runtime"
 
 func newRuntime(config *SysConfig) *Runtime {
-	lifecycle := newLifecycle()
+	strict := config != nil && config.FrameworkStrict()
+	lifecycle := newLifecycleWithMode(strict)
 	container := NewBeanFactory()
-	container.strict = config != nil && config.FrameworkStrict()
+	container.strict = strict
 	container.onSet = lifecycle.registerBean
 	container.onBatchSet = lifecycle.registerBeans
 	container.onRemove = lifecycle.removeBean

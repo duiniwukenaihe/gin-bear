@@ -19,10 +19,12 @@ type Lifecycle struct {
 	mu                 sync.Mutex
 	components         []*lifecycleEntry
 	beanEntries        map[reflect.Type]*lifecycleEntry
+	strict             bool
 	state              lifecycleState
 	registrationSealed bool
 	operationDone      chan struct{}
 	startErr           error
+	startRetryable     bool
 	stopErr            error
 }
 
@@ -32,6 +34,25 @@ type lifecycleEntry struct {
 	active        bool
 	started       bool
 	stopped       bool
+	stopState     lifecycleEntryStopState
+	stopAttempt   *lifecycleStopAttempt
+	terminalErr   error
+	legacyStarted bool
+}
+
+type lifecycleEntryStopState uint8
+
+const (
+	lifecycleEntryPending lifecycleEntryStopState = iota
+	lifecycleEntryStopping
+	lifecycleEntryRetryPending
+	lifecycleEntryStopped
+	lifecycleEntryStoppedWithError
+)
+
+type lifecycleStopAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 type lifecycleState uint8
@@ -54,7 +75,11 @@ var (
 const lifecycleRollbackTimeout = 5 * time.Second
 
 func newLifecycle() *Lifecycle {
-	return &Lifecycle{beanEntries: make(map[reflect.Type]*lifecycleEntry)}
+	return newLifecycleWithMode(false)
+}
+
+func newLifecycleWithMode(strict bool) *Lifecycle {
+	return &Lifecycle{beanEntries: make(map[reflect.Type]*lifecycleEntry), strict: strict}
 }
 
 func (l *Lifecycle) registrationClosed() bool {
@@ -219,6 +244,9 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if l.strict {
+		return l.startStrict(ctx)
+	}
 
 	for {
 		l.mu.Lock()
@@ -249,6 +277,130 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 			return l.startComponents(ctx, components)
 		}
 	}
+}
+
+func (l *Lifecycle) startStrict(ctx context.Context) error {
+	for {
+		l.mu.Lock()
+		switch l.state {
+		case lifecycleStopped:
+			err := l.startErr
+			l.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			return errLifecycleStopped
+		case lifecycleStarted:
+			err := l.startErr
+			l.mu.Unlock()
+			return err
+		case lifecycleStarting, lifecycleStopping:
+			done := l.operationDone
+			l.mu.Unlock()
+			if err := waitLifecycleOperation(ctx, done); err != nil {
+				return err
+			}
+			continue
+		default:
+			l.state = lifecycleStarting
+			l.startRetryable = false
+			l.operationDone = make(chan struct{})
+			components := append([]*lifecycleEntry(nil), l.components...)
+			l.mu.Unlock()
+			return l.startStrictComponents(ctx, components)
+		}
+	}
+}
+
+func (l *Lifecycle) startStrictComponents(ctx context.Context, components []*lifecycleEntry) error {
+	for _, entry := range components {
+		if err := ctx.Err(); err != nil {
+			return l.rollbackStrictStart(fmt.Errorf("component initialization not started [%s]: %w", strictLifecycleComponentName(entry.component), err))
+		}
+		l.mu.Lock()
+		active := entry.active
+		if active {
+			entry.started = true
+			entry.stopped = false
+			entry.stopState = lifecycleEntryPending
+			entry.stopAttempt = nil
+			entry.terminalErr = nil
+			entry.legacyStarted = false
+		}
+		l.mu.Unlock()
+		if !active {
+			continue
+		}
+		initializer, ok := entry.component.(Initializer)
+		if !ok {
+			continue
+		}
+		if err := runLifecycleInitializer(ctx, initializer); err != nil {
+			startErr := fmt.Errorf("component initialization failed [%s]: %w", strictLifecycleComponentName(entry.component), err)
+			return l.rollbackStrictStart(startErr)
+		}
+	}
+	l.mu.Lock()
+	l.state = lifecycleStarted
+	l.startErr = nil
+	l.startRetryable = false
+	close(l.operationDone)
+	l.mu.Unlock()
+	return nil
+}
+
+func (l *Lifecycle) rollbackStrictStart(startErr error) error {
+	l.mu.Lock()
+	l.state = lifecycleStopping
+	l.startErr = startErr
+	l.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), lifecycleRollbackTimeout)
+	defer cancel()
+	rollbackErr, complete := l.stopStrictEntries(ctx)
+
+	l.mu.Lock()
+	if complete && rollbackErr == nil {
+		l.resetStrictEntriesForRetryLocked()
+		l.state = lifecycleNew
+		l.startRetryable = true
+		l.stopErr = nil
+	} else {
+		l.startRetryable = false
+		l.stopErr = rollbackErr
+		if complete {
+			l.state = lifecycleStopped
+		} else {
+			l.state = lifecycleStarted
+		}
+	}
+	close(l.operationDone)
+	l.mu.Unlock()
+	if rollbackErr != nil {
+		return errors.Join(startErr, fmt.Errorf("lifecycle rollback failed: %w", rollbackErr))
+	}
+	return startErr
+}
+
+func (l *Lifecycle) resetStrictEntriesForRetryLocked() {
+	for _, entry := range l.components {
+		entry.started = false
+		entry.stopped = false
+		entry.stopState = lifecycleEntryPending
+		entry.stopAttempt = nil
+		entry.terminalErr = nil
+		entry.legacyStarted = false
+	}
+}
+
+func (l *Lifecycle) canRetryStart() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	retryable := l.strict && l.startRetryable && l.state == lifecycleNew
+	l.mu.Unlock()
+	return retryable
 }
 
 func (l *Lifecycle) startComponents(ctx context.Context, components []*lifecycleEntry) error {
@@ -327,6 +479,9 @@ func (l *Lifecycle) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if l.strict {
+		return l.stopStrict(ctx)
+	}
 
 	for {
 		l.mu.Lock()
@@ -356,6 +511,174 @@ func (l *Lifecycle) Stop(ctx context.Context) error {
 			return l.stopComponents(ctx, components)
 		}
 	}
+}
+
+func (l *Lifecycle) stopStrict(ctx context.Context) error {
+	for {
+		l.mu.Lock()
+		switch l.state {
+		case lifecycleStopped:
+			err := l.stopErr
+			l.mu.Unlock()
+			return err
+		case lifecycleStarting, lifecycleStopping:
+			done := l.operationDone
+			l.mu.Unlock()
+			if err := waitLifecycleOperation(ctx, done); err != nil {
+				return err
+			}
+			continue
+		default:
+			l.state = lifecycleStopping
+			l.operationDone = make(chan struct{})
+			l.mu.Unlock()
+
+			stopErr, complete := l.stopStrictEntries(ctx)
+			terminalErr := l.strictTerminalStopError()
+			l.mu.Lock()
+			if complete {
+				l.state = lifecycleStopped
+				l.stopErr = terminalErr
+				stopErr = l.stopErr
+			} else {
+				l.state = lifecycleStarted
+				l.stopErr = nil
+			}
+			close(l.operationDone)
+			l.mu.Unlock()
+			return stopErr
+		}
+	}
+}
+
+func (l *Lifecycle) stopStrictEntries(ctx context.Context) (error, bool) {
+	var shutdownErrors []error
+	for index := len(l.components) - 1; index >= 0; index-- {
+		entry := l.components[index]
+		if !entry.active || !entry.started {
+			continue
+		}
+		if entry.stopState == lifecycleEntryStopped || entry.stopState == lifecycleEntryStoppedWithError {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			shutdownErrors = append(shutdownErrors, fmt.Errorf("component shutdown not started [%s]: %w", strictLifecycleComponentName(entry.component), err))
+			return errors.Join(shutdownErrors...), false
+		}
+		err, complete := l.stopStrictEntry(ctx, entry)
+		if err != nil {
+			shutdownErrors = append(shutdownErrors, fmt.Errorf("component shutdown failed [%s]: %w", strictLifecycleComponentName(entry.component), err))
+		}
+		if !complete {
+			return errors.Join(shutdownErrors...), false
+		}
+	}
+	return errors.Join(shutdownErrors...), true
+}
+
+func (l *Lifecycle) stopStrictEntry(ctx context.Context, entry *lifecycleEntry) (error, bool) {
+	switch component := entry.component.(type) {
+	case ContextShutdowner:
+		startedHere := false
+		for {
+			if entry.stopState != lifecycleEntryStopping {
+				if err := ctx.Err(); err != nil {
+					return err, false
+				}
+				entry.stopAttempt = startLifecycleStopAttempt(func() error { return component.ShutdownContext(ctx) })
+				entry.stopState = lifecycleEntryStopping
+				startedHere = true
+			}
+			err, finished := waitLifecycleStopAttempt(ctx, entry.stopAttempt)
+			if !finished {
+				return err, false
+			}
+			entry.stopAttempt = nil
+			switch {
+			case err == nil:
+				entry.stopState = lifecycleEntryStopped
+				entry.stopped = true
+				return nil, true
+			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+				entry.stopState = lifecycleEntryRetryPending
+				if startedHere || ctx.Err() != nil {
+					return err, false
+				}
+				continue
+			default:
+				entry.stopState = lifecycleEntryStoppedWithError
+				entry.stopped = true
+				entry.terminalErr = err
+				return err, true
+			}
+		}
+	case Shutdowner:
+		if !entry.legacyStarted {
+			if err := ctx.Err(); err != nil {
+				return err, false
+			}
+			entry.stopAttempt = startLifecycleStopAttempt(component.Shutdown)
+			entry.stopState = lifecycleEntryStopping
+			entry.legacyStarted = true
+		}
+		err, finished := waitLifecycleStopAttempt(ctx, entry.stopAttempt)
+		if !finished {
+			return err, false
+		}
+		if err == nil {
+			entry.stopState = lifecycleEntryStopped
+			entry.stopped = true
+			return nil, true
+		}
+		entry.stopState = lifecycleEntryStoppedWithError
+		entry.stopped = true
+		entry.terminalErr = err
+		return err, true
+	default:
+		entry.stopState = lifecycleEntryStopped
+		entry.stopped = true
+		return nil, true
+	}
+}
+
+func startLifecycleStopAttempt(shutdown func() error) *lifecycleStopAttempt {
+	attempt := &lifecycleStopAttempt{done: make(chan struct{})}
+	go func() {
+		defer func() {
+			if recover() != nil {
+				attempt.err = errors.New("component shutdown panic")
+			}
+			close(attempt.done)
+		}()
+		attempt.err = shutdown()
+	}()
+	return attempt
+}
+
+func waitLifecycleStopAttempt(ctx context.Context, attempt *lifecycleStopAttempt) (error, bool) {
+	if attempt == nil {
+		return nil, true
+	}
+	select {
+	case <-attempt.done:
+		return attempt.err, true
+	case <-ctx.Done():
+		return ctx.Err(), false
+	}
+}
+
+func (l *Lifecycle) strictTerminalStopError() error {
+	var terminalErrors []error
+	for _, entry := range l.components {
+		if entry.stopState == lifecycleEntryStoppedWithError && entry.terminalErr != nil {
+			terminalErrors = append(terminalErrors, fmt.Errorf("component shutdown failed [%s]: %w", strictLifecycleComponentName(entry.component), entry.terminalErr))
+		}
+	}
+	return errors.Join(terminalErrors...)
+}
+
+func strictLifecycleComponentName(component any) string {
+	return fmt.Sprintf("%T", component)
 }
 
 func (l *Lifecycle) stopComponents(ctx context.Context, components []any) error {

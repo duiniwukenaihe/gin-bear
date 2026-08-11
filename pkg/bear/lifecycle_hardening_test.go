@@ -61,6 +61,67 @@ type countedErrorShutdowner struct {
 	calls   atomic.Int32
 }
 
+type strictFailOnceLifecycleComponent struct {
+	name      string
+	events    *[]string
+	initCalls atomic.Int32
+	stopCalls atomic.Int32
+	initErr   error
+	stopErr   error
+}
+
+func (c *strictFailOnceLifecycleComponent) Name() string { return c.name }
+func (c *strictFailOnceLifecycleComponent) Init(context.Context) error {
+	call := c.initCalls.Add(1)
+	if c.events != nil {
+		*c.events = append(*c.events, fmt.Sprintf("init:%s:%d", c.name, call))
+	}
+	if call == 1 {
+		return c.initErr
+	}
+	return nil
+}
+func (c *strictFailOnceLifecycleComponent) ShutdownContext(context.Context) error {
+	call := c.stopCalls.Add(1)
+	if c.events != nil {
+		*c.events = append(*c.events, fmt.Sprintf("stop:%s:%d", c.name, call))
+	}
+	return c.stopErr
+}
+
+type strictOrderedLifecycleComponent struct {
+	name    string
+	events  *[]string
+	failErr error
+}
+
+func (c *strictOrderedLifecycleComponent) Name() string { return c.name }
+func (c *strictOrderedLifecycleComponent) Init(context.Context) error {
+	*c.events = append(*c.events, "init:"+c.name)
+	return c.failErr
+}
+func (c *strictOrderedLifecycleComponent) ShutdownContext(context.Context) error {
+	*c.events = append(*c.events, "stop:"+c.name)
+	return nil
+}
+
+type strictRetryContextShutdowner struct {
+	name  string
+	calls atomic.Int32
+}
+
+func (c *strictRetryContextShutdowner) Name() string { return c.name }
+func (*strictRetryContextShutdowner) Init(context.Context) error {
+	return nil
+}
+func (c *strictRetryContextShutdowner) ShutdownContext(ctx context.Context) error {
+	if c.calls.Add(1) == 1 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
 func (c *countedErrorShutdowner) Name() string { return c.name }
 
 func (c *countedErrorShutdowner) ShutdownContext(context.Context) error {
@@ -151,6 +212,126 @@ func TestApplyAllCachesFailureAndInitializesOnceConcurrently(t *testing.T) {
 	}
 	if err := app.ApplyAll(context.Background()); !errors.Is(err, initErr) {
 		t.Fatalf("repeated ApplyAll() error = %v, want cached initializer error", err)
+	}
+}
+
+func TestFailingInitializerCleanupAndStrictApplyRetry(t *testing.T) {
+	initErr := errors.New("first strict init failed")
+	component := &strictFailOnceLifecycleComponent{name: "strict-retry", initErr: initErr}
+	app := Ignite(strictBuildConfig())
+	if err := app.BeansE(component); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.ApplyAll(context.Background()); !errors.Is(err, initErr) {
+		t.Fatalf("first ApplyAll() error = %v, want init error", err)
+	}
+	if component.initCalls.Load() != 1 || component.stopCalls.Load() != 1 {
+		t.Fatalf("first attempt init/stop calls = %d/%d, want 1/1", component.initCalls.Load(), component.stopCalls.Load())
+	}
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("second ApplyAll() error = %v", err)
+	}
+	if component.initCalls.Load() != 2 {
+		t.Fatalf("initializer calls = %d, want 2", component.initCalls.Load())
+	}
+}
+
+func TestStrictLifecycleRollbackIncludesFailingInitializerInLIFOOrder(t *testing.T) {
+	initErr := errors.New("strict ordered init failed")
+	events := make([]string, 0, 6)
+	lifecycle := newLifecycleWithMode(true)
+	lifecycle.Add(&strictOrderedLifecycleComponent{name: "first", events: &events})
+	lifecycle.Add(&strictOrderedLifecycleComponent{name: "second", events: &events})
+	lifecycle.Add(&strictOrderedLifecycleComponent{name: "failing", events: &events, failErr: initErr})
+
+	if err := lifecycle.Start(context.Background()); !errors.Is(err, initErr) {
+		t.Fatalf("Start() error = %v, want init error", err)
+	}
+	assertStrings(t, events, []string{
+		"init:first",
+		"init:second",
+		"init:failing",
+		"stop:failing",
+		"stop:second",
+		"stop:first",
+	})
+}
+
+func TestStrictLifecycleDoesNotRetryAfterRollbackFailure(t *testing.T) {
+	initErr := errors.New("strict init failed")
+	rollbackErr := errors.New("strict rollback failed")
+	component := &strictFailOnceLifecycleComponent{
+		name:    "strict-terminal",
+		initErr: initErr,
+		stopErr: rollbackErr,
+	}
+	app := Ignite(strictBuildConfig())
+	if err := app.BeansE(component); err != nil {
+		t.Fatal(err)
+	}
+
+	firstErr := app.ApplyAll(context.Background())
+	if !errors.Is(firstErr, initErr) || !errors.Is(firstErr, rollbackErr) {
+		t.Fatalf("first ApplyAll() error = %v, want init and rollback errors", firstErr)
+	}
+	if err := app.ApplyAll(context.Background()); err != firstErr {
+		t.Fatalf("second ApplyAll() error = %v, want cached %v", err, firstErr)
+	}
+	if component.initCalls.Load() != 1 || component.stopCalls.Load() != 1 {
+		t.Fatalf("terminal attempt init/stop calls = %d/%d, want 1/1", component.initCalls.Load(), component.stopCalls.Load())
+	}
+}
+
+func TestResumableStopRetriesContextShutdownerWithFreshContext(t *testing.T) {
+	component := &strictRetryContextShutdowner{name: "strict-context-retry"}
+	lifecycle := newLifecycleWithMode(true)
+	lifecycle.Add(component)
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := lifecycle.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Stop() error = %v, want deadline", err)
+	}
+	if err := lifecycle.Stop(context.Background()); err != nil {
+		t.Fatalf("second Stop() error = %v", err)
+	}
+	if got := component.calls.Load(); got != 2 {
+		t.Fatalf("ShutdownContext calls = %d, want 2", got)
+	}
+}
+
+func TestResumableStopKeepsSingleLegacyShutdownWorker(t *testing.T) {
+	component := &legacyBlockingShutdowner{
+		name:    "strict-legacy-resume",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	lifecycle := newLifecycleWithMode(true)
+	lifecycle.Add(component)
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := lifecycle.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		close(component.release)
+		t.Fatalf("first Stop() error = %v, want deadline", err)
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- lifecycle.Stop(context.Background()) }()
+	time.Sleep(20 * time.Millisecond)
+	if got := component.calls.Load(); got != 1 {
+		close(component.release)
+		t.Fatalf("legacy shutdown calls = %d, want one worker", got)
+	}
+	close(component.release)
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second Stop() error = %v", err)
 	}
 }
 
