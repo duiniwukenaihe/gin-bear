@@ -174,6 +174,25 @@ func TestRuntimeStaticInjectorResolvesFromOwningContainer(t *testing.T) {
 	}
 }
 
+func TestStrictRuntimeStaticInjectorResolvesFromOwningContainer(t *testing.T) {
+	firstConfig := NewSysConfig()
+	firstConfig.SetFrameworkStrict(true)
+	firstConfig.Auth.JWTSecret = "strict-first-runtime"
+	first := Ignite(firstConfig)
+	secondConfig := NewSysConfig()
+	secondConfig.SetFrameworkStrict(true)
+	secondConfig.Auth.JWTSecret = "strict-second-runtime"
+	Ignite(secondConfig)
+
+	target := &JWTUtil{}
+	if err := first.runtime.Container.ApplyE(target); err != nil {
+		t.Fatalf("ApplyE() error = %v", err)
+	}
+	if target.Config == nil || target.Config.Secret != firstConfig.Auth.JWTSecret {
+		t.Fatalf("strict static injection used config %#v, want %q", target.Config, firstConfig.Auth.JWTSecret)
+	}
+}
+
 func TestLegacyStaticInjectorFallsBackToOwningContainer(t *testing.T) {
 	staticMu.Lock()
 	previous, hadPrevious := staticInjectors["legacyRuntimeScopedTarget"]

@@ -1,19 +1,33 @@
 package bear
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 )
 
+var (
+	// ErrBeanMissing reports an unresolved strict dependency.
+	ErrBeanMissing = errors.New("bean missing")
+	// ErrBeanAmbiguous reports more than one implicit strict dependency.
+	ErrBeanAmbiguous = errors.New("bean ambiguous")
+	// ErrBeanDuplicate reports two different instances registered for one concrete type.
+	ErrBeanDuplicate = errors.New("bean duplicate")
+)
+
 // BeanFactory 负责管理所有的 Bean
 type BeanFactory struct {
-	mu       sync.RWMutex
-	beans    map[reflect.Type]any
-	order    []reflect.Type
-	onSet    func(reflect.Type, any, func()) error
-	onRemove func(reflect.Type)
+	mu        sync.RWMutex
+	beans     map[reflect.Type]any
+	order     []reflect.Type
+	concrete  map[reflect.Type]any
+	conflicts map[reflect.Type]struct{}
+	strict    bool
+	onSet     func(reflect.Type, any, func()) error
+	onRemove  func(reflect.Type)
 }
 
 var bootstrapInjector = NewBeanFactory()
@@ -25,9 +39,32 @@ type StaticInjector func(interface{})
 // the object being injected.
 type RuntimeStaticInjector func(*BeanFactory, interface{})
 
+// RuntimeStaticInjectorE is a container-scoped generated injector that can
+// report strict injection failures.
+type RuntimeStaticInjectorE func(*BeanFactory, any) error
+
 var staticInjectors = make(map[string]StaticInjector)
 var runtimeStaticInjectors = make(map[string]RuntimeStaticInjector)
+var runtimeStaticInjectorsE = make(map[string]RuntimeStaticInjectorE)
 var staticMu sync.RWMutex
+
+func init() {
+	RegisterRuntimeStaticInjectorE(runtimeStaticInjectorKey(reflect.TypeFor[JWTUtil]()), func(factory *BeanFactory, obj any) error {
+		target, ok := obj.(*JWTUtil)
+		if !ok {
+			return fmt.Errorf("strict static injector received %T, want *bear.JWTUtil", obj)
+		}
+		if target.Config != nil {
+			return nil
+		}
+		config, err := ResolveE[*SysConfig](factory)
+		if err != nil {
+			return fmt.Errorf("resolve JWT configuration: %w", err)
+		}
+		target.Config = newJWTUtilFromAuthConfig(config.Auth).Config
+		return nil
+	})
+}
 
 // RegisterStaticInjector 注册静态注入器
 func RegisterStaticInjector(name string, injector StaticInjector) {
@@ -41,6 +78,24 @@ func RegisterRuntimeStaticInjector(name string, injector RuntimeStaticInjector) 
 	staticMu.Lock()
 	defer staticMu.Unlock()
 	runtimeStaticInjectors[name] = injector
+}
+
+// RegisterRuntimeStaticInjectorE registers a strict generated injector under
+// the full package-path-and-type-name key returned by runtimeStaticInjectorKey.
+func RegisterRuntimeStaticInjectorE(key string, injector RuntimeStaticInjectorE) {
+	staticMu.Lock()
+	defer staticMu.Unlock()
+	runtimeStaticInjectorsE[key] = injector
+}
+
+func runtimeStaticInjectorKey(t reflect.Type) string {
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t == nil {
+		return ""
+	}
+	return t.PkgPath() + "." + t.Name()
 }
 
 // GetInjector 获取单例注入器
@@ -81,7 +136,11 @@ func setDefaultInjector(factory *BeanFactory) {
 
 // NewBeanFactory creates an isolated bean container.
 func NewBeanFactory() *BeanFactory {
-	return &BeanFactory{beans: make(map[reflect.Type]any)}
+	return &BeanFactory{
+		beans:     make(map[reflect.Type]any),
+		concrete:  make(map[reflect.Type]any),
+		conflicts: make(map[reflect.Type]struct{}),
+	}
 }
 
 // Resolve retrieves a bean from the provided container.
@@ -94,9 +153,33 @@ func Resolve[T any](factory *BeanFactory) T {
 	return value
 }
 
+// ResolveE retrieves a dependency without choosing between implicit candidates.
+func ResolveE[T any](factory *BeanFactory) (T, error) {
+	var zero T
+	requestedType := reflect.TypeFor[T]()
+	if factory == nil {
+		return zero, fmt.Errorf("%w: dependency %s", ErrBeanMissing, requestedType)
+	}
+	bean, err := factory.resolveE(requestedType)
+	if err != nil {
+		return zero, err
+	}
+	value, ok := bean.(T)
+	if !ok {
+		return zero, fmt.Errorf("%w: dependency %s", ErrBeanMissing, requestedType)
+	}
+	return value, nil
+}
+
 // Set 注册一个 Bean
 func (f *BeanFactory) Set(bean any) {
-	_ = f.TrySet(bean)
+	if f == nil || bean == nil {
+		return
+	}
+	v := reflect.ValueOf(bean)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_ = f.registerLocked(v.Type(), bean, false)
 }
 
 // TrySet registers a bean or reports that the owning lifecycle is closed.
@@ -107,21 +190,45 @@ func (f *BeanFactory) TrySet(bean any) error {
 	v := reflect.ValueOf(bean)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.trySet(v.Type(), bean)
+	return f.registerLocked(v.Type(), bean, true)
 }
 
-func (f *BeanFactory) trySet(beanType reflect.Type, bean any) error {
+func (f *BeanFactory) registerLocked(beanType reflect.Type, bean any, enforceStrict bool) error {
+	if current, exists := f.beans[beanType]; exists && sameBeanInstance(current, bean) {
+		return nil
+	}
+	concreteType := reflect.TypeOf(bean)
+	previous, knownConcrete := f.concrete[concreteType]
+	conflict := knownConcrete && !sameBeanInstance(previous, bean)
+	if conflict && enforceStrict && f.strict {
+		return fmt.Errorf("%w: concrete bean type %s", ErrBeanDuplicate, concreteType)
+	}
 	commit := func() {
 		if _, exists := f.beans[beanType]; !exists {
 			f.order = append(f.order, beanType)
 		}
 		f.beans[beanType] = bean
+		f.concrete[concreteType] = bean
+		if conflict {
+			f.conflicts[concreteType] = struct{}{}
+		}
 	}
 	if f.onSet != nil {
 		return f.onSet(beanType, bean, commit)
 	}
 	commit()
 	return nil
+}
+
+func sameBeanInstance(left, right any) bool {
+	if reflect.TypeOf(left) != reflect.TypeOf(right) {
+		return false
+	}
+	leftValue := reflect.ValueOf(left)
+	if !leftValue.IsValid() || !leftValue.Type().Comparable() {
+		return false
+	}
+	return leftValue.Interface() == reflect.ValueOf(right).Interface()
 }
 
 // SetWithInterface 注册一个 Bean 并绑定到指定接口类型
@@ -149,7 +256,7 @@ func (f *BeanFactory) TrySetWithInterface(ifacePtr any, bean any) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.trySet(interfaceType, bean)
+	return f.registerLocked(interfaceType, bean, true)
 }
 
 func isNilBean(bean any) bool {
@@ -199,6 +306,54 @@ func (f *BeanFactory) Get(t reflect.Type) any {
 		}
 	}
 	return nil
+}
+
+func (f *BeanFactory) resolveE(requestedType reflect.Type) (any, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if bean, ok := f.beans[requestedType]; ok {
+		return bean, nil
+	}
+	if requestedType.Kind() != reflect.Interface {
+		return nil, fmt.Errorf("%w: dependency %s", ErrBeanMissing, requestedType)
+	}
+
+	candidates := make(map[reflect.Type]any)
+	for registeredType, bean := range f.beans {
+		if registeredType.Kind() == reflect.Interface {
+			continue
+		}
+		beanType := reflect.TypeOf(bean)
+		if beanType != nil && beanType.Implements(requestedType) {
+			candidates[beanType] = bean
+		}
+	}
+	switch len(candidates) {
+	case 0:
+		return nil, fmt.Errorf("%w: dependency %s", ErrBeanMissing, requestedType)
+	case 1:
+		for _, bean := range candidates {
+			return bean, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: dependency %s has %d implicit implementations", ErrBeanAmbiguous, requestedType, len(candidates))
+}
+
+func (f *BeanFactory) strictConflictError() error {
+	if f == nil {
+		return nil
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if len(f.conflicts) == 0 {
+		return nil
+	}
+	types := make([]string, 0, len(f.conflicts))
+	for beanType := range f.conflicts {
+		types = append(types, beanType.String())
+	}
+	sort.Strings(types)
+	return fmt.Errorf("%w: concrete bean types %s", ErrBeanDuplicate, strings.Join(types, ", "))
 }
 
 // GetByType 使用泛型获取 Bean
@@ -271,6 +426,100 @@ func (f *BeanFactory) Apply(obj any) {
 			}
 		}
 	}
+}
+
+// ApplyE injects dependencies using strict container-local resolution only.
+func (f *BeanFactory) ApplyE(obj any) error {
+	v := reflect.ValueOf(obj)
+	if !v.IsValid() || v.Kind() != reflect.Ptr || v.IsNil() || v.Elem().Kind() != reflect.Struct {
+		return fmt.Errorf("strict injection requires a non-nil pointer to struct, got %T", obj)
+	}
+
+	structType := v.Elem().Type()
+	key := runtimeStaticInjectorKey(structType)
+	staticMu.RLock()
+	injector, ok := runtimeStaticInjectorsE[key]
+	staticMu.RUnlock()
+	if ok {
+		if err := injector(f, obj); err != nil {
+			return fmt.Errorf("strict static injection for %s: %w", structType, err)
+		}
+		return nil
+	}
+	return f.applyEReflect(v.Elem())
+}
+
+func (f *BeanFactory) applyEReflect(value reflect.Value) error {
+	valueType := value.Type()
+	valuePointerType := reflect.TypeFor[*Value]()
+	for i := 0; i < value.NumField(); i++ {
+		field := valueType.Field(i)
+		fieldValue := value.Field(i)
+		injectTag, inject := field.Tag.Lookup("inject")
+		valueTag, valueInjection := field.Tag.Lookup("value")
+		if !inject && !valueInjection {
+			continue
+		}
+		if field.PkgPath != "" || !fieldValue.CanSet() {
+			return fmt.Errorf("strict injection cannot set unexported field %s.%s (%s)", valueType, field.Name, field.Type)
+		}
+		if valueInjection {
+			if field.Type != valuePointerType {
+				return fmt.Errorf("strict Value injection field %s.%s must have type *bear.Value, got %s", valueType, field.Name, field.Type)
+			}
+			injectedValue, err := f.valueE(valueType, field.Name, valueTag)
+			if err != nil {
+				return err
+			}
+			fieldValue.Set(reflect.ValueOf(injectedValue))
+			continue
+		}
+		_ = injectTag // Strict injection resolves every explicit inject field by its field type.
+		bean, err := f.resolveE(field.Type)
+		if err != nil {
+			return fmt.Errorf("strict injection field %s.%s (%s): %w", valueType, field.Name, field.Type, err)
+		}
+		beanValue := reflect.ValueOf(bean)
+		if !beanValue.IsValid() || !beanValue.Type().AssignableTo(field.Type) {
+			return fmt.Errorf("%w: strict injection field %s.%s (%s)", ErrBeanMissing, valueType, field.Name, field.Type)
+		}
+		fieldValue.Set(beanValue)
+	}
+	return nil
+}
+
+func (f *BeanFactory) valueE(owner reflect.Type, fieldName, valueTag string) (*Value, error) {
+	if valueTag == "" {
+		return nil, fmt.Errorf("strict Value injection field %s.%s has an empty value tag", owner, fieldName)
+	}
+	prefix, key := valueParts(valueTag)
+	fullKey := key
+	if prefix != "" {
+		fullKey = prefix + "." + key
+	}
+	f.mu.RLock()
+	config, ok := f.beans[reflect.TypeFor[*SysConfig]()]
+	f.mu.RUnlock()
+	if !ok || config == nil {
+		return nil, fmt.Errorf("%w: configuration value %s for field %s.%s", ErrBeanMissing, fullKey, owner, fieldName)
+	}
+	sysConfig, ok := config.(*SysConfig)
+	if !ok || sysConfig == nil || sysConfig.Config == nil {
+		return nil, fmt.Errorf("strict Value injection cannot read configuration for field %s.%s", owner, fieldName)
+	}
+	stored, ok := sysConfig.Config[fullKey]
+	if !ok {
+		return nil, fmt.Errorf("%w: configuration value %s for field %s.%s", ErrBeanMissing, fullKey, owner, fieldName)
+	}
+	return &Value{prefix: prefix, key: key, value: stored}, nil
+}
+
+func valueParts(valueTag string) (prefix, key string) {
+	parts := strings.Split(valueTag, ".")
+	if len(parts) == 1 {
+		return "", valueTag
+	}
+	return parts[0], strings.Join(parts[1:], ".")
 }
 
 // injectValue 处理 @Value 配置注入

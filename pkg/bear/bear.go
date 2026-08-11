@@ -649,6 +649,26 @@ func (b *Bear) Mount(group string, classes ...IClass) *Bear {
 	return b
 }
 
+// MountE registers controllers and their metadata only when strict bean
+// registration succeeds.
+func (b *Bear) MountE(group string, classes ...IClass) error {
+	if b == nil || b.runtime == nil {
+		return errors.New("bear runtime is unavailable")
+	}
+	beans := make([]Bean, 0, len(classes))
+	for _, class := range classes {
+		if class == nil {
+			return errors.New("controller must not be nil")
+		}
+		beans = append(beans, class)
+	}
+	if err := b.BeansE(beans...); err != nil {
+		return fmt.Errorf("register mounted controllers: %w", err)
+	}
+	b.mounts = append(b.mounts, MountMetadata{Group: group, Classes: classes})
+	return nil
+}
+
 // EnableHealth 启用健康检查与指标端点
 func (b *Bear) EnableHealth() *Bear {
 	b.Mount("", &HealthController{runtime: b.runtime})
@@ -676,6 +696,23 @@ func (b *Bear) Beans(beans ...Bean) *Bear {
 		b.runtime.Container.Set(bean)
 	}
 	return b
+}
+
+// BeansE registers beans while returning lifecycle and strict IoC errors.
+func (b *Bear) BeansE(beans ...Bean) error {
+	if b == nil || b.runtime == nil {
+		return errors.New("bear runtime is unavailable")
+	}
+	for _, bean := range beans {
+		if bean == nil {
+			return errors.New("bean must not be nil")
+		}
+		if err := b.runtime.Container.TrySet(bean); err != nil {
+			return fmt.Errorf("register bean %s: %w", bean.Name(), err)
+		}
+		b.exprData[bean.Name()] = bean
+	}
+	return nil
 }
 
 // Attach 注册全局 Fairing
@@ -707,6 +744,24 @@ func (b *Bear) AddModule(modules ...Module) *Bear {
 		b.modules = append(b.modules, mod)
 	}
 	return b
+}
+
+// AddModuleE registers module beans before publishing the module metadata.
+func (b *Bear) AddModuleE(modules ...Module) error {
+	if b == nil || b.runtime == nil {
+		return errors.New("bear runtime is unavailable")
+	}
+	for _, mod := range modules {
+		if mod == nil {
+			return errors.New("module must not be nil")
+		}
+		if err := b.BeansE(mod.Beans()...); err != nil {
+			return fmt.Errorf("register module %s: %w", mod.Name(), err)
+		}
+		b.runtime.Logger.Info("Loading module", "name", mod.Name())
+		b.modules = append(b.modules, mod)
+	}
+	return nil
 }
 
 // HandleWS 注册 WebSocket 路由
@@ -1112,11 +1167,23 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 			}
 		}
 	}()
+	if b.frameworkStrict() {
+		if err := b.runtime.Container.strictConflictError(); err != nil {
+			return err
+		}
+	}
+
 	// 1. 第一遍遍历：执行字段注入
 	for _, bean := range b.runtime.Container.orderedBeans() {
 		v := reflect.ValueOf(bean)
 		if v.Kind() == reflect.Ptr && v.Elem().Kind() == reflect.Struct {
-			b.runtime.Container.Apply(bean)
+			if b.frameworkStrict() {
+				if err := b.runtime.Container.ApplyE(bean); err != nil {
+					return err
+				}
+			} else {
+				b.runtime.Container.Apply(bean)
+			}
 		}
 	}
 
