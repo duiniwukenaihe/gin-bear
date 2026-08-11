@@ -100,6 +100,23 @@ func (l *Lifecycle) registerBean(beanType reflect.Type, bean any, commit func())
 	return nil
 }
 
+func (l *Lifecycle) registerBeans(registrations []beanRegistration, commit func()) error {
+	if l == nil {
+		commit()
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.registrationSealed || l.state != lifecycleNew {
+		return ErrLifecycleRegistrationClosed
+	}
+	commit()
+	for _, registration := range registrations {
+		l.setBeanLocked(registration.beanType, registration.bean)
+	}
+	return nil
+}
+
 func (l *Lifecycle) setBeanLocked(beanType reflect.Type, bean any) {
 	if l.state == lifecycleStopping || l.state == lifecycleStopped {
 		return

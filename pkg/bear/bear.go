@@ -657,14 +657,16 @@ func (b *Bear) MountE(group string, classes ...IClass) error {
 	}
 	beans := make([]Bean, 0, len(classes))
 	for _, class := range classes {
-		if class == nil {
-			return errors.New("controller must not be nil")
-		}
 		beans = append(beans, class)
 	}
-	if err := b.BeansE(beans...); err != nil {
+	values, names, err := prepareStrictBeans(beans)
+	if err != nil {
 		return fmt.Errorf("register mounted controllers: %w", err)
 	}
+	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
+		return fmt.Errorf("register mounted controllers: %w", err)
+	}
+	publishBeanMetadata(b.exprData, beans, names)
 	b.mounts = append(b.mounts, MountMetadata{Group: group, Classes: classes})
 	return nil
 }
@@ -703,16 +705,36 @@ func (b *Bear) BeansE(beans ...Bean) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
-	for _, bean := range beans {
-		if bean == nil {
-			return errors.New("bean must not be nil")
-		}
-		if err := b.runtime.Container.TrySet(bean); err != nil {
-			return fmt.Errorf("register bean %s: %w", bean.Name(), err)
-		}
-		b.exprData[bean.Name()] = bean
+	values, names, err := prepareStrictBeans(beans)
+	if err != nil {
+		return err
 	}
+	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
+		return fmt.Errorf("register beans: %w", err)
+	}
+	publishBeanMetadata(b.exprData, beans, names)
 	return nil
+}
+
+func prepareStrictBeans(beans []Bean) ([]any, []string, error) {
+	values := make([]any, len(beans))
+	for index, bean := range beans {
+		if bean == nil || isNilBean(bean) {
+			return nil, nil, fmt.Errorf("bean item %d (%T) must not be nil", index, bean)
+		}
+		values[index] = bean
+	}
+	names := make([]string, len(beans))
+	for index, bean := range beans {
+		names[index] = bean.Name()
+	}
+	return values, names, nil
+}
+
+func publishBeanMetadata(metadata map[string]interface{}, beans []Bean, names []string) {
+	for index, bean := range beans {
+		metadata[names[index]] = bean
+	}
 }
 
 // Attach 注册全局 Fairing
@@ -751,14 +773,27 @@ func (b *Bear) AddModuleE(modules ...Module) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
-	for _, mod := range modules {
-		if mod == nil {
-			return errors.New("module must not be nil")
+	for index, mod := range modules {
+		if mod == nil || isNilBean(mod) {
+			return fmt.Errorf("module item %d (%T) must not be nil", index, mod)
 		}
-		if err := b.BeansE(mod.Beans()...); err != nil {
-			return fmt.Errorf("register module %s: %w", mod.Name(), err)
-		}
-		b.runtime.Logger.Info("Loading module", "name", mod.Name())
+	}
+	moduleNames := make([]string, len(modules))
+	beans := make([]Bean, 0)
+	for index, mod := range modules {
+		moduleNames[index] = mod.Name()
+		beans = append(beans, mod.Beans()...)
+	}
+	values, beanNames, err := prepareStrictBeans(beans)
+	if err != nil {
+		return fmt.Errorf("register modules: %w", err)
+	}
+	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
+		return fmt.Errorf("register modules: %w", err)
+	}
+	publishBeanMetadata(b.exprData, beans, beanNames)
+	for index, mod := range modules {
+		b.runtime.Logger.Info("Loading module", "name", moduleNames[index])
 		b.modules = append(b.modules, mod)
 	}
 	return nil

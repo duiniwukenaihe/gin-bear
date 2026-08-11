@@ -46,6 +46,7 @@ func newRuntime(config *SysConfig) *Runtime {
 	container := NewBeanFactory()
 	container.strict = config != nil && config.FrameworkStrict()
 	container.onSet = lifecycle.registerBean
+	container.onBatchSet = lifecycle.registerBeans
 	container.onRemove = lifecycle.removeBean
 	runtime := &Runtime{
 		Config:          config,

@@ -20,14 +20,20 @@ var (
 
 // BeanFactory 负责管理所有的 Bean
 type BeanFactory struct {
-	mu        sync.RWMutex
-	beans     map[reflect.Type]any
-	order     []reflect.Type
-	concrete  map[reflect.Type]any
-	conflicts map[reflect.Type]struct{}
-	strict    bool
-	onSet     func(reflect.Type, any, func()) error
-	onRemove  func(reflect.Type)
+	mu         sync.RWMutex
+	beans      map[reflect.Type]any
+	order      []reflect.Type
+	concrete   map[reflect.Type]any
+	conflicts  map[reflect.Type]struct{}
+	strict     bool
+	onSet      func(reflect.Type, any, func()) error
+	onBatchSet func([]beanRegistration, func()) error
+	onRemove   func(reflect.Type)
+}
+
+type beanRegistration struct {
+	beanType reflect.Type
+	bean     any
 }
 
 var bootstrapInjector = NewBeanFactory()
@@ -184,13 +190,72 @@ func (f *BeanFactory) Set(bean any) {
 
 // TrySet registers a bean or reports that the owning lifecycle is closed.
 func (f *BeanFactory) TrySet(bean any) error {
-	if f == nil || bean == nil {
+	if f == nil {
 		return nil
+	}
+	if bean == nil || isNilBean(bean) {
+		return fmt.Errorf("bean must not be nil")
 	}
 	v := reflect.ValueOf(bean)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.registerLocked(v.Type(), bean, true)
+}
+
+func (f *BeanFactory) trySetBatchStrict(beans []any) error {
+	if f == nil {
+		return fmt.Errorf("bean factory is nil")
+	}
+	for index, bean := range beans {
+		if bean == nil || isNilBean(bean) {
+			return fmt.Errorf("strict bean batch item %d must not be nil", index)
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	plannedBeans := make(map[reflect.Type]any, len(f.beans)+len(beans))
+	for beanType, bean := range f.beans {
+		plannedBeans[beanType] = bean
+	}
+	plannedConcrete := make(map[reflect.Type]any, len(f.concrete)+len(beans))
+	for beanType, bean := range f.concrete {
+		plannedConcrete[beanType] = bean
+	}
+	registrations := make([]beanRegistration, 0, len(beans))
+	for _, bean := range beans {
+		beanType := reflect.TypeOf(bean)
+		if current, exists := plannedBeans[beanType]; exists {
+			if sameBeanInstance(current, bean) {
+				continue
+			}
+			return fmt.Errorf("%w: concrete bean type %s", ErrBeanDuplicate, beanType)
+		}
+		if current, exists := plannedConcrete[beanType]; exists && !sameBeanInstance(current, bean) {
+			return fmt.Errorf("%w: concrete bean type %s", ErrBeanDuplicate, beanType)
+		}
+		plannedBeans[beanType] = bean
+		plannedConcrete[beanType] = bean
+		registrations = append(registrations, beanRegistration{beanType: beanType, bean: bean})
+	}
+	if len(registrations) == 0 {
+		return nil
+	}
+	commit := func() {
+		for _, registration := range registrations {
+			f.order = append(f.order, registration.beanType)
+			f.beans[registration.beanType] = registration.bean
+			f.concrete[registration.beanType] = registration.bean
+		}
+	}
+	if f.onBatchSet != nil {
+		return f.onBatchSet(registrations, commit)
+	}
+	if f.onSet != nil {
+		return fmt.Errorf("strict batch registration requires an atomic lifecycle callback")
+	}
+	commit()
+	return nil
 }
 
 func (f *BeanFactory) registerLocked(beanType reflect.Type, bean any, enforceStrict bool) error {
@@ -225,10 +290,18 @@ func sameBeanInstance(left, right any) bool {
 		return false
 	}
 	leftValue := reflect.ValueOf(left)
-	if !leftValue.IsValid() || !leftValue.Type().Comparable() {
+	if !leftValue.IsValid() {
 		return false
 	}
-	return leftValue.Interface() == reflect.ValueOf(right).Interface()
+	if leftValue.Type().Comparable() {
+		return leftValue.Interface() == reflect.ValueOf(right).Interface()
+	}
+	switch leftValue.Kind() {
+	case reflect.Map, reflect.Slice:
+		return leftValue.UnsafePointer() == reflect.ValueOf(right).UnsafePointer()
+	default:
+		return false
+	}
 }
 
 // SetWithInterface 注册一个 Bean 并绑定到指定接口类型
@@ -280,9 +353,29 @@ func (f *BeanFactory) Remove(t reflect.Type) {
 			break
 		}
 	}
+	f.rebuildConcreteIndexesLocked()
 	onRemove := f.onRemove
 	if onRemove != nil {
 		onRemove(t)
+	}
+}
+
+func (f *BeanFactory) rebuildConcreteIndexesLocked() {
+	clear(f.concrete)
+	clear(f.conflicts)
+	for _, registeredType := range f.order {
+		bean, exists := f.beans[registeredType]
+		if !exists {
+			continue
+		}
+		concreteType := reflect.TypeOf(bean)
+		if concreteType == nil {
+			continue
+		}
+		if current, exists := f.concrete[concreteType]; exists && !sameBeanInstance(current, bean) {
+			f.conflicts[concreteType] = struct{}{}
+		}
+		f.concrete[concreteType] = bean
 	}
 }
 
@@ -599,7 +692,16 @@ func (f *BeanFactory) orderedBeans() []any {
 	beans := make([]any, 0, len(f.order))
 	for _, registeredType := range f.order {
 		if bean, ok := f.beans[registeredType]; ok {
-			beans = append(beans, bean)
+			duplicate := false
+			for _, existing := range beans {
+				if sameBeanInstance(existing, bean) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				beans = append(beans, bean)
+			}
 		}
 	}
 	return beans
