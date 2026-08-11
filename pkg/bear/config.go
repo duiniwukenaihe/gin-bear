@@ -14,6 +14,11 @@ import (
 
 type UserConfig map[string]interface{}
 
+const (
+	frameworkStrictConfigKey = "framework.strict"
+	responseModeConfigKey    = "framework.response_mode"
+)
+
 type ServerConfig struct {
 	Port                int32    `yaml:"port" json:"port" validate:"required,gt=0"`
 	Name                string   `yaml:"name" json:"name" validate:"required"`
@@ -338,10 +343,82 @@ func (c *SysConfig) Validate() error {
 	if err := validate.Struct(c); err != nil {
 		return err
 	}
+	if err := c.validateRuntimeContract(); err != nil {
+		return err
+	}
 	if err := c.validateSemantic(); err != nil {
 		return err
 	}
 	return validateProductionSecurity(c)
+}
+
+// FrameworkStrict reports whether framework runtime checks are enabled.
+func (c *SysConfig) FrameworkStrict() bool {
+	if c == nil || c.Config == nil {
+		return false
+	}
+	strict, _ := c.Config[frameworkStrictConfigKey].(bool)
+	return strict
+}
+
+// SetFrameworkStrict updates the framework runtime check policy.
+func (c *SysConfig) SetFrameworkStrict(strict bool) {
+	if c == nil {
+		return
+	}
+	if c.Config == nil {
+		c.Config = UserConfig{}
+	}
+	c.Config[frameworkStrictConfigKey] = strict
+}
+
+// ResponseMode reports the configured response contract mode.
+func (c *SysConfig) ResponseMode() string {
+	if c == nil || c.Config == nil {
+		return "raw"
+	}
+	mode, _ := c.Config[responseModeConfigKey].(string)
+	if mode == "" {
+		return "raw"
+	}
+	return mode
+}
+
+// SetResponseMode updates the response contract mode.
+func (c *SysConfig) SetResponseMode(mode string) error {
+	if err := validateResponseMode(mode); err != nil {
+		return err
+	}
+	if c == nil {
+		return fmt.Errorf("configuration is nil")
+	}
+	if c.Config == nil {
+		c.Config = UserConfig{}
+	}
+	c.Config[responseModeConfigKey] = mode
+	return nil
+}
+
+func (c *SysConfig) validateRuntimeContract() error {
+	if c == nil || c.Config == nil {
+		return nil
+	}
+	mode, exists := c.Config[responseModeConfigKey]
+	if !exists {
+		return nil
+	}
+	responseMode, ok := mode.(string)
+	if !ok {
+		return fmt.Errorf("%s must be one of raw, envelope", responseModeConfigKey)
+	}
+	return validateResponseMode(responseMode)
+}
+
+func validateResponseMode(mode string) error {
+	if mode != "raw" && mode != "envelope" {
+		return fmt.Errorf("%s must be one of raw, envelope", responseModeConfigKey)
+	}
+	return nil
 }
 
 func (c *SysConfig) validateSemantic() error {
@@ -623,6 +700,7 @@ func NewSysConfig() *SysConfig {
 			PerformanceLogLevel:  "info", // 日志级别: debug, info, warn, error
 			SlowRequestThreshold: "1s",   // 慢请求阈值
 		},
+		Config: UserConfig{},
 	}
 }
 

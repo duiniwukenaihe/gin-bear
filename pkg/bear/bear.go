@@ -136,6 +136,15 @@ func (b *Bear) Runtime() *Runtime {
 // Ignite 初始化 Bear 引擎 (轻量级内核)
 // 出山 - 象征小白熊破冰而出，准备开始工作
 func Ignite(args ...any) *Bear {
+	app, err := IgniteE(args...)
+	if err != nil {
+		panic(err)
+	}
+	return app
+}
+
+// IgniteE initializes the Bear engine and returns startup errors to the caller.
+func IgniteE(args ...any) (*Bear, error) {
 	var config *SysConfig
 	var ginMiddlewares []gin.HandlerFunc
 
@@ -149,24 +158,32 @@ func Ignite(args ...any) *Bear {
 	}
 
 	if config == nil {
-		config = InitConfig()
+		loaded, err := LoadConfig()
+		if err != nil {
+			return nil, err
+		}
+		config = loaded
 	} else {
 		config.PostProcess()
 	}
 	if err := config.Validate(); err != nil {
-		panic(fmt.Sprintf("Invalid configuration: %v", err))
+		return nil, fmt.Errorf("Invalid configuration: %w", err)
 	}
 
 	if config.DB != nil && config.DB.Enabled && config.DB.DSN == "" && config.DB.DBName == "" {
-		panic("database configuration is required when database.enabled=true (dsn or dbname)")
+		return nil, fmt.Errorf("database configuration is required when database.enabled=true (dsn or dbname)")
 	}
 	if err := validateProductionSecurity(config); err != nil {
-		panic(err.Error())
+		return nil, err
+	}
+	engine, err := newGinEngine(config)
+	if err != nil {
+		return nil, err
 	}
 
 	runtime := newRuntime(config)
 	b := &Bear{
-		Engine:           newGinEngine(config),
+		Engine:           engine,
 		exprData:         map[string]interface{}{},
 		fairingHandler:   NewFairingHandler(),
 		routeTree:        NewRouteTree(),
@@ -184,7 +201,9 @@ func Ignite(args ...any) *Bear {
 	for _, warning := range config.compatibilityWarnings() {
 		runtime.Logger.Warn(warning)
 	}
-	configureGinRuntime(b, config)
+	if err := configureGinRuntime(b, config); err != nil {
+		return nil, err
+	}
 
 	// 注入底座中间件
 	b.Use(runtimeOwnershipMiddleware(runtime))
@@ -199,7 +218,7 @@ func Ignite(args ...any) *Bear {
 	}
 
 	runtime.Logger.Info("WhiteBear core awakened", "server", config.Server.Name)
-	return b
+	return b, nil
 }
 
 // Deprecated: EnableIDGenerator is compatibility-only and has no effect.
@@ -500,21 +519,27 @@ func shutdownTimeout(config *SysConfig) time.Duration {
 	return parseDurationOrDefault(config.Server.ShutdownTimeout, 5*time.Second)
 }
 
-func configureGinRuntime(b *Bear, config *SysConfig) {
+func configureGinRuntime(b *Bear, config *SysConfig) error {
 	if config != nil && config.Server != nil {
 		if err := b.Engine.SetTrustedProxies(config.Server.TrustedProxies); err != nil {
-			panic(fmt.Sprintf("invalid trusted proxies: %v", err))
+			return fmt.Errorf("invalid trusted proxies: %w", err)
 		}
 	}
+	return nil
 }
 
-func newGinEngine(config *SysConfig) *gin.Engine {
+func newGinEngine(config *SysConfig) (engine *gin.Engine, err error) {
 	ginRuntimeMu.Lock()
 	defer ginRuntimeMu.Unlock()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("construct gin engine: %v", recovered)
+		}
+	}()
 	gin.SetMode(configuredGinMode(config))
 	gin.DefaultWriter = io.Discard
 	gin.DefaultErrorWriter = os.Stderr
-	return gin.New()
+	return gin.New(), nil
 }
 
 func configuredGinMode(config *SysConfig) string {

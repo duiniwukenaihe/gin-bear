@@ -71,6 +71,20 @@ func TestIgniteAllowsDatabaseDisabledWithoutDSN(t *testing.T) {
 	}
 }
 
+func TestIgniteEReturnsValidationError(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	cfg := NewSysConfig()
+	cfg.Server.ReadTimeout = "not-a-duration"
+
+	app, err := IgniteE(cfg)
+	if err == nil || !strings.Contains(err.Error(), "server.read_timeout") {
+		t.Fatalf("IgniteE error = %v, want server.read_timeout validation error", err)
+	}
+	if app != nil {
+		t.Fatal("IgniteE returned an app with invalid configuration")
+	}
+}
+
 func TestIgniteRegistersProvidedConfigBeforeMiddleware(t *testing.T) {
 	resetTestInjector()
 	cfg := NewSysConfig()
@@ -1821,7 +1835,8 @@ func TestIgniteRejectsDisabledWebSocketOriginCheckInProduction(t *testing.T) {
 		if r == nil {
 			t.Fatal("expected unsafe websocket origin panic")
 		}
-		if !strings.Contains(r.(string), "websocket origin") {
+		err, ok := r.(error)
+		if !ok || !strings.Contains(err.Error(), "websocket origin") {
 			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()
@@ -1843,7 +1858,8 @@ func TestProductionValidationChecksWebSocketOriginWhenAuthConfigIsNil(t *testing
 		if r == nil {
 			t.Fatal("expected unsafe websocket origin panic")
 		}
-		if !strings.Contains(r.(string), "websocket origin") {
+		err, ok := r.(error)
+		if !ok || !strings.Contains(err.Error(), "websocket origin") {
 			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()

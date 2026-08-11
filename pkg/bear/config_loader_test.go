@@ -211,6 +211,36 @@ func TestLoadConfigMergesExplicitPathsAndAppliesEnvironment(t *testing.T) {
 	}
 }
 
+func TestFrameworkRuntimeContractDefaults(t *testing.T) {
+	cfg := NewSysConfig()
+	if cfg.FrameworkStrict() || cfg.ResponseMode() != "raw" {
+		t.Fatalf("defaults = strict:%v mode:%q", cfg.FrameworkStrict(), cfg.ResponseMode())
+	}
+}
+
+func TestFrameworkRuntimeContractReadsExtensionKeys(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	path := writeConfig(t, "application.yaml", "config:\n  framework.strict: true\n  framework.response_mode: envelope\n")
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if !cfg.FrameworkStrict() || cfg.ResponseMode() != "envelope" {
+		t.Fatalf("contract = strict:%v mode:%q", cfg.FrameworkStrict(), cfg.ResponseMode())
+	}
+}
+
+func TestSetResponseModeRejectsUnknownMode(t *testing.T) {
+	cfg := NewSysConfig()
+	if err := cfg.SetResponseMode("unknown"); err == nil {
+		t.Fatal("SetResponseMode accepted an unknown response mode")
+	}
+	if cfg.ResponseMode() != "raw" {
+		t.Fatalf("response mode = %q, want raw", cfg.ResponseMode())
+	}
+}
+
 func TestInitConfigPreservesPanicOnErrorCompatibility(t *testing.T) {
 	t.Setenv("BEAR_ENV", "dev")
 	t.Setenv("GIN_MODE", "")
@@ -601,7 +631,8 @@ func TestJWTClockSkewValidationRunsAtIgnite(t *testing.T) {
 
 	defer func() {
 		recovered := recover()
-		if recovered == nil || !strings.Contains(recovered.(string), "auth.jwt_clock_skew") {
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "auth.jwt_clock_skew") {
 			t.Fatalf("unexpected panic = %v", recovered)
 		}
 	}()
