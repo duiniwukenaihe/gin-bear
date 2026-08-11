@@ -95,10 +95,6 @@ func (f *FairingHandler) OnResponseE(result any) (any, error) {
 	return response, nil
 }
 
-func (f *FairingHandler) onResponse(result interface{}) (interface{}, error) {
-	return f.OnResponseE(result)
-}
-
 // OnRequestWithRoute 执行全局 OnRequest，然后执行路由级别的 OnRequest
 func (f *FairingHandler) OnRequestWithRoute(ctx *gin.Context, routeFairings []Fairing) error {
 	if err := runRequestFairings(ctx, routeFairings); err != nil {

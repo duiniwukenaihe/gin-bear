@@ -212,7 +212,7 @@ func IgniteE(args ...any) (*Bear, error) {
 		config.PostProcess()
 	}
 	if err := config.Validate(); err != nil {
-		return nil, fmt.Errorf("Invalid configuration: %w", err)
+		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	if config.DB != nil && config.DB.Enabled && config.DB.DSN == "" && config.DB.DBName == "" {
@@ -1661,19 +1661,6 @@ func strictBuildPanicError(kind string, target any, recovered any) error {
 		return fmt.Errorf("%s build panic [%T]: %w", kind, target, recoveredErr)
 	}
 	return fmt.Errorf("%s build panic [%T]: %v", kind, target, recovered)
-}
-
-func (b *Bear) launchApplyError() error {
-	b.applyMu.Lock()
-	defer b.applyMu.Unlock()
-	switch b.applyState {
-	case applyFailed:
-		return fmt.Errorf("launch blocked after ApplyAll failure: %w", b.applyErr)
-	case applyRunning:
-		return errors.New("launch blocked while ApplyAll is running")
-	default:
-		return nil
-	}
 }
 
 func (b *Bear) beginPluginRegistration() error {

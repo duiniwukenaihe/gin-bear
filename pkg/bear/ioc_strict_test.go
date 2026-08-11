@@ -697,7 +697,9 @@ func TestApplyEReportsInjectionDiagnostics(t *testing.T) {
 	})
 
 	t.Run("unexported inject field", func(t *testing.T) {
-		err := NewBeanFactory().ApplyE(&strictPrivateTarget{})
+		target := &strictPrivateTarget{}
+		_ = target.service
+		err := NewBeanFactory().ApplyE(target)
 		if err == nil || !strings.Contains(err.Error(), "service") {
 			t.Fatalf("ApplyE() error = %v, want unexported field diagnostic", err)
 		}

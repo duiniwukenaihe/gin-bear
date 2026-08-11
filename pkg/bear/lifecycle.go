@@ -619,7 +619,7 @@ func (l *Lifecycle) stopStrictEntry(ctx context.Context, entry *lifecycleEntry) 
 			if err := ctx.Err(); err != nil {
 				return err, false
 			}
-			entry.stopAttempt = startLifecycleStopAttempt(nil, component.Shutdown)
+			entry.stopAttempt = startLifecycleStopAttempt(context.Background(), component.Shutdown)
 			entry.stopState = lifecycleEntryStopping
 			entry.legacyStarted = true
 		}
