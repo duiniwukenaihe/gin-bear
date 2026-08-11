@@ -241,6 +241,28 @@ func TestSetResponseModeRejectsUnknownMode(t *testing.T) {
 	}
 }
 
+func TestFrameworkRuntimeContractValidateRejectsInvalidResponseModeExtensionValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "unknown string", value: "unknown"},
+		{name: "non-string", value: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewSysConfig()
+			cfg.Config["framework.response_mode"] = tt.value
+
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "framework.response_mode") {
+				t.Fatalf("Validate error = %v, want framework.response_mode rejection", err)
+			}
+		})
+	}
+}
+
 func TestInitConfigPreservesPanicOnErrorCompatibility(t *testing.T) {
 	t.Setenv("BEAR_ENV", "dev")
 	t.Setenv("GIN_MODE", "")
