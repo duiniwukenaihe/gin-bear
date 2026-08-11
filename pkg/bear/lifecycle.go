@@ -51,8 +51,9 @@ const (
 )
 
 type lifecycleStopAttempt struct {
-	done chan struct{}
-	err  error
+	done       chan struct{}
+	err        error
+	contextErr error
 }
 
 type lifecycleState uint8
@@ -585,11 +586,12 @@ func (l *Lifecycle) stopStrictEntry(ctx context.Context, entry *lifecycleEntry) 
 				if err := ctx.Err(); err != nil {
 					return err, false
 				}
-				entry.stopAttempt = startLifecycleStopAttempt(func() error { return component.ShutdownContext(ctx) })
+				entry.stopAttempt = startLifecycleStopAttempt(ctx, func() error { return component.ShutdownContext(ctx) })
 				entry.stopState = lifecycleEntryStopping
 				startedHere = true
 			}
-			err, finished := waitLifecycleStopAttempt(ctx, entry.stopAttempt)
+			attempt := entry.stopAttempt
+			err, finished := waitLifecycleStopAttempt(ctx, attempt)
 			if !finished {
 				return err, false
 			}
@@ -599,7 +601,7 @@ func (l *Lifecycle) stopStrictEntry(ctx context.Context, entry *lifecycleEntry) 
 				entry.stopState = lifecycleEntryStopped
 				entry.stopped = true
 				return nil, true
-			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			case attempt.contextErr != nil && errors.Is(err, attempt.contextErr):
 				entry.stopState = lifecycleEntryRetryPending
 				if startedHere || ctx.Err() != nil {
 					return err, false
@@ -617,7 +619,7 @@ func (l *Lifecycle) stopStrictEntry(ctx context.Context, entry *lifecycleEntry) 
 			if err := ctx.Err(); err != nil {
 				return err, false
 			}
-			entry.stopAttempt = startLifecycleStopAttempt(component.Shutdown)
+			entry.stopAttempt = startLifecycleStopAttempt(nil, component.Shutdown)
 			entry.stopState = lifecycleEntryStopping
 			entry.legacyStarted = true
 		}
@@ -641,7 +643,7 @@ func (l *Lifecycle) stopStrictEntry(ctx context.Context, entry *lifecycleEntry) 
 	}
 }
 
-func startLifecycleStopAttempt(shutdown func() error) *lifecycleStopAttempt {
+func startLifecycleStopAttempt(ctx context.Context, shutdown func() error) *lifecycleStopAttempt {
 	attempt := &lifecycleStopAttempt{done: make(chan struct{})}
 	go func() {
 		defer func() {
@@ -651,6 +653,9 @@ func startLifecycleStopAttempt(shutdown func() error) *lifecycleStopAttempt {
 			close(attempt.done)
 		}()
 		attempt.err = shutdown()
+		if ctx != nil {
+			attempt.contextErr = ctx.Err()
+		}
 	}()
 	return attempt
 }

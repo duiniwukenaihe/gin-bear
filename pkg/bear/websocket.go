@@ -78,8 +78,9 @@ func validateProductionWebSocketPolicy(config *SysConfig) error {
 		return nil
 	}
 	if config.WS != nil {
-		if config.WS.HandshakeTimeout < minWebSocketHandshakeTimeoutMilliseconds ||
-			config.WS.HandshakeTimeout > maxWebSocketHandshakeTimeoutMilliseconds {
+		if config.WS.HandshakeTimeout != 0 &&
+			(config.WS.HandshakeTimeout < minWebSocketHandshakeTimeoutMilliseconds ||
+				config.WS.HandshakeTimeout > maxWebSocketHandshakeTimeoutMilliseconds) {
 			return fmt.Errorf(
 				"websocket.handshake_timeout_ms must be between %d and %d",
 				minWebSocketHandshakeTimeoutMilliseconds,

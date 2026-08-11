@@ -2,10 +2,95 @@ package bear
 
 import (
 	"fmt"
+	"net"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
+
+func TestProductionWebSocketZeroHandshakeTimeoutUsesRuntimeDefault(t *testing.T) {
+	resetGinModeForTest(t)
+	t.Setenv("BEAR_ENV", "")
+	t.Setenv("GIN_MODE", "")
+
+	config := NewSysConfig()
+	config.Server.Mode = "release"
+	config.Auth.JWTSecret = "websocket-zero-timeout-production-secret-2026"
+	config.WS = &WebSocketConfig{CheckOrigin: true}
+
+	if err := validateProductionSecurity(config); err != nil {
+		t.Fatalf("validateProductionSecurity() error = %v, want zero handshake timeout to use the runtime default", err)
+	}
+
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+	app.HandleWS("/ws", &BaseWebSocketHandler{})
+
+	server := httptest.NewUnstartedServer(app)
+	listener := &webSocketDeadlineListener{Listener: server.Listener}
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+
+	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws", nil)
+	if response != nil {
+		defer response.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("dial WebSocket: %v", err)
+	}
+	defer connection.Close()
+
+	setAt, deadline, ok := listener.latestWriteDeadline()
+	if !ok {
+		t.Fatal("WebSocket handshake did not set a runtime write deadline")
+	}
+	if got := deadline.Sub(setAt); got < 9*time.Second || got > 11*time.Second {
+		t.Fatalf("WebSocket handshake deadline = %s, want the 10s runtime default", got)
+	}
+}
+
+type webSocketDeadlineListener struct {
+	net.Listener
+	mu       sync.Mutex
+	setAt    time.Time
+	deadline time.Time
+}
+
+func (l *webSocketDeadlineListener) Accept() (net.Conn, error) {
+	connection, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &webSocketDeadlineConn{Conn: connection, listener: l}, nil
+}
+
+func (l *webSocketDeadlineListener) latestWriteDeadline() (time.Time, time.Time, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.setAt, l.deadline, !l.deadline.IsZero()
+}
+
+type webSocketDeadlineConn struct {
+	net.Conn
+	listener *webSocketDeadlineListener
+}
+
+func (c *webSocketDeadlineConn) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.IsZero() {
+		c.listener.mu.Lock()
+		c.listener.setAt = time.Now()
+		c.listener.deadline = deadline
+		c.listener.mu.Unlock()
+	}
+	return c.Conn.SetWriteDeadline(deadline)
+}
 
 func TestProductionRejectsWildcardWebSocketOrigin(t *testing.T) {
 	tests := []struct {

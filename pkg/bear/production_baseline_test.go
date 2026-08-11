@@ -52,9 +52,15 @@ func resetTestInjector() {
 
 func resetGinModeForTest(t *testing.T) {
 	t.Helper()
+	ginRuntimeMu.Lock()
+	strictGinRuntimeMode = ""
 	gin.SetMode(gin.DebugMode)
+	ginRuntimeMu.Unlock()
 	t.Cleanup(func() {
+		ginRuntimeMu.Lock()
+		strictGinRuntimeMode = ""
 		gin.SetMode(gin.DebugMode)
+		ginRuntimeMu.Unlock()
 	})
 }
 

@@ -110,12 +110,14 @@ type Bear struct {
 	strictPluginModules       map[int]struct{}
 	strictInjectionMu         sync.Mutex
 	strictInjectionAttempts   map[any]*strictInjectionAttempt
+	strictInjectionTargets    []any
 	applyMu                   sync.Mutex
 	applyState                applyState
 	applyErr                  error
 	applyAttempt              *applyAttempt
 	servingMu                 sync.Mutex
 	serving                   bool
+	served                    bool
 	pluginBarrier             *pluginRegistrationBarrier
 	pluginDispatcher          *PluginDispatcher
 	pluginManager             *PluginManager
@@ -350,11 +352,12 @@ func (b *Bear) Serve(ctx context.Context) error {
 	}
 	defer b.releaseServing()
 	if err := b.ApplyAll(ctx); err != nil {
-		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		if ctx.Err() != nil && isOnlyContextError(err, ctx.Err()) {
 			return nil
 		}
 		return err
 	}
+	b.markServed()
 	config := b.runtime.Config
 	logger := b.runtime.Logger
 	server := b.buildHTTPServer(config)
@@ -461,17 +464,50 @@ func (b *Bear) Serve(ctx context.Context) error {
 	return errors.Join(launchErrors...)
 }
 
+func isOnlyContextError(err, contextErr error) bool {
+	if err == nil || contextErr == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !isOnlyContextError(child, contextErr) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		if child := wrapped.Unwrap(); child != nil {
+			return isOnlyContextError(child, contextErr)
+		}
+	}
+	return errors.Is(err, contextErr)
+}
+
 func (b *Bear) acquireServing() bool {
 	if b == nil {
 		return false
 	}
 	b.servingMu.Lock()
 	defer b.servingMu.Unlock()
-	if b.serving {
+	if b.serving || b.served {
 		return false
 	}
 	b.serving = true
 	return true
+}
+
+func (b *Bear) markServed() {
+	if b == nil {
+		return
+	}
+	b.servingMu.Lock()
+	b.served = true
+	b.servingMu.Unlock()
 }
 
 func (b *Bear) releaseServing() {
@@ -610,10 +646,10 @@ func newGinEngine(config *SysConfig) (engine *gin.Engine, err error) {
 		}
 	}()
 	mode := configuredGinMode(config)
+	if strictGinRuntimeMode != "" && strictGinRuntimeMode != mode {
+		return nil, fmt.Errorf("%w: active=%s requested=%s", ErrGinRuntimeConflict, strictGinRuntimeMode, mode)
+	}
 	if config != nil && config.FrameworkStrict() {
-		if strictGinRuntimeMode != "" && strictGinRuntimeMode != mode {
-			return nil, fmt.Errorf("%w: active=%s requested=%s", ErrGinRuntimeConflict, strictGinRuntimeMode, mode)
-		}
 		if strictGinRuntimeMode == "" {
 			strictGinRuntimeMode = mode
 		}
@@ -906,7 +942,11 @@ func (b *Bear) addModulesE(pluginModules bool, modules ...Module) error {
 // HandleWS 注册 WebSocket 路由
 func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 	// 1. 执行依赖注入
-	b.runtime.Container.Apply(handler)
+	if b.frameworkStrict() {
+		b.registerStrictInjectionTargets(handler)
+	} else {
+		b.runtime.Container.Apply(handler)
+	}
 
 	b.activeGroup().GET(relativePath, func(ctx *gin.Context) {
 		// 2. 触发 Fairing OnRequest (支持鉴权、限流等)
@@ -1034,7 +1074,11 @@ func (b *Bear) HandleWithFairing(httpMethod, relativePath string, handler interf
 	}
 
 	for _, f := range fairings {
-		b.runtime.Container.Apply(f)
+		if b.frameworkStrict() {
+			b.registerStrictInjectionTargets(f)
+		} else {
+			b.runtime.Container.Apply(f)
+		}
 	}
 	b.routeTree.addRoute(httpMethod, relativePath, fairings)
 	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler, fairings)
@@ -1389,12 +1433,18 @@ func (b *Bear) buildStrictApplication(ctx context.Context) error {
 			if err := b.applyStrictObject(mod); err != nil {
 				return fmt.Errorf("inject module %T: %w", mod, err)
 			}
+			if err := b.injectStrictContainerBeans(); err != nil {
+				return fmt.Errorf("inject module beans before building %T: %w", mod, err)
+			}
 			b.g = &b.Engine.RouterGroup
 			if err := b.buildModuleStrict(mod); err != nil {
 				return err
 			}
 		}
 		b.markStrictModulesBuilt(moduleEnd)
+		if err := b.injectStrictContainerBeans(); err != nil {
+			return fmt.Errorf("inject beans before building controllers: %w", err)
+		}
 
 		mounts, mountEnd := b.strictMountBuildBatch()
 		for _, mount := range mounts {
@@ -1445,6 +1495,18 @@ func (b *Bear) validateStrictWebSocketRoutes() error {
 }
 
 func (b *Bear) injectStrictBeans() error {
+	if err := b.injectStrictContainerBeans(); err != nil {
+		return err
+	}
+	for _, target := range b.strictInjectionTargetSnapshot() {
+		if err := b.applyStrictObject(target); err != nil {
+			return err
+		}
+	}
+	return b.runtime.Container.strictConflictError()
+}
+
+func (b *Bear) injectStrictContainerBeans() error {
 	if err := b.runtime.Container.strictConflictError(); err != nil {
 		return err
 	}
@@ -1454,6 +1516,23 @@ func (b *Bear) injectStrictBeans() error {
 		}
 	}
 	return b.runtime.Container.strictConflictError()
+}
+
+func (b *Bear) registerStrictInjectionTargets(targets ...any) {
+	if len(targets) == 0 {
+		return
+	}
+	b.eRegistrationMu.Lock()
+	b.strictInjectionTargets = append(b.strictInjectionTargets, targets...)
+	b.strictRegistrationVersion++
+	b.eRegistrationMu.Unlock()
+}
+
+func (b *Bear) strictInjectionTargetSnapshot() []any {
+	b.eRegistrationMu.Lock()
+	targets := append([]any(nil), b.strictInjectionTargets...)
+	b.eRegistrationMu.Unlock()
+	return targets
 }
 
 func (b *Bear) applyStrictObject(value any) error {
