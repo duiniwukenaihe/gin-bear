@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -185,6 +186,51 @@ func TestRuntimeTimeoutHelpersUseConfiguredValues(t *testing.T) {
 	}
 	if got := readinessTimeout(cfg); got != 1500*time.Millisecond {
 		t.Fatalf("readiness timeout = %s", got)
+	}
+}
+
+type webSocketTerminalFairing struct{ BaseFairing }
+
+func (f *webSocketTerminalFairing) OnRequest(ctx *gin.Context) error {
+	ctx.String(http.StatusUnauthorized, "unauthorized")
+	return nil
+}
+
+type webSocketTerminalHandler struct {
+	BaseWebSocketHandler
+	connected bool
+}
+
+func (h *webSocketTerminalHandler) OnConnect(*gin.Context, *websocket.Conn) error {
+	h.connected = true
+	return nil
+}
+
+func TestWebSocketFairingTerminal(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	app.Attach(&webSocketTerminalFairing{})
+	handler := &webSocketTerminalHandler{}
+	app.HandleWS("/ws", handler)
+	server := httptest.NewServer(app)
+	defer server.Close()
+
+	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws", nil)
+	if connection != nil {
+		connection.Close()
+		t.Fatal("WebSocket upgraded after Fairing wrote a response")
+	}
+	if err == nil {
+		t.Fatal("WebSocket dial succeeded after Fairing wrote a response")
+	}
+	if response == nil || response.StatusCode != http.StatusUnauthorized {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.Fatalf("WebSocket response status = %d, want %d", status, http.StatusUnauthorized)
+	}
+	if handler.connected {
+		t.Fatal("WebSocket handler ran after Fairing wrote a response")
 	}
 }
 

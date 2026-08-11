@@ -716,8 +716,11 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 
 	b.activeGroup().GET(relativePath, func(ctx *gin.Context) {
 		// 2. 触发 Fairing OnRequest (支持鉴权、限流等)
-		if err := b.fairingHandler.OnRequest(ctx); err != nil {
+		if err := b.runWebSocketRequestFairings(ctx); err != nil {
 			WriteError(ctx, err)
+			return
+		}
+		if requestFairingTerminal(ctx) {
 			return
 		}
 		if b.runtime.hijackedShutdownStarted() {
@@ -881,11 +884,11 @@ func joinRoutePath(basePath, relativePath string) string {
 func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gin.HandlerFunc, error) {
 	if opaque, ok := opaqueGinHandler(handler); ok {
 		return func(ctx *gin.Context) {
-			if err := b.runRequestFairings(ctx, routeFairings); err != nil {
+			if err := b.runPipelineRequestFairings(ctx, routeFairings); err != nil {
 				WriteError(ctx, err)
 				return
 			}
-			if ctx.IsAborted() || ctx.Writer.Written() {
+			if requestFairingTerminal(ctx) {
 				return
 			}
 			opaque(ctx)
@@ -897,11 +900,11 @@ func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gi
 		return nil, err
 	}
 	return func(ctx *gin.Context) {
-		if err := b.runRequestFairings(ctx, routeFairings); err != nil {
+		if err := b.runPipelineRequestFairings(ctx, routeFairings); err != nil {
 			WriteError(ctx, err)
 			return
 		}
-		if ctx.IsAborted() || ctx.Writer.Written() {
+		if requestFairingTerminal(ctx) {
 			return
 		}
 
@@ -910,21 +913,14 @@ func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gi
 			WriteError(ctx, err)
 			return
 		}
-		if ctx.IsAborted() || ctx.Writer.Written() {
+		if requestFairingTerminal(ctx) {
 			return
 		}
 
-		result, err = b.fairingHandler.onResponse(result)
+		result, err = b.runPipelineResponseFairings(ctx, result, routeFairings)
 		if err != nil {
 			WriteError(ctx, err)
 			return
-		}
-		for _, fairing := range routeFairings {
-			result, err = fairing.OnResponse(result)
-			if err != nil {
-				WriteError(ctx, err)
-				return
-			}
 		}
 		writeSuccess(ctx, result)
 	}, nil
@@ -938,6 +934,63 @@ func (b *Bear) runRequestFairings(ctx *gin.Context, routeFairings []Fairing) err
 		return nil
 	}
 	return b.fairingHandler.OnRequest(ctx)
+}
+
+func (b *Bear) frameworkStrict() bool {
+	return b != nil && b.runtime != nil && b.runtime.Config != nil && b.runtime.Config.FrameworkStrict()
+}
+
+func (b *Bear) runStrictGlobalFairings(ctx *gin.Context, state *strictFairingState) error {
+	if state.globalStarted {
+		return nil
+	}
+	state.globalStarted = true
+	return runEnteredRequestFairings(ctx, state, b.fairingHandler.requestFairings)
+}
+
+func (b *Bear) runPipelineRequestFairings(ctx *gin.Context, routeFairings []Fairing) error {
+	if !b.frameworkStrict() {
+		return b.runRequestFairings(ctx, routeFairings)
+	}
+	state := strictFairingStateFor(ctx)
+	if err := b.runStrictGlobalFairings(ctx, state); err != nil {
+		return err
+	}
+	if requestFairingTerminal(ctx) {
+		return nil
+	}
+	return runEnteredRequestFairings(ctx, state, routeFairings)
+}
+
+func (b *Bear) runPipelineResponseFairings(ctx *gin.Context, result any, routeFairings []Fairing) (any, error) {
+	if !b.frameworkStrict() {
+		response, err := b.fairingHandler.OnResponseE(result)
+		if err != nil {
+			return nil, err
+		}
+		return runResponseFairings(routeFairings, response)
+	}
+	return runEnteredResponseFairings(strictFairingStateFor(ctx), result)
+}
+
+func (b *Bear) runWebSocketRequestFairings(ctx *gin.Context) error {
+	if !b.frameworkStrict() {
+		return b.fairingHandler.OnRequest(ctx)
+	}
+	state := strictFairingStateFor(ctx)
+	return b.runStrictGlobalFairings(ctx, state)
+}
+
+func runResponseFairings(fairings []Fairing, result any) (any, error) {
+	response := result
+	for _, fairing := range fairings {
+		transformed, err := fairing.OnResponse(response)
+		if err != nil {
+			return nil, err
+		}
+		response = transformed
+	}
+	return response, nil
 }
 
 func (b *Bear) activeGroup() *gin.RouterGroup {
@@ -1164,15 +1217,46 @@ func (b *Bear) buildController(group *gin.RouterGroup, groupName string, class I
 		b.registration = registration.parent
 	}()
 
-	for _, fairing := range ownFairings {
-		current := fairing
+	if b.frameworkStrict() {
 		group.Use(func(ctx *gin.Context) {
-			if err := current.OnRequest(ctx); err != nil {
+			state := strictFairingStateFor(ctx)
+			if err := b.runStrictGlobalFairings(ctx, state); err != nil {
 				WriteError(ctx, err)
+				return
+			}
+			if requestFairingTerminal(ctx) {
+				ctx.Abort()
+				return
+			}
+			if err := runEnteredRequestFairings(ctx, state, ownFairings); err != nil {
+				WriteError(ctx, err)
+				return
+			}
+			if requestFairingTerminal(ctx) {
+				ctx.Abort()
 				return
 			}
 			ctx.Next()
 		})
+	} else {
+		for _, fairing := range ownFairings {
+			current := fairing
+			group.Use(func(ctx *gin.Context) {
+				if requestFairingTerminal(ctx) {
+					ctx.Abort()
+					return
+				}
+				if err := current.OnRequest(ctx); err != nil {
+					WriteError(ctx, err)
+					return
+				}
+				if requestFairingTerminal(ctx) {
+					ctx.Abort()
+					return
+				}
+				ctx.Next()
+			})
+		}
 	}
 	class.Build(b)
 }

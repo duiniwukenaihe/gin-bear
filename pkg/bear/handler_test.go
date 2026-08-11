@@ -2,6 +2,7 @@ package bear
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -131,6 +132,62 @@ func TestFairingHandlerLegacyOnResponseContinuesAfterError(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 	want := []string{"response:first", "response:second"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+type strictFairingController struct {
+	name     string
+	fairings []Fairing
+	child    IClass
+	events   *[]string
+}
+
+func (c *strictFairingController) Name() string { return c.name }
+
+func (c *strictFairingController) Interceptors() []Fairing { return c.fairings }
+
+func (c *strictFairingController) Build(app *Bear) {
+	if c.child != nil {
+		app.Group("/child", c.child)
+		return
+	}
+	app.HandleWithFairing(http.MethodGet, "/value", func() string {
+		*c.events = append(*c.events, "handler")
+		return "handler"
+	}, &recordingFairing{name: "route", events: c.events})
+}
+
+func TestStrictFairingNestedOrder(t *testing.T) {
+	config := NewSysConfig()
+	config.SetFrameworkStrict(true)
+	var events []string
+	app := Ignite(config)
+	app.Attach(&recordingFairing{name: "global", events: &events})
+	app.Mount("/api", &strictFairingController{
+		name:     "parent",
+		fairings: []Fairing{&recordingFairing{name: "parent", events: &events}},
+		events:   &events,
+		child: &strictFairingController{
+			name:     "child",
+			fairings: []Fairing{&recordingFairing{name: "child", events: &events}},
+			events:   &events,
+		},
+	})
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll() error = %v", err)
+	}
+
+	response := performRequest(app, httptest.NewRequest(http.MethodGet, "/api/child/value", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	assertDecodedJSON(t, response.Body.Bytes(), "global(parent(child(route(handler))))")
+	want := []string{
+		"request:global", "request:parent", "request:child", "request:route", "handler",
+		"response:route", "response:child", "response:parent", "response:global",
+	}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
 	}

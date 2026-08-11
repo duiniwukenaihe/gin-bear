@@ -71,6 +71,48 @@ func TestControllerInterceptorReceivesRuntimeContainerInjection(t *testing.T) {
 	}
 }
 
+type terminalControllerFairing struct {
+	BaseFairing
+}
+
+func (f *terminalControllerFairing) OnRequest(ctx *gin.Context) error {
+	ctx.String(http.StatusForbidden, "blocked")
+	return nil
+}
+
+type terminalController struct {
+	fairing Fairing
+	called  *bool
+}
+
+func (c *terminalController) Name() string { return "terminal-controller" }
+
+func (c *terminalController) Interceptors() []Fairing { return []Fairing{c.fairing} }
+
+func (c *terminalController) Build(app *Bear) {
+	app.GET("/direct", func(*gin.Context) { *c.called = true })
+}
+
+func TestControllerFairingTerminal(t *testing.T) {
+	called := false
+	app := Ignite(NewSysConfig())
+	app.Mount("/api", &terminalController{
+		fairing: &terminalControllerFairing{},
+		called:  &called,
+	})
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll() error = %v", err)
+	}
+
+	response := performRequest(app, httptest.NewRequest(http.MethodGet, "/api/direct", nil))
+	if response.Code != http.StatusForbidden || response.Body.String() != "blocked" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	if called {
+		t.Fatal("direct controller handler ran after Fairing wrote a response")
+	}
+}
+
 type iocControllerTestAlias interface {
 	iocControllerTestMethod()
 }
