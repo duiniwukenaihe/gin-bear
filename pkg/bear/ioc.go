@@ -238,9 +238,6 @@ func (f *BeanFactory) trySetBatchStrict(beans []any) error {
 		plannedConcrete[beanType] = bean
 		registrations = append(registrations, beanRegistration{beanType: beanType, bean: bean})
 	}
-	if len(registrations) == 0 {
-		return nil
-	}
 	commit := func() {
 		for _, registration := range registrations {
 			f.order = append(f.order, registration.beanType)

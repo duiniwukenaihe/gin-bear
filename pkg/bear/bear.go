@@ -80,6 +80,7 @@ type Bear struct {
 	mounts            []MountMetadata
 	modules           []Module
 	runtime           *Runtime
+	eRegistrationMu   sync.Mutex
 	applyMu           sync.Mutex
 	applyState        applyState
 	applyErr          error
@@ -655,6 +656,8 @@ func (b *Bear) MountE(group string, classes ...IClass) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
 	beans := make([]Bean, 0, len(classes))
 	for _, class := range classes {
 		beans = append(beans, class)
@@ -705,6 +708,8 @@ func (b *Bear) BeansE(beans ...Bean) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
 	values, names, err := prepareStrictBeans(beans)
 	if err != nil {
 		return err
@@ -773,6 +778,8 @@ func (b *Bear) AddModuleE(modules ...Module) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
 	for index, mod := range modules {
 		if mod == nil || isNilBean(mod) {
 			return fmt.Errorf("module item %d (%T) must not be nil", index, mod)

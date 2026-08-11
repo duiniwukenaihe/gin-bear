@@ -3,6 +3,7 @@ package bear
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -89,6 +90,38 @@ func (b *strictLifecycleClosingBean) Name() string {
 	b.once.Do(b.onName)
 	return "lifecycle-closing"
 }
+
+type strictConcurrentBean[T any] struct {
+	name string
+}
+
+func (b *strictConcurrentBean[T]) Name() string { return b.name }
+
+type strictConcurrentController[T any] struct {
+	name string
+}
+
+func (c *strictConcurrentController[T]) Name() string { return c.name }
+func (*strictConcurrentController[T]) Build(*Bear)    {}
+
+type strictConcurrentTag01 struct{}
+type strictConcurrentTag02 struct{}
+type strictConcurrentTag03 struct{}
+type strictConcurrentTag04 struct{}
+type strictConcurrentTag05 struct{}
+type strictConcurrentTag06 struct{}
+type strictConcurrentTag07 struct{}
+type strictConcurrentTag08 struct{}
+type strictConcurrentTag09 struct{}
+type strictConcurrentTag10 struct{}
+type strictConcurrentTag11 struct{}
+type strictConcurrentTag12 struct{}
+type strictConcurrentTag13 struct{}
+type strictConcurrentTag14 struct{}
+type strictConcurrentTag15 struct{}
+type strictConcurrentTag16 struct{}
+type strictConcurrentTag17 struct{}
+type strictConcurrentTag18 struct{}
 
 type strictFactorySnapshot struct {
 	beans     map[reflect.Type]any
@@ -388,6 +421,188 @@ func TestStrictIOCBeansEBatchRejectsClosedLifecycleWithoutMutation(t *testing.T)
 	if len(app.Runtime().Lifecycle.components) != beforeComponents {
 		t.Fatalf("closed lifecycle batch changed components: %d", len(app.Runtime().Lifecycle.components))
 	}
+}
+
+func TestStrictIOCConcurrentERegistration(t *testing.T) {
+	app := Ignite(NewSysConfig())
+	beforeBeans := len(app.Runtime().Container.beans)
+	beforeOrder := len(app.Runtime().Container.order)
+	beforeConcrete := len(app.Runtime().Container.concrete)
+	beforeMetadata := len(app.exprData)
+
+	operations := []func() error{
+		func() error {
+			return app.BeansE(
+				&strictConcurrentBean[strictConcurrentTag01]{name: "concurrent-bean-01"},
+				&strictConcurrentBean[strictConcurrentTag02]{name: "concurrent-bean-02"},
+				&strictConcurrentBean[strictConcurrentTag03]{name: "concurrent-bean-03"},
+			)
+		},
+		func() error {
+			return app.BeansE(
+				&strictConcurrentBean[strictConcurrentTag04]{name: "concurrent-bean-04"},
+				&strictConcurrentBean[strictConcurrentTag05]{name: "concurrent-bean-05"},
+				&strictConcurrentBean[strictConcurrentTag06]{name: "concurrent-bean-06"},
+			)
+		},
+		func() error {
+			return app.AddModuleE(
+				&strictModule{name: "concurrent-module-01", beans: []Bean{&strictConcurrentBean[strictConcurrentTag07]{name: "concurrent-bean-07"}}},
+				&strictModule{name: "concurrent-module-02", beans: []Bean{&strictConcurrentBean[strictConcurrentTag08]{name: "concurrent-bean-08"}}},
+				&strictModule{name: "concurrent-module-03", beans: []Bean{&strictConcurrentBean[strictConcurrentTag09]{name: "concurrent-bean-09"}}},
+			)
+		},
+		func() error {
+			return app.AddModuleE(
+				&strictModule{name: "concurrent-module-04", beans: []Bean{&strictConcurrentBean[strictConcurrentTag10]{name: "concurrent-bean-10"}}},
+				&strictModule{name: "concurrent-module-05", beans: []Bean{&strictConcurrentBean[strictConcurrentTag11]{name: "concurrent-bean-11"}}},
+				&strictModule{name: "concurrent-module-06", beans: []Bean{&strictConcurrentBean[strictConcurrentTag12]{name: "concurrent-bean-12"}}},
+			)
+		},
+		func() error {
+			return app.MountE("/concurrent-a",
+				&strictConcurrentController[strictConcurrentTag13]{name: "concurrent-controller-13"},
+				&strictConcurrentController[strictConcurrentTag14]{name: "concurrent-controller-14"},
+				&strictConcurrentController[strictConcurrentTag15]{name: "concurrent-controller-15"},
+			)
+		},
+		func() error {
+			return app.MountE("/concurrent-b",
+				&strictConcurrentController[strictConcurrentTag16]{name: "concurrent-controller-16"},
+				&strictConcurrentController[strictConcurrentTag17]{name: "concurrent-controller-17"},
+				&strictConcurrentController[strictConcurrentTag18]{name: "concurrent-controller-18"},
+			)
+		},
+	}
+
+	start := make(chan struct{})
+	errorsCh := make(chan error, len(operations))
+	var wait sync.WaitGroup
+	for _, operation := range operations {
+		wait.Add(1)
+		go func(register func() error) {
+			defer wait.Done()
+			<-start
+			errorsCh <- register()
+		}(operation)
+	}
+	close(start)
+	wait.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatalf("concurrent E registration error = %v", err)
+		}
+	}
+
+	const registeredBeans = 18
+	if got := len(app.Runtime().Container.beans); got != beforeBeans+registeredBeans {
+		t.Fatalf("container beans = %d, want %d", got, beforeBeans+registeredBeans)
+	}
+	if got := len(app.Runtime().Container.order); got != beforeOrder+registeredBeans {
+		t.Fatalf("container order = %d, want %d", got, beforeOrder+registeredBeans)
+	}
+	if got := len(app.Runtime().Container.concrete); got != beforeConcrete+registeredBeans {
+		t.Fatalf("container concrete = %d, want %d", got, beforeConcrete+registeredBeans)
+	}
+	if got := len(app.exprData); got != beforeMetadata+registeredBeans {
+		t.Fatalf("exprData size = %d, want %d", got, beforeMetadata+registeredBeans)
+	}
+	for index := 1; index <= 12; index++ {
+		name := fmt.Sprintf("concurrent-bean-%02d", index)
+		if _, ok := app.exprData[name]; !ok {
+			t.Fatalf("exprData missing %q", name)
+		}
+	}
+	for index := 13; index <= 18; index++ {
+		name := fmt.Sprintf("concurrent-controller-%02d", index)
+		if _, ok := app.exprData[name]; !ok {
+			t.Fatalf("exprData missing %q", name)
+		}
+	}
+	if got := len(app.modules); got != 6 {
+		t.Fatalf("modules size = %d, want 6", got)
+	}
+	if got := len(app.mounts); got != 2 {
+		t.Fatalf("mounts size = %d, want 2", got)
+	}
+	mounted := make(map[string]int, len(app.mounts))
+	for _, mount := range app.mounts {
+		mounted[mount.Group] = len(mount.Classes)
+	}
+	if mounted["/concurrent-a"] != 3 || mounted["/concurrent-b"] != 3 {
+		t.Fatalf("mount metadata = %#v, want both groups with 3 classes", mounted)
+	}
+}
+
+func TestStrictIOCLateEmptyRegistrationChecksLifecycle(t *testing.T) {
+	t.Run("BeansE empty batch", func(t *testing.T) {
+		app := Ignite(NewSysConfig())
+		if err := app.ApplyAll(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.BeansE(); !errors.Is(err, ErrLifecycleRegistrationClosed) {
+			t.Fatalf("BeansE() error = %v, want ErrLifecycleRegistrationClosed", err)
+		}
+	})
+
+	t.Run("AddModuleE module with empty beans", func(t *testing.T) {
+		app := Ignite(NewSysConfig())
+		if err := app.ApplyAll(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		beforeMetadata := len(app.exprData)
+		err := app.AddModuleE(&strictModule{name: "late-empty-module"})
+		if !errors.Is(err, ErrLifecycleRegistrationClosed) {
+			t.Fatalf("AddModuleE() error = %v, want ErrLifecycleRegistrationClosed", err)
+		}
+		if len(app.modules) != 0 || len(app.exprData) != beforeMetadata {
+			t.Fatalf("late module published metadata: modules=%d exprData=%d", len(app.modules), len(app.exprData))
+		}
+	})
+
+	t.Run("MountE empty classes", func(t *testing.T) {
+		app := Ignite(NewSysConfig())
+		if err := app.ApplyAll(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		err := app.MountE("/late-empty")
+		if !errors.Is(err, ErrLifecycleRegistrationClosed) {
+			t.Fatalf("MountE() error = %v, want ErrLifecycleRegistrationClosed", err)
+		}
+		if len(app.mounts) != 0 {
+			t.Fatalf("late empty mount published metadata: %#v", app.mounts)
+		}
+	})
+
+	t.Run("MountE existing instance", func(t *testing.T) {
+		app := Ignite(NewSysConfig())
+		controller := &strictController{name: "existing-controller"}
+		if err := app.BeansE(controller); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.ApplyAll(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		beforeMetadata := len(app.exprData)
+		controller.name = "late-existing-controller"
+		err := app.MountE("/late-existing", controller)
+		if !errors.Is(err, ErrLifecycleRegistrationClosed) {
+			t.Fatalf("MountE() error = %v, want ErrLifecycleRegistrationClosed", err)
+		}
+		if len(app.mounts) != 0 || len(app.exprData) != beforeMetadata {
+			t.Fatalf("late existing mount published metadata: mounts=%d exprData=%d", len(app.mounts), len(app.exprData))
+		}
+		if _, ok := app.exprData["late-existing-controller"]; ok {
+			t.Fatal("late existing controller metadata was published")
+		}
+	})
+
+	t.Run("standalone factory empty batch", func(t *testing.T) {
+		if err := NewBeanFactory().trySetBatchStrict(nil); err != nil {
+			t.Fatalf("trySetBatchStrict(nil) error = %v, want nil", err)
+		}
+	})
 }
 
 func TestApplyEReportsInjectionDiagnostics(t *testing.T) {
