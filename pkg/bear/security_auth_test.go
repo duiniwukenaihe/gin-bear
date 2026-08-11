@@ -3,13 +3,35 @@ package bear
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
 )
+
+func TestJWTTokenSizeRejectsTokenOver16KiB(t *testing.T) {
+	if maxJWTTokenBytes != 16<<10 {
+		t.Fatalf("maxJWTTokenBytes = %d, want %d", maxJWTTokenBytes, 16<<10)
+	}
+	util := NewJWTUtil("security-test-secret", 1)
+	token, err := util.GenerateToken(1, strings.Repeat("x", maxJWTTokenBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(token) <= maxJWTTokenBytes {
+		t.Fatalf("generated token size = %d, want more than %d", len(token), maxJWTTokenBytes)
+	}
+
+	if _, err := util.ParseToken(token); err == nil {
+		t.Fatal("ParseToken accepted a token larger than 16 KiB")
+	}
+}
 
 func TestParseTokenRequiresExpirationClaim(t *testing.T) {
 	util := NewJWTUtil("security-test-secret", 1)
@@ -107,6 +129,48 @@ func TestRevokeTokenFailsWhenRedisWriteFails(t *testing.T) {
 
 	if err := manager.RevokeToken(context.Background(), token); err == nil {
 		t.Fatal("RevokeToken returned no error after Redis failure")
+	}
+}
+
+func TestAuthFairingUsesRequestContextForBlacklist(t *testing.T) {
+	manager, _ := newSecurityTokenManager(t, 0)
+	token, err := manager.GenerateToken(1, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requestContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/private", nil).WithContext(requestContext)
+	request.Header.Set("Authorization", "Bearer "+token)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = request
+	cfg := NewSysConfig()
+	cfg.Auth.PublicPaths = nil
+	ctx.Set(runtimeContextKey, &Runtime{Config: cfg})
+
+	err = (&AuthFairing{TokenManager: manager}).OnRequest(ctx)
+	if err == nil {
+		t.Fatal("AuthFairing accepted a token after the request context was canceled")
+	}
+	var bearErr *BearError
+	if !errors.As(err, &bearErr) || bearErr.Code != http.StatusUnauthorized {
+		t.Fatalf("AuthFairing error = %v, want 401", err)
+	}
+}
+
+func TestParseTokenContextPropagatesCanceledRedisContext(t *testing.T) {
+	manager, _ := newSecurityTokenManager(t, 0)
+	token, err := manager.GenerateToken(1, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = manager.ParseTokenContext(ctx, token)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ParseTokenContext error = %v, want context.Canceled", err)
 	}
 }
 

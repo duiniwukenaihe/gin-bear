@@ -11,6 +11,8 @@ import (
 // ErrInvalidTokenExpiration reports an invalid configured token lifetime.
 var ErrInvalidTokenExpiration = errors.New("token expiration hours must be positive")
 
+const maxJWTTokenBytes = 16 << 10
+
 // JWTConfig JWT 配置
 type JWTConfig struct {
 	Secret    string        `yaml:"secret" json:"secret"`
@@ -85,18 +87,14 @@ func (j *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
 	if j == nil || j.Config == nil {
 		return nil, errors.New("jwt configuration is unavailable")
 	}
+	if len(tokenStr) > maxJWTTokenBytes {
+		return nil, fmt.Errorf("jwt token exceeds maximum size of %d bytes", maxJWTTokenBytes)
+	}
 	if err := validateJWTExpiration(j.Config); err != nil {
 		return nil, err
 	}
 	if j.Config.ClockSkew < 0 || j.Config.ClockSkew > 5*time.Minute {
 		return nil, errors.New("jwt clock skew must be between 0 and 5m")
-	}
-	unverified, _, err := jwt.NewParser().ParseUnverified(tokenStr, &CustomClaims{})
-	if err != nil {
-		return nil, err
-	}
-	if unverified.Method != jwt.SigningMethodHS256 {
-		return nil, errors.New("unexpected signing method")
 	}
 	options := []jwt.ParserOption{
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
@@ -117,6 +115,9 @@ func (j *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
 	}, options...)
 
 	if err != nil {
+		if token != nil && token.Method != nil && token.Method != jwt.SigningMethodHS256 {
+			return nil, errors.New("unexpected signing method")
+		}
 		return nil, err
 	}
 

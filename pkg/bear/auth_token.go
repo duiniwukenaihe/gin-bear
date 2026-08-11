@@ -35,6 +35,11 @@ func (m *AuthTokenManager) GenerateToken(userID uint, email string) (string, err
 
 // ParseToken parses and validates a JWT token
 func (m *AuthTokenManager) ParseToken(tokenStr string) (*CustomClaims, error) {
+	return m.ParseTokenContext(context.Background(), tokenStr)
+}
+
+// ParseTokenContext parses a JWT token and checks revocation with the caller's context.
+func (m *AuthTokenManager) ParseTokenContext(ctx context.Context, tokenStr string) (*CustomClaims, error) {
 	// 1. Basic JWT validation
 	claims, err := m.JWTUtil.ParseToken(tokenStr)
 	if err != nil {
@@ -46,11 +51,9 @@ func (m *AuthTokenManager) ParseToken(tokenStr string) (*CustomClaims, error) {
 	}
 
 	// 2. Check if token is blacklisted
-	isBlacklisted, err := m.IsTokenBlacklisted(context.Background(), tokenStr)
+	isBlacklisted, err := m.IsTokenBlacklisted(ctx, tokenStr)
 	if err != nil {
-		// Log error but maybe allow or fail secure?
-		// Failing secure is safer.
-		return nil, fmt.Errorf("failed to check token blacklist: %v", err)
+		return nil, fmt.Errorf("failed to check token blacklist: %w", err)
 	}
 	if isBlacklisted {
 		return nil, NewError(401, "token is revoked")

@@ -40,7 +40,7 @@ func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 	var err error
 
 	if f.TokenManager != nil {
-		claims, err = f.TokenManager.ParseToken(tokenStr)
+		claims, err = f.TokenManager.ParseTokenContext(ctx.Request.Context(), tokenStr)
 	} else if f.JWTUtil != nil {
 		claims, err = f.JWTUtil.ParseToken(tokenStr)
 	} else {

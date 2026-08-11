@@ -124,16 +124,22 @@ func (c *CasbinFairing) OnRequest(ctx *gin.Context) error {
 
 	// 执行权限检查
 	if c.Enforcer == nil {
-		// 尝试手动从容器获取
-		c.Enforcer = GetByType[*CasbinEnforcer]()
-	}
-	if c.Enforcer == nil {
-		slog.Error("CasbinEnforcer is nil, please ensure it is injected")
-		return NewError(500, "internal server error: CasbinEnforcer not ready")
+		slog.ErrorContext(ctx.Request.Context(), "Casbin enforcer is not injected",
+			"user", sub,
+			"path", obj,
+			"method", act,
+		)
+		return ErrInternalServer
 	}
 	allowed, err := c.Enforcer.Enforce(sub, obj, act)
 	if err != nil {
-		return NewError(500, fmt.Sprintf("Casbin enforcement error: %v", err))
+		slog.ErrorContext(ctx.Request.Context(), "Casbin enforcement failed",
+			"error", err,
+			"user", sub,
+			"path", obj,
+			"method", act,
+		)
+		return ErrInternalServer
 	}
 
 	if !allowed {

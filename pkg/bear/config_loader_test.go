@@ -519,6 +519,20 @@ func TestJWTValidatesConfiguredIssuerAndAudience(t *testing.T) {
 	}
 }
 
+func TestJWTParsingUsesSingleVerifiedPass(t *testing.T) {
+	data, err := os.ReadFile("jwt.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	if strings.Contains(source, "Parse"+"Unverified") {
+		t.Fatal("JWT parsing performs an unverified pre-parse")
+	}
+	if count := strings.Count(source, "jwt.ParseWithClaims("); count != 1 {
+		t.Fatalf("jwt.ParseWithClaims calls = %d, want exactly one", count)
+	}
+}
+
 func TestIgniteConfiguresAuthFairingJWTValidationFromSysConfig(t *testing.T) {
 	resetTestInjector()
 	resetGinModeForTest(t)
