@@ -3,5 +3,6 @@ package app
 import "github.com/duiniwukenaihe/gin-bear/pkg/bear"
 
 // configure is the application-owned extension point for routes and fairings.
-func configure(application *bear.Bear) {
+func configure(application *bear.Bear) error {
+	return nil
 }

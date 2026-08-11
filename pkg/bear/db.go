@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -41,6 +42,8 @@ type VersionedModel interface {
 // GormAdapter 是 GORM v2 的适配器
 type GormAdapter struct {
 	*gorm.DB
+	shutdownOnce sync.Once
+	shutdownErr  error
 }
 
 func (r *GormAdapter) Name() string {
@@ -108,6 +111,7 @@ func buildDSN(cfg *DBConfig) (string, error) {
 		driverConfig.ParseTime = true
 		driverConfig.Loc = time.Local
 		driverConfig.TLSConfig = strings.TrimSpace(cfg.TLS)
+		driverConfig.ClientFoundRows = true
 		dsn := driverConfig.FormatDSN()
 		parsed, err := mysqldriver.ParseDSN(dsn)
 		if err != nil {
@@ -422,13 +426,22 @@ func (r *Repository[T]) FindList(ctx context.Context, query any, preloads ...str
 }
 
 func (r *GormAdapter) Shutdown() error {
-	sqlDB, err := r.DB.DB()
-	if err != nil {
-		return err
+	if r == nil || r.DB == nil {
+		return nil
 	}
-	Info("Closing database connection pool...")
-	return sqlDB.Close()
+	r.shutdownOnce.Do(func() {
+		sqlDB, err := r.DB.DB()
+		if err != nil {
+			r.shutdownErr = err
+			return
+		}
+		Info("Closing database connection pool...")
+		r.shutdownErr = sqlDB.Close()
+	})
+	return r.shutdownErr
 }
+
+func (*GormAdapter) lifecyclePrestarted() bool { return true }
 
 func (r *GormAdapter) CheckReady(ctx context.Context) error {
 	sqlDB, err := r.DB.DB()
@@ -465,6 +478,15 @@ func auditUpdateCallback(db *gorm.DB) {
 
 		if model, ok := db.Statement.Dest.(AuditModel); ok {
 			model.SetUpdatedBy(userID)
+			return
+		}
+		if _, audited := db.Statement.Model.(AuditModel); audited {
+			if _, ok := db.Statement.Dest.(map[string]interface{}); !ok {
+				return
+			}
+			if field := db.Statement.Schema.LookUpField("UpdatedBy"); field != nil {
+				db.Statement.SetColumn(field.DBName, userID)
+			}
 		}
 	}
 }
@@ -482,7 +504,6 @@ func (r *Repository[T]) Update(ctx context.Context, entity *T) error {
 	// 乐观锁检查
 	if v, ok := any(entity).(VersionedModel); ok {
 		currentVersion := v.GetVersion()
-		// 自动递增版本号
 		v.SetVersion(currentVersion + 1)
 
 		// 执行 CAS 更新: UPDATE table SET ..., version = currentVersion + 1 WHERE id = ? AND version = currentVersion
@@ -491,12 +512,11 @@ func (r *Repository[T]) Update(ctx context.Context, entity *T) error {
 		// 为了安全，我们显式指定 WHERE 条件为旧版本号。
 		result := db.Model(entity).Where("version = ?", currentVersion).Updates(entity)
 		if result.Error != nil {
+			v.SetVersion(currentVersion)
 			return result.Error
 		}
 		if result.RowsAffected == 0 {
-			// 如果更新失败，说明版本号不对，可能是并发修改了。
-			// 此时实体已经被修改为新版本号，是否需要回滚？
-			// 不，因为这是内存对象。用户可以重新 Fetch 后重试。
+			v.SetVersion(currentVersion)
 			return ErrOptimisticLock
 		}
 		return nil
@@ -534,7 +554,16 @@ func (r *Repository[T]) Restore(ctx context.Context, id interface{}) error {
 // UpdateByID 根据 ID 更新（使用 map 避免全量更新）
 func (r *Repository[T]) UpdateByID(ctx context.Context, id interface{}, updates map[string]interface{}) error {
 	var entity T
-	return r.DB(ctx).Model(&entity).Where("id = ?", id).Updates(updates).Error
+	db := r.DB(ctx)
+	clonedUpdates := make(map[string]interface{}, len(updates))
+	for key, value := range updates {
+		clonedUpdates[key] = value
+	}
+	result := db.Model(&entity).Where("id = ?", id).Updates(clonedUpdates)
+	if result.Error != nil || result.RowsAffected > 0 {
+		return result.Error
+	}
+	return gorm.ErrRecordNotFound
 }
 
 // DeleteByID 根据 ID 删除

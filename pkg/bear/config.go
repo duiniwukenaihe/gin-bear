@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -21,7 +22,7 @@ const (
 )
 
 type ServerConfig struct {
-	Port                int32    `yaml:"port" json:"port" validate:"required,gt=0"`
+	Port                int32    `yaml:"port" json:"port"`
 	Name                string   `yaml:"name" json:"name" validate:"required"`
 	Mode                string   `yaml:"mode" json:"mode"`
 	TrustedProxies      []string `yaml:"trusted_proxies" json:"trusted_proxies"`
@@ -443,6 +444,12 @@ func (c *SysConfig) validateSemantic() error {
 		if c.Tracing.SampleRate < 0 || c.Tracing.SampleRate > 1 {
 			return fmt.Errorf("tracing.sample_rate must be between 0 and 1")
 		}
+		if c.Tracing.OTLPEndpoint != "" {
+			endpoint, err := url.Parse(strings.TrimSpace(c.Tracing.OTLPEndpoint))
+			if err != nil || endpoint.Host == "" || !slices.Contains([]string{"http", "https"}, strings.ToLower(endpoint.Scheme)) {
+				return fmt.Errorf("tracing.otlp_endpoint must be an absolute http or https URL")
+			}
+		}
 	}
 	if c.Log != nil {
 		level := strings.ToLower(strings.TrimSpace(c.Log.Level))
@@ -454,6 +461,9 @@ func (c *SysConfig) validateSemantic() error {
 		return fmt.Errorf("metrics.path must start with /")
 	}
 	if c.Server != nil {
+		if c.Server.Port < 1 || c.Server.Port > 65535 {
+			return fmt.Errorf("server.port must be between 1 and 65535")
+		}
 		if c.Server.MaxHeaderBytes < 0 {
 			return fmt.Errorf("server.max_header_bytes must not be negative")
 		}
@@ -473,6 +483,14 @@ func (c *SysConfig) validateSemantic() error {
 			if _, err := time.ParseDuration(value); err != nil {
 				return fmt.Errorf("%s must be a valid duration: %w", name, err)
 			}
+		}
+	}
+	if c.GRPC != nil && c.GRPC.Enabled {
+		if c.GRPC.Port < 1 || c.GRPC.Port > 65535 {
+			return fmt.Errorf("grpc.port must be between 1 and 65535")
+		}
+		if c.Server != nil && c.GRPC.Port == c.Server.Port {
+			return fmt.Errorf("grpc.port must differ from server.port")
 		}
 	}
 	if c.Health != nil && c.Health.ReadinessTimeout != "" {
@@ -498,6 +516,15 @@ func (c *SysConfig) validateSemantic() error {
 		}
 	}
 	if c.DB != nil {
+		if c.DB.MaxOpenConns < 0 {
+			return fmt.Errorf("database.max_open_conns must not be negative")
+		}
+		if c.DB.MaxIdleConns < 0 {
+			return fmt.Errorf("database.max_idle_conns must not be negative")
+		}
+		if c.DB.MaxOpenConns > 0 && c.DB.MaxIdleConns > c.DB.MaxOpenConns {
+			return fmt.Errorf("database.max_idle_conns must not exceed database.max_open_conns when both are positive")
+		}
 		dbType := strings.ToLower(strings.TrimSpace(c.DB.Type))
 		if dbType == "postgres" || dbType == "postgresql" {
 			if _, err := effectivePostgresSSLMode(c.DB); err != nil {
@@ -506,6 +533,26 @@ func (c *SysConfig) validateSemantic() error {
 		}
 		if err := validateProductionDBTLS(c.DB, isProductionMode(c)); err != nil {
 			return err
+		}
+	}
+	if c.Redis != nil {
+		for _, setting := range []struct {
+			name  string
+			value int
+		}{
+			{name: "redis.db", value: c.Redis.DB},
+			{name: "redis.pool_size", value: c.Redis.PoolSize},
+			{name: "redis.min_idle_conns", value: c.Redis.MinIdleConns},
+			{name: "redis.dial_timeout_seconds", value: c.Redis.DialTimeout},
+			{name: "redis.read_timeout_seconds", value: c.Redis.ReadTimeout},
+			{name: "redis.write_timeout_seconds", value: c.Redis.WriteTimeout},
+		} {
+			if setting.value < 0 {
+				return fmt.Errorf("%s must not be negative", setting.name)
+			}
+		}
+		if c.Redis.MinIdleConns > c.Redis.PoolSize {
+			return fmt.Errorf("redis.min_idle_conns must not exceed redis.pool_size")
 		}
 	}
 	return nil
@@ -538,7 +585,19 @@ func isWeakProductionJWTSecret(secret string) bool {
 }
 
 func validateCORSConfig(config *SysConfig) error {
-	if config == nil || config.CORS == nil || !config.CORS.Enabled || !config.CORS.AllowCredentials {
+	if config == nil || config.CORS == nil {
+		return nil
+	}
+	if config.CORS.MaxAge != "" {
+		maxAge, err := time.ParseDuration(config.CORS.MaxAge)
+		if err != nil {
+			return fmt.Errorf("cors.max_age must be a valid duration: %w", err)
+		}
+		if maxAge < 0 {
+			return fmt.Errorf("cors.max_age must not be negative")
+		}
+	}
+	if !config.CORS.Enabled || !config.CORS.AllowCredentials {
 		return nil
 	}
 	for _, origin := range config.CORS.AllowOrigins {
@@ -731,17 +790,24 @@ func NewSysConfig() *SysConfig {
 	}
 }
 
-func applyEnvOverrides(config *SysConfig) {
+func applyEnvOverrides(config *SysConfig) error {
 	if config == nil {
-		return
+		return nil
+	}
+	if portString, configured := os.LookupEnv("BEAR_SERVER_PORT"); configured {
+		port, err := strconv.Atoi(portString)
+		if err != nil {
+			return fmt.Errorf("BEAR_SERVER_PORT must be an integer: %w", err)
+		}
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("BEAR_SERVER_PORT must be between 1 and 65535")
+		}
+		if config.Server != nil {
+			config.Server.Port = int32(port)
+			slog.Info("Config override by env", "BEAR_SERVER_PORT", port)
+		}
 	}
 	if config.Server != nil {
-		if portStr := os.Getenv("BEAR_SERVER_PORT"); portStr != "" {
-			if p, err := strconv.Atoi(portStr); err == nil {
-				config.Server.Port = int32(p)
-				slog.Info("Config override by env", "BEAR_SERVER_PORT", p)
-			}
-		}
 		if timeout := os.Getenv("BEAR_SHUTDOWN_TIMEOUT"); timeout != "" {
 			config.Server.ShutdownTimeout = timeout
 		}
@@ -753,17 +819,21 @@ func applyEnvOverrides(config *SysConfig) {
 			config.Auth.JWTSecret = secret
 		}
 	}
+	if required, configured := os.LookupEnv("REDIS_REQUIRED"); configured {
+		value, err := strconv.ParseBool(required)
+		if err != nil {
+			return fmt.Errorf("REDIS_REQUIRED must be a boolean: %w", err)
+		}
+		if config.Redis != nil {
+			config.Redis.Required = value
+		}
+	}
 	if config.Redis != nil {
 		if addr := os.Getenv("REDIS_ADDR"); addr != "" {
 			config.Redis.Addr = addr
 		}
 		if password := os.Getenv("REDIS_PASSWORD"); password != "" {
 			config.Redis.Password = password
-		}
-		if required := os.Getenv("REDIS_REQUIRED"); required != "" {
-			if v, err := strconv.ParseBool(required); err == nil {
-				config.Redis.Required = v
-			}
 		}
 	}
 	if config.DB != nil {
@@ -782,15 +852,23 @@ func applyEnvOverrides(config *SysConfig) {
 		if dbname := os.Getenv("POSTGRES_DB"); dbname != "" {
 			config.DB.DBName = dbname
 		}
-		if maxOpen := os.Getenv("DB_MAX_OPEN_CONNS"); maxOpen != "" {
-			if v, err := strconv.Atoi(maxOpen); err == nil {
-				config.DB.MaxOpenConns = v
-			}
+	}
+	if maxOpen, configured := os.LookupEnv("DB_MAX_OPEN_CONNS"); configured {
+		value, err := strconv.Atoi(maxOpen)
+		if err != nil {
+			return fmt.Errorf("DB_MAX_OPEN_CONNS must be an integer: %w", err)
 		}
-		if maxIdle := os.Getenv("DB_MAX_IDLE_CONNS"); maxIdle != "" {
-			if v, err := strconv.Atoi(maxIdle); err == nil {
-				config.DB.MaxIdleConns = v
-			}
+		if config.DB != nil {
+			config.DB.MaxOpenConns = value
+		}
+	}
+	if maxIdle, configured := os.LookupEnv("DB_MAX_IDLE_CONNS"); configured {
+		value, err := strconv.Atoi(maxIdle)
+		if err != nil {
+			return fmt.Errorf("DB_MAX_IDLE_CONNS must be an integer: %w", err)
+		}
+		if config.DB != nil {
+			config.DB.MaxIdleConns = value
 		}
 	}
 	if config.Health != nil {
@@ -816,4 +894,5 @@ func applyEnvOverrides(config *SysConfig) {
 			config.Tracing.OTLPEndpoint = endpoint
 		}
 	}
+	return nil
 }

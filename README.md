@@ -12,14 +12,23 @@ go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.1
 bear new my-service
 ```
 
-The `v0.9.2` command is usable only after publication:
+The next command is usable only after publication:
 
 ```bash
-go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.2
+go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3
 ```
 
-`v0.9.2` is an unpublished local candidate. It has not been pushed, tagged, or
-published; continue to use `v0.9.1` until the release is published.
+The current development worktree is an unpublished `v0.9.3` candidate that
+includes the `v0.9.2` runtime-hardening checkpoint. It has not been pushed,
+tagged, or published; continue to use `v0.9.1` until a release is published.
+
+When running a development build of the CLI, select the framework dependency
+explicitly so generated code cannot silently target an older incompatible
+version:
+
+```bash
+bear new my-service --framework-version v0.9.3
+```
 
 ## Runnable Examples
 

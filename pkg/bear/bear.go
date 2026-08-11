@@ -110,6 +110,8 @@ type Bear struct {
 	strictPluginModules       map[int]struct{}
 	strictInjectionMu         sync.Mutex
 	strictInjectionAttempts   map[any]*strictInjectionAttempt
+	strictInjectionApplied    map[any]struct{}
+	strictInjectionSession    bool
 	strictInjectionTargets    []any
 	applyMu                   sync.Mutex
 	applyState                applyState
@@ -242,12 +244,8 @@ func IgniteE(args ...any) (*Bear, error) {
 	runtime.Container.Set(b)
 	runtime.Container.Set(config)
 	runtime.Container.Set(newJWTUtilFromAuthConfig(config.Auth))
-	publishDefaultRuntime(runtime)
 	for _, warning := range config.compatibilityWarnings() {
 		runtime.Logger.Warn(warning)
-	}
-	if err := configureGinRuntime(b, config); err != nil {
-		return nil, err
 	}
 
 	// 注入底座中间件
@@ -262,6 +260,7 @@ func IgniteE(args ...any) (*Bear, error) {
 		b.Use(middleware)
 	}
 
+	publishDefaultRuntime(runtime)
 	runtime.Logger.Info("WhiteBear core awakened", "server", config.Server.Name)
 	return b, nil
 }
@@ -280,55 +279,87 @@ func (b *Bear) EnableMQ(ctx context.Context) *Bear {
 
 // EnableTracing 开启链路追踪
 func (b *Bear) EnableTracing(ctx context.Context) *Bear {
+	if err := b.EnableTracingE(ctx); err != nil && b != nil && b.runtime != nil {
+		b.runtime.Logger.Error("Tracing initialization failed", "error_code", "BEAR_TRACING_INIT")
+	}
+	return b
+}
+
+// EnableTracingE initializes and registers tracing while registration is open.
+func (b *Bear) EnableTracingE(ctx context.Context) error {
+	if b == nil || b.runtime == nil {
+		return errors.New("bear runtime is unavailable")
+	}
 	config := b.runtime.Config
 	if config == nil || config.Tracing == nil || !config.Tracing.Enabled {
-		return b
+		return nil
 	}
-	if b.runtime.Lifecycle.registrationClosed() {
-		b.runtime.Logger.Error("Tracing registration rejected", "error_code", "BEAR_TRACING_REGISTRATION_CLOSED")
-		return b
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if !b.tracingRegistered.CompareAndSwap(false, true) {
-		return b
+		return nil
 	}
 	provider, err := newTracerProvider(ctx, config.Tracing)
 	if err != nil {
 		b.tracingRegistered.Store(false)
-		b.runtime.Logger.Error("Tracing initialization failed", "error_code", "BEAR_TRACING_INIT")
-		return b
+		return err
 	}
 	if err := b.TryOnShutdown(shutdownTracerProvider(provider)); err != nil {
 		shutdownTracerProvider(provider)()
 		b.tracingRegistered.Store(false)
-		b.runtime.Logger.Error("Tracing registration rejected", "error_code", "BEAR_TRACING_REGISTRATION_CLOSED")
-		return b
+		return err
 	}
 	propagator := propagation.TraceContext{}
 	b.runtime.TracerProvider = provider
 	b.runtime.TextMapPropagator = propagator
-	b.Use(TracingMiddleware(provider, propagator))
+	b.Engine.Use(TracingMiddleware(provider, propagator))
+	b.strictRegistrationVersion++
 	b.runtime.Logger.Info("Tracing enabled", "exporter", config.Tracing.Exporter, "service", config.Tracing.ServiceName)
-	return b
+	return nil
 }
 
 // EnableMetrics 开启指标监控
 func (b *Bear) EnableMetrics() *Bear {
+	if err := b.EnableMetricsE(); err != nil && b != nil && b.runtime != nil {
+		b.runtime.Logger.Error("Metrics registration failed", "error_code", "BEAR_METRICS_REGISTRATION")
+	}
+	return b
+}
+
+// EnableMetricsE registers the metrics endpoint while registration is open.
+func (b *Bear) EnableMetricsE() error {
+	if b == nil || b.runtime == nil {
+		return errors.New("bear runtime is unavailable")
+	}
 	config := b.runtime.Config
 	if config != nil && config.Metrics != nil && !config.Metrics.Enabled {
-		return b
+		return nil
 	}
-	if !b.metricsRegistered.CompareAndSwap(false, true) {
-		return b
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if b.metricsRegistered.Load() {
+		return nil
 	}
 	if b.runtime.Metrics == nil {
-		return b
+		return errors.New("metrics runtime is unavailable")
 	}
 	path := "/metrics"
 	if config != nil && config.Metrics != nil && config.Metrics.Path != "" {
 		path = config.Metrics.Path
 	}
-	b.GET(path, gin.WrapH(b.runtime.Metrics.Handler()))
-	return b
+	b.activeGroup().GET(path, gin.WrapH(b.runtime.Metrics.Handler()))
+	b.metricsRegistered.Store(true)
+	b.strictRegistrationVersion++
+	return nil
 }
 
 // Launch 启动 Bear 引擎，支持优雅退出
@@ -628,15 +659,6 @@ func shutdownTimeout(config *SysConfig) time.Duration {
 	return parseDurationOrDefault(config.Server.ShutdownTimeout, 5*time.Second)
 }
 
-func configureGinRuntime(b *Bear, config *SysConfig) error {
-	if config != nil && config.Server != nil {
-		if err := b.Engine.SetTrustedProxies(config.Server.TrustedProxies); err != nil {
-			return fmt.Errorf("invalid trusted proxies: %w", err)
-		}
-	}
-	return nil
-}
-
 func newGinEngine(config *SysConfig) (engine *gin.Engine, err error) {
 	ginRuntimeMu.Lock()
 	defer ginRuntimeMu.Unlock()
@@ -649,15 +671,32 @@ func newGinEngine(config *SysConfig) (engine *gin.Engine, err error) {
 	if strictGinRuntimeMode != "" && strictGinRuntimeMode != mode {
 		return nil, fmt.Errorf("%w: active=%s requested=%s", ErrGinRuntimeConflict, strictGinRuntimeMode, mode)
 	}
-	if config != nil && config.FrameworkStrict() {
-		if strictGinRuntimeMode == "" {
-			strictGinRuntimeMode = mode
+	previousMode := gin.Mode()
+	previousWriter := gin.DefaultWriter
+	previousErrorWriter := gin.DefaultErrorWriter
+	committed := false
+	defer func() {
+		if committed {
+			return
 		}
-	}
+		gin.SetMode(previousMode)
+		gin.DefaultWriter = previousWriter
+		gin.DefaultErrorWriter = previousErrorWriter
+	}()
 	gin.SetMode(mode)
 	gin.DefaultWriter = io.Discard
 	gin.DefaultErrorWriter = os.Stderr
-	return gin.New(), nil
+	engine = gin.New()
+	if config != nil && config.Server != nil {
+		if err := engine.SetTrustedProxies(config.Server.TrustedProxies); err != nil {
+			return nil, fmt.Errorf("invalid trusted proxies: %w", err)
+		}
+	}
+	if config != nil && config.FrameworkStrict() && strictGinRuntimeMode == "" {
+		strictGinRuntimeMode = mode
+	}
+	committed = true
+	return engine, nil
 }
 
 func configuredGinMode(config *SysConfig) string {
@@ -763,6 +802,12 @@ func validateProductionTimeouts(config *SysConfig) error {
 
 // Mount 挂载控制器
 func (b *Bear) Mount(group string, classes ...IClass) *Bear {
+	if b.frameworkStrict() {
+		if err := b.MountE(group, classes...); err != nil {
+			panic(err)
+		}
+		return b
+	}
 	b.mounts = append(b.mounts, MountMetadata{Group: group, Classes: classes})
 	for _, class := range classes {
 		b.Beans(class)
@@ -797,26 +842,97 @@ func (b *Bear) MountE(group string, classes ...IClass) error {
 
 // EnableHealth 启用健康检查与指标端点
 func (b *Bear) EnableHealth() *Bear {
-	b.Mount("", &HealthController{runtime: b.runtime})
+	if err := b.EnableHealthE(); err != nil {
+		if b != nil && b.runtime != nil {
+			b.runtime.Logger.Error("Health registration failed", "error_code", "BEAR_HEALTH_REGISTRATION")
+		}
+		return b
+	}
 	config := b.runtime.Config
 	if config == nil || config.Metrics == nil || config.Metrics.Enabled {
-		b.EnableMetrics()
+		if err := b.EnableMetricsE(); err != nil {
+			b.runtime.Logger.Error("Metrics registration failed", "error_code", "BEAR_METRICS_REGISTRATION")
+		}
 	}
 	return b
+}
+
+// EnableHealthE registers health endpoints while registration is open.
+func (b *Bear) EnableHealthE() error {
+	if b == nil || b.runtime == nil {
+		return errors.New("bear runtime is unavailable")
+	}
+	return b.MountE("", &HealthController{runtime: b.runtime})
+}
+
+// EnableDatabase opens and registers the configured database adapter.
+func (b *Bear) EnableDatabase(ctx context.Context) *Bear {
+	if err := b.EnableDatabaseE(ctx); err != nil && b != nil && b.runtime != nil {
+		b.runtime.Logger.Error("Database initialization failed", "error_code", "BEAR_DATABASE_INIT")
+	}
+	return b
+}
+
+// EnableDatabaseE opens, verifies, and registers the configured database.
+func (b *Bear) EnableDatabaseE(ctx context.Context) error {
+	if b == nil || b.runtime == nil {
+		return errors.New("bear runtime is unavailable")
+	}
+	config := b.runtime.Config
+	if config == nil || config.DB == nil || !config.DB.Enabled {
+		return nil
+	}
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return err
+	}
+	unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	adapter, err := NewGormAdapter(config.DB)
+	if err != nil {
+		return err
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, readinessTimeout(config))
+	err = adapter.CheckReady(checkCtx)
+	cancel()
+	if err != nil {
+		_ = adapter.Shutdown()
+		return fmt.Errorf("database readiness check failed: %w", err)
+	}
+	if err := b.BeansE(adapter); err != nil {
+		_ = adapter.Shutdown()
+		return fmt.Errorf("register database adapter: %w", err)
+	}
+	return nil
 }
 
 // EnableGzip 启用 Gzip 响应压缩 (阶段 84)
 func (b *Bear) EnableGzip(minLength ...int) *Bear {
+	if err := b.EnableGzipE(minLength...); err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// EnableGzipE registers Gzip middleware while strict registration is open.
+func (b *Bear) EnableGzipE(minLength ...int) error {
 	limit := 1024
 	if len(minLength) > 0 {
 		limit = minLength[0]
 	}
-	b.Use(GzipMiddleware(limit))
-	return b
+	return b.UseE(GzipMiddleware(limit))
 }
 
 // Beans 注册 Bean
 func (b *Bear) Beans(beans ...Bean) *Bear {
+	if b.frameworkStrict() {
+		if err := b.BeansE(beans...); err != nil {
+			panic(err)
+		}
+		return b
+	}
 	for _, bean := range beans {
 		b.exprData[bean.Name()] = bean
 		b.runtime.Container.Set(bean)
@@ -866,11 +982,39 @@ func publishBeanMetadata(metadata map[string]interface{}, beans []Bean, names []
 
 // Attach 注册全局 Fairing
 func (b *Bear) Attach(f ...Fairing) *Bear {
+	if b.frameworkStrict() {
+		if err := b.AttachE(f...); err != nil {
+			panic(err)
+		}
+		return b
+	}
 	b.fairingHandler.AddFairing(f...)
 	for _, f1 := range f {
 		b.runtime.Container.Set(f1)
 	}
 	return b
+}
+
+// AttachE registers all Fairings before publishing them to the request path.
+func (b *Bear) AttachE(fairings ...Fairing) error {
+	if b == nil || b.runtime == nil {
+		return errors.New("bear runtime is unavailable")
+	}
+	values := make([]any, len(fairings))
+	for index, fairing := range fairings {
+		if fairing == nil || isNilBean(fairing) {
+			return fmt.Errorf("fairing item %d (%T) must not be nil", index, fairing)
+		}
+		values[index] = fairing
+	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
+		return fmt.Errorf("register fairings: %w", err)
+	}
+	b.fairingHandler.AddFairing(fairings...)
+	b.strictRegistrationVersion++
+	return nil
 }
 
 // LoadPlugin 动态加载 .so 插件 (阶段 85)
@@ -885,6 +1029,12 @@ func (b *Bear) ReloadPlugin(path string) error {
 
 // AddModule 注册模块
 func (b *Bear) AddModule(modules ...Module) *Bear {
+	if b.frameworkStrict() {
+		if err := b.AddModuleE(modules...); err != nil {
+			panic(err)
+		}
+		return b
+	}
 	for _, mod := range modules {
 		b.runtime.Logger.Info("Loading module", "name", mod.Name())
 		// 1. 注册模块中的 Beans
@@ -941,9 +1091,22 @@ func (b *Bear) addModulesE(pluginModules bool, modules ...Module) error {
 
 // HandleWS 注册 WebSocket 路由
 func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
+	if err := b.HandleWSE(relativePath, handler); err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// HandleWSE registers a WebSocket route while strict registration is open.
+func (b *Bear) HandleWSE(relativePath string, handler WebSocketHandler) error {
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	// 1. 执行依赖注入
 	if b.frameworkStrict() {
-		b.registerStrictInjectionTargets(handler)
+		b.strictInjectionTargets = append(b.strictInjectionTargets, handler)
 	} else {
 		b.runtime.Container.Apply(handler)
 	}
@@ -1043,7 +1206,8 @@ func (b *Bear) HandleWS(relativePath string, handler WebSocketHandler) *Bear {
 		}
 	})
 	b.webSocketRoutes.Add(1)
-	return b
+	b.strictRegistrationVersion++
+	return nil
 }
 
 // Handle registers a compiled business handler and panics if its signature is
@@ -1068,29 +1232,49 @@ func (b *Bear) HandleE(httpMethod, relativePath string, handler interface{}) err
 // 路由级别的 Fairing 会在全局 Fairing 之前执行（OnRequest）
 // 在全局 Fairing 之后执行（OnResponse）
 func (b *Bear) HandleWithFairing(httpMethod, relativePath string, handler interface{}, fairings ...Fairing) *Bear {
+	if err := b.HandleWithFairingE(httpMethod, relativePath, handler, fairings...); err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// HandleWithFairingE registers a route and its Fairings as one strict mutation.
+func (b *Bear) HandleWithFairingE(httpMethod, relativePath string, handler interface{}, fairings ...Fairing) error {
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	wrappedHandler, err := b.compilePipeline(handler, fairings)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	for _, f := range fairings {
 		if b.frameworkStrict() {
-			b.registerStrictInjectionTargets(f)
+			b.strictInjectionTargets = append(b.strictInjectionTargets, f)
 		} else {
 			b.runtime.Container.Apply(f)
 		}
 	}
 	b.routeTree.addRoute(httpMethod, relativePath, fairings)
 	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler, fairings)
-	return b
+	b.strictRegistrationVersion++
+	return nil
 }
 
 func (b *Bear) registerHandler(httpMethod, relativePath string, handler interface{}, routeFairings []Fairing) error {
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	wrappedHandler, err := b.compilePipeline(handler, routeFairings)
 	if err != nil {
 		return err
 	}
 	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler, routeFairings)
+	b.strictRegistrationVersion++
 	return nil
 }
 
@@ -1189,6 +1373,30 @@ func (b *Bear) frameworkStrict() bool {
 	return b != nil && b.runtime != nil && b.runtime.Config != nil && b.runtime.Config.FrameworkStrict()
 }
 
+func (b *Bear) beginGinRegistration() (func(), error) {
+	if b == nil || b.runtime == nil || b.Engine == nil {
+		return nil, errors.New("bear runtime is unavailable")
+	}
+	b.eRegistrationMu.Lock()
+	if b.frameworkStrict() && b.runtime.Lifecycle.registrationClosed() {
+		b.eRegistrationMu.Unlock()
+		return nil, ErrLifecycleRegistrationClosed
+	}
+	return b.eRegistrationMu.Unlock, nil
+}
+
+// UseE registers global Gin middleware while strict registration is open.
+func (b *Bear) UseE(middleware ...gin.HandlerFunc) error {
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	b.Engine.Use(middleware...)
+	b.strictRegistrationVersion++
+	return nil
+}
+
 func (b *Bear) runStrictGlobalFairings(ctx *gin.Context, state *strictFairingState) error {
 	if state == nil || requestFairingTerminal(ctx) {
 		return nil
@@ -1262,10 +1470,13 @@ func (b *Bear) activeGroup() *gin.RouterGroup {
 }
 
 func websocketOriginAllowed(config *SysConfig, r *http.Request) bool {
-	if config == nil || config.WS == nil {
+	if config == nil {
 		return true
 	}
 	origin := r.Header.Get("Origin")
+	if config.WS == nil {
+		return !isProductionMode(config) || origin == "" || origin == "http://"+r.Host || origin == "https://"+r.Host
+	}
 	allowedOrigins := config.WS.GetAllowedOrigins()
 	if len(allowedOrigins) > 0 {
 		return origin == "" || slices.Contains(allowedOrigins, origin) || slices.Contains(allowedOrigins, "*")
@@ -1415,6 +1626,9 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 const strictBuildRoundLimit = 32
 
 func (b *Bear) buildStrictApplication(ctx context.Context) error {
+	b.beginStrictInjectionSession()
+	defer b.endStrictInjectionSession()
+
 	b.runtime.Logger.Info("Building routes...")
 	for round := 1; round <= strictBuildRoundLimit; round++ {
 		if err := ctx.Err(); err != nil {
@@ -1518,16 +1732,6 @@ func (b *Bear) injectStrictContainerBeans() error {
 	return b.runtime.Container.strictConflictError()
 }
 
-func (b *Bear) registerStrictInjectionTargets(targets ...any) {
-	if len(targets) == 0 {
-		return
-	}
-	b.eRegistrationMu.Lock()
-	b.strictInjectionTargets = append(b.strictInjectionTargets, targets...)
-	b.strictRegistrationVersion++
-	b.eRegistrationMu.Unlock()
-}
-
 func (b *Bear) strictInjectionTargetSnapshot() []any {
 	b.eRegistrationMu.Lock()
 	targets := append([]any(nil), b.strictInjectionTargets...)
@@ -1535,7 +1739,7 @@ func (b *Bear) strictInjectionTargetSnapshot() []any {
 	return targets
 }
 
-func (b *Bear) applyStrictObject(value any) error {
+func (b *Bear) applyStrictObject(value any) (resultErr error) {
 	if value == nil || isNilBean(value) {
 		return nil
 	}
@@ -1544,6 +1748,12 @@ func (b *Bear) applyStrictObject(value any) error {
 		return nil
 	}
 	b.strictInjectionMu.Lock()
+	if b.strictInjectionSession {
+		if _, applied := b.strictInjectionApplied[value]; applied {
+			b.strictInjectionMu.Unlock()
+			return nil
+		}
+	}
 	if b.strictInjectionAttempts == nil {
 		b.strictInjectionAttempts = make(map[any]*strictInjectionAttempt)
 	}
@@ -1556,9 +1766,37 @@ func (b *Bear) applyStrictObject(value any) error {
 	b.strictInjectionAttempts[value] = attempt
 	b.strictInjectionMu.Unlock()
 
-	attempt.err = b.runtime.Container.ApplyE(value)
+	func() {
+		defer func() {
+			if recover() != nil {
+				resultErr = fmt.Errorf("strict dependency injection panic for %T", value)
+			}
+		}()
+		resultErr = b.runtime.Container.ApplyE(value)
+	}()
+	b.strictInjectionMu.Lock()
+	attempt.err = resultErr
+	if resultErr == nil && b.strictInjectionSession {
+		b.strictInjectionApplied[value] = struct{}{}
+	}
+	delete(b.strictInjectionAttempts, value)
 	close(attempt.done)
-	return attempt.err
+	b.strictInjectionMu.Unlock()
+	return resultErr
+}
+
+func (b *Bear) beginStrictInjectionSession() {
+	b.strictInjectionMu.Lock()
+	b.strictInjectionSession = true
+	b.strictInjectionApplied = make(map[any]struct{})
+	b.strictInjectionMu.Unlock()
+}
+
+func (b *Bear) endStrictInjectionSession() {
+	b.strictInjectionMu.Lock()
+	b.strictInjectionSession = false
+	b.strictInjectionApplied = nil
+	b.strictInjectionMu.Unlock()
 }
 
 func (b *Bear) strictModuleBuildBatch() ([]Module, int, int, map[int]struct{}) {
@@ -1689,16 +1927,33 @@ func (b *Bear) closePluginRegistration(ctx context.Context) error {
 
 // Group 创建路由组 (自动感知当前的挂载点)，支持 IClass 接口的 Handler 自动构建路由
 func (b *Bear) Group(relativePath string, classes ...IClass) *gin.RouterGroup {
+	group, err := b.GroupE(relativePath, classes...)
+	if err != nil {
+		panic(err)
+	}
+	return group
+}
+
+// GroupE creates a route group while strict registration is open.
+func (b *Bear) GroupE(relativePath string, classes ...IClass) (*gin.RouterGroup, error) {
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return nil, err
+	}
 	parent := b.activeGroup()
 	group := parent.Group(relativePath)
+	b.strictRegistrationVersion++
+	unlock()
 
 	// 自动调用 IClass 的 Build 方法构建路由
 	for _, class := range classes {
 		classGroup := parent.Group(relativePath)
-		b.buildController(classGroup, classGroup.BasePath(), class)
+		if err := b.buildControllerE(classGroup, classGroup.BasePath(), class); err != nil {
+			return nil, err
+		}
 	}
 
-	return group
+	return group, nil
 }
 
 func (b *Bear) buildController(group *gin.RouterGroup, groupName string, class IClass) {
@@ -1808,40 +2063,115 @@ func (b *Bear) buildControllerE(group *gin.RouterGroup, groupName string, class 
 
 // POST 注册 POST 路由 (自动感知当前的挂载点)
 func (b *Bear) POST(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	return b.activeGroup().POST(relativePath, handlers...)
+	routes, err := b.POSTE(relativePath, handlers...)
+	if err != nil {
+		panic(err)
+	}
+	return routes
+}
+
+func (b *Bear) POSTE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
+	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().POST(relativePath, handlers...) })
 }
 
 // GET 注册 GET 路由 (自动感知当前的挂载点)
 func (b *Bear) GET(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	return b.activeGroup().GET(relativePath, handlers...)
+	routes, err := b.GETE(relativePath, handlers...)
+	if err != nil {
+		panic(err)
+	}
+	return routes
+}
+
+func (b *Bear) GETE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
+	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().GET(relativePath, handlers...) })
 }
 
 // PUT 注册 PUT 路由 (自动感知当前的挂载点)
 func (b *Bear) PUT(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	return b.activeGroup().PUT(relativePath, handlers...)
+	routes, err := b.PUTE(relativePath, handlers...)
+	if err != nil {
+		panic(err)
+	}
+	return routes
+}
+
+func (b *Bear) PUTE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
+	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().PUT(relativePath, handlers...) })
 }
 
 // DELETE 注册 DELETE 路由 (自动感知当前的挂载点)
 func (b *Bear) DELETE(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	return b.activeGroup().DELETE(relativePath, handlers...)
+	routes, err := b.DELETEE(relativePath, handlers...)
+	if err != nil {
+		panic(err)
+	}
+	return routes
+}
+
+func (b *Bear) DELETEE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
+	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().DELETE(relativePath, handlers...) })
 }
 
 // PATCH 注册 PATCH 路由 (自动感知当前的挂载点)
 func (b *Bear) PATCH(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	return b.activeGroup().PATCH(relativePath, handlers...)
+	routes, err := b.PATCHE(relativePath, handlers...)
+	if err != nil {
+		panic(err)
+	}
+	return routes
+}
+
+func (b *Bear) PATCHE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
+	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().PATCH(relativePath, handlers...) })
 }
 
 // OPTIONS 注册 OPTIONS 路由 (自动感知当前的挂载点)
 func (b *Bear) OPTIONS(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	return b.activeGroup().OPTIONS(relativePath, handlers...)
+	routes, err := b.OPTIONSE(relativePath, handlers...)
+	if err != nil {
+		panic(err)
+	}
+	return routes
+}
+
+func (b *Bear) OPTIONSE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
+	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().OPTIONS(relativePath, handlers...) })
 }
 
 // HEAD 注册 HEAD 路由 (自动感知当前的挂载点)
 func (b *Bear) HEAD(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	return b.activeGroup().HEAD(relativePath, handlers...)
+	routes, err := b.HEADE(relativePath, handlers...)
+	if err != nil {
+		panic(err)
+	}
+	return routes
+}
+
+func (b *Bear) HEADE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
+	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().HEAD(relativePath, handlers...) })
 }
 
 // Any 注册 Any 路由 (自动感知当前的挂载点)
 func (b *Bear) Any(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
-	return b.activeGroup().Any(relativePath, handlers...)
+	routes, err := b.AnyE(relativePath, handlers...)
+	if err != nil {
+		panic(err)
+	}
+	return routes
+}
+
+func (b *Bear) AnyE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
+	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().Any(relativePath, handlers...) })
+}
+
+func (b *Bear) registerGinRoutesE(register func() gin.IRoutes) (gin.IRoutes, error) {
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	routes := register()
+	b.strictRegistrationVersion++
+	return routes, nil
 }

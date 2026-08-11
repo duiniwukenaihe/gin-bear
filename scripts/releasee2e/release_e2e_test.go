@@ -552,19 +552,34 @@ const generatedFixtureRoutesSource = `package app
 
 import (
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 )
 
 type validationRequest struct {
 	Name string ` + "`json:\"name\" binding:\"required\"`" + `
 }
 
-func configure(application *bear.Bear) {
-	application.Handle("GET", "/success", func() map[string]string { return map[string]string{"result": "release-ok"} })
-	application.Handle("POST", "/validate", func(request *validationRequest) map[string]string {
+func configure(application *bear.Bear) error {
+	db, err := gorm.Open(sqlite.Open("file:generated-release-check?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		return err
+	}
+	if err := application.BeansE(&bear.GormAdapter{DB: db}); err != nil {
+		return err
+	}
+	if err := application.HandleE("GET", "/success", func() map[string]string { return map[string]string{"result": "release-ok"} }); err != nil {
+		return err
+	}
+	if err := application.HandleE("POST", "/validate", func(request *validationRequest) map[string]string {
 		return map[string]string{"name": request.Name}
-	})
-	application.Handle("GET", "/private", func() string { return "private" })
-	application.Attach(bear.NewAuthFairing())
+	}); err != nil {
+		return err
+	}
+	if err := application.HandleE("GET", "/private", func() string { return "private" }); err != nil {
+		return err
+	}
+	return application.AttachE(bear.NewAuthFairing())
 }
 `
 

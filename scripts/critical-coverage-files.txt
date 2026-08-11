@@ -14,6 +14,7 @@ config-loader pkg/bear/config_loader.go
 lifecycle pkg/bear/bear.go
 lifecycle pkg/bear/lifecycle.go
 auth pkg/bear/auth_token.go
+auth pkg/bear/authorization.go
 auth pkg/bear/jwt.go
 auth pkg/bear/jwt_fairing.go
 migration-lock pkg/bear/migration.go
@@ -22,3 +23,4 @@ cli internal/cli/gen.go
 cli internal/cli/new.go
 cli internal/cli/root.go
 scaffold internal/scaffold/embed.go
+scaffold internal/scaffold/manifest.go

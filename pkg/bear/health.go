@@ -128,6 +128,13 @@ type readinessCheckerKey struct {
 	name    string
 }
 
+type preparedReadinessCheck struct {
+	checker ReadinessChecker
+	key     readinessCheckerKey
+	name    string
+	err     error
+}
+
 type readinessCheckCoordinator struct {
 	mu       sync.Mutex
 	inFlight map[readinessCheckerKey]struct{}
@@ -155,18 +162,24 @@ func runReadinessChecksWithCoordinator(parent context.Context, timeout time.Dura
 	if coordinator == nil {
 		coordinator = newReadinessCheckCoordinator()
 	}
-	ordered := make([]ReadinessChecker, 0, len(checkers))
+	ordered := make([]preparedReadinessCheck, 0, len(checkers))
 	seen := make(map[readinessCheckerKey]struct{}, len(checkers))
 	for _, checker := range checkers {
-		key := readinessCheckerIdentity(checker)
+		name, err := readinessCheckerName(checker)
+		key := readinessCheckerIdentity(checker, name)
 		if _, exists := seen[key]; exists {
 			continue
 		}
 		seen[key] = struct{}{}
-		ordered = append(ordered, checker)
+		ordered = append(ordered, preparedReadinessCheck{
+			checker: checker,
+			key:     key,
+			name:    name,
+			err:     err,
+		})
 	}
 	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].Name() < ordered[j].Name()
+		return ordered[i].name < ordered[j].name
 	})
 
 	deadlineCtx, cancel := context.WithTimeout(parent, timeout)
@@ -176,25 +189,32 @@ func runReadinessChecksWithCoordinator(parent context.Context, timeout time.Dura
 		readinessResult
 	}
 	completed := make(chan indexedResult, len(ordered))
-	for i, checker := range ordered {
-		if coordinator.start(checker) {
-			i, checker := i, checker
+	for i, check := range ordered {
+		if check.err != nil {
+			completed <- indexedResult{
+				index:           i,
+				readinessResult: readinessResult{Name: check.name, Err: check.err},
+			}
+			continue
+		}
+		if coordinator.start(check.key) {
+			i, check := i, check
 			go func() {
-				result := indexedResult{index: i, readinessResult: readinessResult{Name: checker.Name()}}
+				result := indexedResult{index: i, readinessResult: readinessResult{Name: check.name}}
 				defer func() {
 					if recover() != nil {
 						result.Err = errReadinessCheckPanic
 					}
-					coordinator.finish(checker)
+					coordinator.finish(check.key)
 					completed <- result
 				}()
-				result.Err = checker.CheckReady(deadlineCtx)
+				result.Err = check.checker.CheckReady(deadlineCtx)
 			}()
 			continue
 		}
 		completed <- indexedResult{
 			index:           i,
-			readinessResult: readinessResult{Name: checker.Name(), Err: errReadinessCheckBusy},
+			readinessResult: readinessResult{Name: check.name, Err: errReadinessCheckBusy},
 		}
 	}
 
@@ -209,9 +229,9 @@ func runReadinessChecksWithCoordinator(parent context.Context, timeout time.Dura
 				remaining--
 			}
 		case <-deadlineCtx.Done():
-			for i, checker := range ordered {
+			for i, check := range ordered {
 				if !finished[i] {
-					results[i] = readinessResult{Name: checker.Name(), Err: deadlineCtx.Err()}
+					results[i] = readinessResult{Name: check.name, Err: deadlineCtx.Err()}
 				}
 			}
 			return results
@@ -220,8 +240,7 @@ func runReadinessChecksWithCoordinator(parent context.Context, timeout time.Dura
 	return results
 }
 
-func (c *readinessCheckCoordinator) start(checker ReadinessChecker) bool {
-	key := readinessCheckerIdentity(checker)
+func (c *readinessCheckCoordinator) start(key readinessCheckerKey) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, running := c.inFlight[key]; running {
@@ -231,21 +250,38 @@ func (c *readinessCheckCoordinator) start(checker ReadinessChecker) bool {
 	return true
 }
 
-func (c *readinessCheckCoordinator) finish(checker ReadinessChecker) {
+func (c *readinessCheckCoordinator) finish(key readinessCheckerKey) {
 	c.mu.Lock()
-	delete(c.inFlight, readinessCheckerIdentity(checker))
+	delete(c.inFlight, key)
 	c.mu.Unlock()
 }
 
-func readinessCheckerIdentity(checker ReadinessChecker) readinessCheckerKey {
+func readinessCheckerIdentity(checker ReadinessChecker, name string) readinessCheckerKey {
 	value := reflect.ValueOf(checker)
+	if !value.IsValid() {
+		return readinessCheckerKey{name: name}
+	}
 	key := readinessCheckerKey{typ: value.Type()}
 	if value.Kind() == reflect.Ptr {
 		key.pointer = value.Pointer()
 		return key
 	}
-	key.name = checker.Name()
+	key.name = name
 	return key
+}
+
+func readinessCheckerName(checker ReadinessChecker) (name string, err error) {
+	name = "readiness"
+	if checkerType := reflect.TypeOf(checker); checkerType != nil {
+		name = checkerType.String()
+	}
+	defer func() {
+		if recover() != nil {
+			err = errReadinessCheckPanic
+		}
+	}()
+	name = checker.Name()
+	return name, nil
 }
 
 func readinessLogger(runtime *Runtime) *slog.Logger {

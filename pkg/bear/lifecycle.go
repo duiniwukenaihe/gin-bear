@@ -32,12 +32,17 @@ type lifecycleEntry struct {
 	component     any
 	registrations map[reflect.Type]struct{}
 	active        bool
+	prestarted    bool
 	started       bool
 	stopped       bool
 	stopState     lifecycleEntryStopState
 	stopAttempt   *lifecycleStopAttempt
 	terminalErr   error
 	legacyStarted bool
+}
+
+type lifecyclePrestarted interface {
+	lifecyclePrestarted() bool
 }
 
 type lifecycleEntryStopState uint8
@@ -157,31 +162,51 @@ func (l *Lifecycle) setBeanLocked(beanType reflect.Type, bean any) {
 	}
 	entry := l.findComponentEntry(bean)
 	if entry == nil {
+		prestarted := isLifecyclePrestarted(bean)
 		entry = &lifecycleEntry{
 			component:     bean,
 			registrations: make(map[reflect.Type]struct{}),
 			active:        true,
+			prestarted:    prestarted,
+			started:       prestarted,
 		}
 		l.components = append(l.components, entry)
+	} else if isLifecyclePrestarted(bean) {
+		entry.prestarted = true
+		entry.started = true
 	}
 	entry.active = true
 	entry.registrations[beanType] = struct{}{}
 	l.beanEntries[beanType] = entry
 }
 
-func (l *Lifecycle) removeBean(beanType reflect.Type) {
+func (l *Lifecycle) removeBean(beanType reflect.Type, commits ...func()) error {
+	var commit func()
+	if len(commits) > 0 && commits[0] != nil {
+		commit = commits[0]
+	}
 	if l == nil {
-		return
+		if commit != nil {
+			commit()
+		}
+		return nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.registrationSealed || l.state != lifecycleNew {
+		return ErrLifecycleRegistrationClosed
+	}
+	if commit != nil {
+		commit()
+	}
 	entry := l.beanEntries[beanType]
 	if entry == nil {
-		return
+		return nil
 	}
 	delete(l.beanEntries, beanType)
 	delete(entry.registrations, beanType)
 	l.retireUnregisteredEntry(entry)
+	return nil
 }
 
 func (l *Lifecycle) findComponentEntry(component any) *lifecycleEntry {
@@ -231,10 +256,21 @@ func (l *Lifecycle) add(components ...any) error {
 	}
 	for _, component := range components {
 		if component != nil {
-			l.components = append(l.components, &lifecycleEntry{component: component, active: true})
+			prestarted := isLifecyclePrestarted(component)
+			l.components = append(l.components, &lifecycleEntry{
+				component:  component,
+				active:     true,
+				prestarted: prestarted,
+				started:    prestarted,
+			})
 		}
 	}
 	return nil
+}
+
+func isLifecyclePrestarted(component any) bool {
+	marker, ok := component.(lifecyclePrestarted)
+	return ok && marker.lifecyclePrestarted()
 }
 
 // Start initializes components in registration order.
@@ -354,6 +390,13 @@ func (l *Lifecycle) rollbackStrictStart(startErr error) error {
 	l.mu.Lock()
 	l.state = lifecycleStopping
 	l.startErr = startErr
+	hasPrestarted := false
+	for _, entry := range l.components {
+		if entry.active && entry.prestarted {
+			hasPrestarted = true
+			break
+		}
+	}
 	l.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), lifecycleRollbackTimeout)
@@ -361,7 +404,7 @@ func (l *Lifecycle) rollbackStrictStart(startErr error) error {
 	rollbackErr, complete := l.stopStrictEntries(ctx)
 
 	l.mu.Lock()
-	if complete && rollbackErr == nil {
+	if complete && rollbackErr == nil && !hasPrestarted {
 		l.resetStrictEntriesForRetryLocked()
 		l.state = lifecycleNew
 		l.startRetryable = true
@@ -795,6 +838,8 @@ func lifecycleComponentName(component any) string {
 type shutdownHook struct {
 	fn func()
 }
+
+func (shutdownHook) lifecyclePrestarted() bool { return true }
 
 func (h shutdownHook) ShutdownContext(context.Context) error {
 	h.fn()

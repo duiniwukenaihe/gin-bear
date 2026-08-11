@@ -240,7 +240,7 @@ func (r *MigrationRunner) up(ctx context.Context, migrations []Migration, dialec
 	}
 
 	for _, migration := range migrations {
-		applied, err := r.isApplied(ctx, table, migration.Version, dialect)
+		applied, err := r.isApplied(ctx, table, migration, dialect)
 		if err != nil {
 			return err
 		}
@@ -318,14 +318,21 @@ func (r *MigrationRunner) down(ctx context.Context, migrations []Migration, step
 	for _, migration := range migrations {
 		byVersion[migration.Version] = migration
 	}
+	rollbackPlan := make([]Migration, 0, len(latest))
 	for _, applied := range latest {
 		migration, ok := byVersion[applied.Version]
 		if !ok {
 			return fmt.Errorf("rollback migration %s_%s: migration file not loaded", applied.Version, applied.Name)
 		}
+		if migration.Name != applied.Name {
+			return fmt.Errorf("rollback migration %s_%s: loaded migration name %q does not match applied name %q", applied.Version, applied.Name, migration.Name, applied.Name)
+		}
 		if strings.TrimSpace(migration.DownSQL) == "" {
 			return fmt.Errorf("rollback migration %s_%s: down sql is empty", applied.Version, applied.Name)
 		}
+		rollbackPlan = append(rollbackPlan, migration)
+	}
+	for _, migration := range rollbackPlan {
 		if err := r.applyDown(ctx, table, migration, dialect); err != nil {
 			return err
 		}
@@ -643,16 +650,20 @@ func (r *MigrationRunner) releaseLock(ctx context.Context, table, owner string, 
 	return nil
 }
 
-func (r *MigrationRunner) isApplied(ctx context.Context, table string, version string, dialect MigrationDialect) (bool, error) {
+func (r *MigrationRunner) isApplied(ctx context.Context, table string, migration Migration, dialect MigrationDialect) (bool, error) {
+	var appliedName string
 	var dirty bool
-	query, err := dialect.Rebind(fmt.Sprintf("SELECT dirty FROM %s WHERE version = ?", table))
+	query, err := dialect.Rebind(fmt.Sprintf("SELECT name, dirty FROM %s WHERE version = ?", table))
 	if err != nil {
 		return false, err
 	}
-	err = r.DB.QueryRowContext(ctx, query, version).Scan(&dirty)
+	err = r.DB.QueryRowContext(ctx, query, migration.Version).Scan(&appliedName, &dirty)
 	if err == nil {
 		if dirty {
-			return false, fmt.Errorf("%w: version %s", ErrDirtyMigration, version)
+			return false, fmt.Errorf("%w: version %s", ErrDirtyMigration, migration.Version)
+		}
+		if appliedName != migration.Name {
+			return false, fmt.Errorf("migration version %s is already applied as %q and cannot be applied as %q", migration.Version, appliedName, migration.Name)
 		}
 		return true, nil
 	}

@@ -28,7 +28,7 @@ type BeanFactory struct {
 	strict     bool
 	onSet      func(reflect.Type, any, func()) error
 	onBatchSet func([]beanRegistration, func()) error
-	onRemove   func(reflect.Type)
+	onRemove   func(reflect.Type, ...func()) error
 }
 
 type beanRegistration struct {
@@ -341,20 +341,31 @@ func isNilBean(bean any) bool {
 
 // Remove 移除一个 Bean
 func (f *BeanFactory) Remove(t reflect.Type) {
+	_ = f.TryRemove(t)
+}
+
+// TryRemove removes a bean or reports that the owning lifecycle is closed.
+func (f *BeanFactory) TryRemove(t reflect.Type) error {
+	if f == nil {
+		return nil
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.beans, t)
-	for i, registeredType := range f.order {
-		if registeredType == t {
-			f.order = append(f.order[:i], f.order[i+1:]...)
-			break
+	commit := func() {
+		delete(f.beans, t)
+		for i, registeredType := range f.order {
+			if registeredType == t {
+				f.order = append(f.order[:i], f.order[i+1:]...)
+				break
+			}
 		}
+		f.rebuildConcreteIndexesLocked()
 	}
-	f.rebuildConcreteIndexesLocked()
-	onRemove := f.onRemove
-	if onRemove != nil {
-		onRemove(t)
+	if f.onRemove != nil {
+		return f.onRemove(t, commit)
 	}
+	commit()
+	return nil
 }
 
 func (f *BeanFactory) rebuildConcreteIndexesLocked() {

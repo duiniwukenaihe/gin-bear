@@ -2,6 +2,57 @@
 
 All notable changes to gin-bear are documented in this file.
 
+## [v0.9.3] - Unreleased
+
+### Added
+
+- Resource-level authorization through `Authorizer`, `PermissionFairing`, and
+  request-derived subject and scope resolvers. Authorization storage remains an
+  application concern and is not coupled to Casbin or a database schema.
+- Error-returning strict registration APIs for modules, controllers, Fairings,
+  routes, middleware, health, metrics, tracing, database, and WebSocket setup.
+- A minimal `.bear/scaffold.json` project registry and generated
+  `internal/app/modules_gen.go`, allowing `bear gen api` to register generated
+  modules automatically.
+- Generated CRUD validation, `PATCH` support, correct `201`/`204` statuses, and
+  deterministic `400`/`404` behavior.
+
+### Changed
+
+- Invalid environment overrides and invalid port, pool, timeout, CORS, and
+  tracing endpoint settings now fail configuration loading instead of falling
+  back silently.
+- Strict startup builds routes before lifecycle startup, seals Bear-managed
+  registration, initializes each aliased component once, and rolls back
+  pre-opened database and tracing resources when startup fails.
+- Generated applications use strict runtime and envelope response defaults,
+  explicit error-returning startup APIs, and separate metrics and health setup.
+  CORS and authentication remain opt-in.
+- Generated project dependencies use their real module paths and preserve a
+  higher compatible version already selected by the application.
+
+### Fixed
+
+- Gin abort and committed-response semantics consistently stop Fairing and
+  handler execution without appending another response or forcing HTTP 400.
+- Strict IoC reports missing, ambiguous, and duplicate dependencies at startup,
+  preserves deterministic lifecycle order, unblocks concurrent waiters after
+  injector panics, and permits a failed injection attempt to be retried.
+- Readiness name panics, unsafe `StatusResponse` values, OpenAPI envelope drift,
+  migration version/name mismatches, partial rollback plans, audit-field
+  mutation, optimistic-lock caller mutation, and zero-row update ambiguity.
+- Failed `IgniteE` construction restores Gin process globals and does not
+  publish a partial default runtime.
+
+### Compatibility Boundary
+
+- Strict registration guarantees apply to Bear-managed APIs. The embedded
+  public `*gin.Engine` and returned raw `*gin.RouterGroup` remain v0 compatibility
+  escape hatches; direct mutation and concurrent application registration are
+  unsupported after startup begins. Removing those escape hatches requires a
+  v0.10 API change.
+- This candidate has not been pushed, tagged, or published.
+
 ## [v0.9.2] - Unreleased
 
 ### Added

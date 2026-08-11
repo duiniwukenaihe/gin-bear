@@ -66,7 +66,7 @@ workflow exemption, not signature verification. A local release operator with
 an isolated trusted `GNUPGHOME` must run:
 
 ```bash
-RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.9.2 RC_EXPECTED_VERSION=v0.9.2 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
+RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.9.3 RC_EXPECTED_VERSION=v0.9.3 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
 ```
 
 When `RC_RELEASE_TAG` is non-empty, `RC_VERIFY_TAG_SIGNATURE` is mandatory and
@@ -97,12 +97,13 @@ database root, and records the canonical database and manifest identities.
 The RC path always enforces total coverage `70.0` and every critical group
 `80.0`; lower caller-provided environment values do not reduce these gates.
 
-## v0.9.2 Candidate Audit
+## v0.9.3 Candidate Audit
 
-The `v0.9.2` candidate is under local implementation and focused verification.
-It has not been pushed, tagged, or published. The historical diagnostics below
-are not final gate evidence for the current shared worktree; the main task must
-run the complete candidate gate after all parallel implementation is combined.
+The `v0.9.3` candidate includes the `v0.9.2` runtime-hardening checkpoint and is
+under local implementation and focused verification. It has not been pushed,
+tagged, or published. The historical diagnostics below are not final gate
+evidence for the current shared worktree; the main task must run the complete
+candidate gate after all parallel implementation is combined.
 All commands use `GOSUMDB=sum.golang.org` and `GOTOOLCHAIN=go1.25.12`, run in
 the foreground, and complete before the next command starts.
 

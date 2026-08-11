@@ -152,21 +152,25 @@ func TestRuntimeContainerRegistrationsParticipateInLifecycle(t *testing.T) {
 
 func TestLaunchClosesHTTPListenerWhenGRPCBindingFails(t *testing.T) {
 	var events []string
-	port := availableTCPPort(t)
+	httpPort := availableTCPPort(t)
+	grpcListener, err := net.Listen("tcp", ":0")
+	requireNoError(t, err)
+	defer grpcListener.Close()
+	grpcPort := grpcListener.Addr().(*net.TCPAddr).Port
 	cfg := NewSysConfig()
-	cfg.Server.Port = int32(port)
+	cfg.Server.Port = int32(httpPort)
 	cfg.GRPC.Enabled = true
-	cfg.GRPC.Port = int32(port)
+	cfg.GRPC.Port = int32(grpcPort)
 	app := Ignite(cfg)
 	app.Beans(recordingComponent{name: "launch", events: &events})
 	requireNoError(t, app.ApplyAll(context.Background()))
 
-	err := app.Launch(context.Background())
+	err = app.Launch(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "gRPC") {
 		t.Fatalf("Launch() error = %v, want gRPC bind failure", err)
 	}
 
-	listener, listenErr := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	listener, listenErr := net.Listen("tcp", fmt.Sprintf(":%d", httpPort))
 	if listenErr != nil {
 		t.Fatalf("HTTP listener was not cleaned up: %v", listenErr)
 	}

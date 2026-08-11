@@ -14,6 +14,8 @@ server:
 
 config:
   strict: true
+  framework.strict: true
+  framework.response_mode: "envelope"
 
 health:
   readiness_timeout: "3s"
@@ -22,7 +24,7 @@ log:
   level: "info"
 
 cors:
-  enabled: true
+  enabled: false
   allow_origins:
     - "https://example.com"
   allow_methods:
@@ -42,7 +44,7 @@ cors:
 database:
   enabled: true
   type: "postgres"
-  host: "postgres"
+  host: "127.0.0.1" # Override with POSTGRES_HOST.
   port: "5432"
   user: "gin_bear"
   password: "" # Set with POSTGRES_PASSWORD.
@@ -54,7 +56,7 @@ database:
   slow_query_threshold: "500ms"
 
 redis:
-  addr: "redis:6379"
+  addr: "127.0.0.1:6379" # Override with REDIS_ADDR.
   password: ""
   db: 0
   pool_size: 20
@@ -68,7 +70,7 @@ tracing:
   enabled: false
   service_name: "gin-bear"
   exporter: "otlp"
-  otlp_endpoint: "http://otel-collector:4318/v1/traces"
+  otlp_endpoint: "http://127.0.0.1:4318/v1/traces" # Override with TRACING_OTLP_ENDPOINT.
   sample_rate: 1.0
 
 websocket:

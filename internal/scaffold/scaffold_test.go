@@ -430,8 +430,8 @@ func TestGeneratedCRUD(t *testing.T) {
 		return result
 	}
 
-	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"first","email":"first@example.com"}` + "`" + `, http.StatusOK)
-	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"second","email":"second@example.com"}` + "`" + `, http.StatusOK)
+	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"first","email":"first@example.com"}` + "`" + `, http.StatusCreated)
+	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"second","email":"second@example.com"}` + "`" + `, http.StatusCreated)
 	request(http.MethodPost, "/api/v1/invoice", ` + "`" + `{"name":"invalid","email":"not-an-email"}` + "`" + `, http.StatusBadRequest)
 
 	list := request(http.MethodGet, "/api/v1/invoice?page=1&page_size=10", "", http.StatusOK)
@@ -450,7 +450,7 @@ func TestGeneratedCRUD(t *testing.T) {
 	updated := request(http.MethodGet, "/api/v1/invoice/1", "", http.StatusOK)
 	if updated["name"] != "updated" || updated["email"] != "first@example.com" { t.Fatalf("updated payload=%v", updated) }
 
-	request(http.MethodDelete, "/api/v1/invoice/1", "", http.StatusOK)
+	request(http.MethodDelete, "/api/v1/invoice/1", "", http.StatusNoContent)
 	empty := request(http.MethodGet, "/api/v1/invoice", "", http.StatusOK)
 	if empty["total"] != float64(1) { t.Fatalf("delete list payload=%v", empty) }
 }

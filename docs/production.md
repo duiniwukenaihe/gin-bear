@@ -1,5 +1,9 @@
 # Production Guide
 
+This guide describes the unpublished `v0.9.3` candidate, including the
+`v0.9.2` strict-runtime migration checkpoint. Neither candidate is a published
+release.
+
 ## Runtime
 
 Use production mode in deployed environments:
@@ -134,7 +138,9 @@ because HTTPS and HSTS policy usually belong to the TLS termination layer.
 
 CORS startup validation rejects `allow_origins: ["*"]` when
 `allow_credentials: true`. Use an explicit origin allowlist for credentialed
-browser requests.
+browser requests. CORS remains disabled unless the application enables it; a
+deployment whose browser-origin policy is enforced by Nginx, Apache, or another
+trusted gateway does not need to enable framework CORS.
 
 ## JWT Authentication
 
@@ -177,6 +183,44 @@ strict mode a missing injection fails startup; compatibility mode returns a
 generic HTTP 500 at request time. Casbin enforcement errors are logged with
 internal detail but return only a generic 500 to the client, while policy
 denials remain HTTP 403.
+
+## Resource Authorization
+
+Use `PermissionFairing` when a role string is not enough to describe access to
+a project, server, account, or other resource. The framework defines the
+decision contract but does not introduce policy tables or choose a storage
+engine:
+
+```go
+if err := application.Runtime().Container.TrySetWithInterface(
+    (*bear.Authorizer)(nil),
+    projectAuthorizer,
+); err != nil {
+    return err
+}
+
+permission := bear.NewPermissionFairing(
+    "bastion-command",
+    "list",
+    func(ctx *gin.Context) (map[string]string, error) {
+        return map[string]string{"project_id": ctx.Param("project_id")}, nil
+    },
+)
+if err := application.HandleWithFairingE(
+    http.MethodGet,
+    "/projects/:project_id/bastion/commands",
+    listCommands,
+    permission,
+); err != nil {
+    return err
+}
+```
+
+The default subject resolver reads the authenticated `current_user_id` and
+therefore requires strict Fairing ordering. A missing subject returns 401, a
+denied decision returns 403, and resolver or policy-engine failures are logged
+internally while returning a generic 500. Compatibility applications can use
+`SetSubjectResolver` to provide an explicit subject source during migration.
 
 ## Logging
 
@@ -242,7 +286,10 @@ metrics:
   path: "/metrics"
 ```
 
-`EnableHealth()` registers `/metrics` when metrics are enabled. The endpoint exposes:
+New applications call `EnableMetricsE` and `EnableHealthE` separately so a
+partial registration cannot be mistaken for success. The legacy
+`EnableHealth()` wrapper keeps its historical behavior of also enabling metrics
+when configured. The endpoint exposes:
 
 - `gin_bear_http_requests_total`
 - `gin_bear_http_errors_total`
@@ -449,23 +496,26 @@ Use `redis.required` for file-based configuration. `REDIS_REQUIRED=true` applies
 
 ## Code Generation
 
-`bear gen api` generates CRUD packages with DTO-to-model mapping, pointer-based update DTOs, bounded pagination, and safe package names for dashed or underscored resources:
+`bear gen api` generates CRUD packages with DTO-to-model mapping, pointer-based
+update DTOs, bounded pagination, and safe package names for dashed or
+underscored resources:
 
 ```bash
 bear gen api user-profile --fields "name:string,email:email,age:int,birthday:datetime,bio:text"
 ```
 
-Generated query DTOs default to page `1`, page size `20`, and cap page size at `100`.
-An API module owns one repository, service, and controller bean set. Register the
-generated module from the scaffold extension point before `ApplyAll` runs:
+Generated query DTOs default to page `1`, page size `20`, and cap page size at
+`100`. Create returns HTTP 201, delete returns HTTP 204, missing records return
+HTTP 404, and empty or invalid updates return HTTP 400. Both `PATCH` and `PUT`
+are registered for updates.
 
-```go
-import "my-app/internal/userprofile"
-
-func configure(application *bear.Bear) {
-    application.AddModule(&userprofile.UserProfileModule{})
-}
-```
+An API module owns one repository, service, and controller bean set. Projects
+created by the current CLI contain a small `.bear/scaffold.json` registry and a
+generated `internal/app/modules_gen.go`; `bear gen api` updates both atomically,
+so manual imports and `AddModule` edits are unnecessary. The registry contains
+only the module path, framework/template versions, and generated API package
+names. It is not a database schema or migration history. Existing projects
+without this registry remain supported and receive the manual `AddModule` hint.
 
 The generated repository requires the application's `GormAdapter`. Decimal
 fields add `github.com/shopspring/decimal v1.4.0` to `go.mod` only when the
@@ -550,7 +600,7 @@ plugins:
 
 Plugin paths are resolved to absolute paths and must live inside one of the configured directories.
 
-For v0.9.2, dynamic plugins are a startup-only, experimental integration point.
+For v0.9.x, dynamic plugins are a startup-only, experimental integration point.
 Load every required plugin before `ApplyAll`. Once startup begins, `LoadPlugin` and
 `ReloadPlugin` return `bear.ErrPluginHotReloadUnsupported`; Go plugins cannot
 safely replace lifecycle-owned resources in a live process. Publish the new

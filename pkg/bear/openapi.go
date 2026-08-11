@@ -123,6 +123,7 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 		},
 	}
 	schemaBuilder := newOpenAPISchemaBuilder(componentSchemas)
+	envelopeMode := config != nil && config.ResponseMode() == "envelope"
 	schema := OpenAPISchema{
 		OpenAPI: "3.0.0",
 		Info: map[string]interface{}{
@@ -215,7 +216,7 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 				},
 			},
 		}
-		enrichOpenAPIOperation(op, method, route.HandlerType, schemaBuilder)
+		enrichOpenAPIOperation(op, method, route.HandlerType, schemaBuilder, envelopeMode)
 		ensureOpenAPIPathParameters(op, path)
 		if publicRoute {
 			op["security"] = []map[string][]string{}
@@ -421,7 +422,7 @@ func toOpenAPIPath(path string) string {
 	return strings.Join(parts, "/")
 }
 
-func enrichOpenAPIOperation(op map[string]interface{}, method string, handlerType reflect.Type, schemas *openAPISchemaBuilder) {
+func enrichOpenAPIOperation(op map[string]interface{}, method string, handlerType reflect.Type, schemas *openAPISchemaBuilder, envelopeMode bool) {
 	if handlerType == nil || handlerType.Kind() != reflect.Func {
 		return
 	}
@@ -450,7 +451,7 @@ func enrichOpenAPIOperation(op map[string]interface{}, method string, handlerTyp
 	if len(parameters) > 0 {
 		op["parameters"] = parameters
 	}
-	if responseSchema := openAPIResponseSchema(handlerType, schemas); responseSchema != nil {
+	if responseSchema := openAPIResponseSchema(handlerType, schemas, envelopeMode); responseSchema != nil {
 		op["responses"] = map[string]interface{}{
 			"200": map[string]interface{}{
 				"description": "OK",
@@ -536,7 +537,7 @@ func openAPIRequestBodySchema(structType reflect.Type, schemas *openAPISchemaBui
 	required := make([]string, 0)
 	for i := 0; i < structType.NumField(); i++ {
 		field := structType.Field(i)
-		if field.PkgPath != "" {
+		if field.PkgPath != "" || field.Tag.Get("json") == "-" {
 			continue
 		}
 		fieldType := derefType(field.Type)
@@ -556,7 +557,7 @@ func openAPIRequestBodySchema(structType reflect.Type, schemas *openAPISchemaBui
 		}
 		name := tagFieldName(field.Tag.Get("json"))
 		if name == "" {
-			continue
+			name = field.Name
 		}
 		properties[name] = schemas.schemaForType(field.Type, depth+1)
 		if hasRequiredBinding(field) {
@@ -576,16 +577,37 @@ func openAPIRequestBodySchema(structType reflect.Type, schemas *openAPISchemaBui
 	return schema
 }
 
-func openAPIResponseSchema(handlerType reflect.Type, schemas *openAPISchemaBuilder) map[string]interface{} {
+func openAPIResponseSchema(handlerType reflect.Type, schemas *openAPISchemaBuilder, envelopeMode bool) map[string]interface{} {
 	errorType := reflect.TypeOf((*error)(nil)).Elem()
 	for i := 0; i < handlerType.NumOut(); i++ {
 		outType := handlerType.Out(i)
 		if outType.Implements(errorType) {
 			continue
 		}
-		return schemas.schemaForType(outType, 0)
+		responseType := reflect.TypeOf(Response{})
+		if envelopeMode && derefType(outType) == responseType {
+			dataField, _ := responseType.FieldByName("Data")
+			return openAPIEnvelopeResponseSchema(schemas.schemaForType(dataField.Type, 0))
+		}
+		responseSchema := schemas.schemaForType(outType, 0)
+		if envelopeMode {
+			return openAPIEnvelopeResponseSchema(responseSchema)
+		}
+		return responseSchema
 	}
 	return nil
+}
+
+func openAPIEnvelopeResponseSchema(dataSchema map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"code":    map[string]interface{}{"type": "integer"},
+			"message": map[string]interface{}{"type": "string"},
+			"data":    dataSchema,
+		},
+		"required": []string{"code", "message"},
+	}
 }
 
 const maxOpenAPISchemaDepth = 64

@@ -12,9 +12,24 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize application: %w", err)
 	}
-	application.EnableHealth()
-	application.EnableTracing(ctx)
-	configure(application)
+	if err := application.EnableDatabaseE(ctx); err != nil {
+		return fmt.Errorf("initialize database: %w", err)
+	}
+	if err := application.EnableTracingE(ctx); err != nil {
+		return fmt.Errorf("initialize tracing: %w", err)
+	}
+	if err := application.EnableMetricsE(); err != nil {
+		return fmt.Errorf("initialize metrics: %w", err)
+	}
+	if err := application.EnableHealthE(); err != nil {
+		return fmt.Errorf("initialize health: %w", err)
+	}
+	if err := application.AddModuleE(generatedModules()...); err != nil {
+		return fmt.Errorf("register generated modules: %w", err)
+	}
+	if err := configure(application); err != nil {
+		return fmt.Errorf("configure application: %w", err)
+	}
 	if err := application.Serve(ctx); err != nil {
 		return fmt.Errorf("serve application: %w", err)
 	}

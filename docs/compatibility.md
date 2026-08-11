@@ -52,6 +52,36 @@ create a new instance for a replacement process. An established strict Gin
 mode also prevents compatibility instances from changing that process-global
 mode.
 
+Strict registration errors are available from the additive `...E` APIs. In
+strict mode, Bear-owned legacy fluent registration wrappers call those APIs and
+panic when the registration is invalid, preserving their original signatures
+without silently discarding the failure. The promoted Gin `Use` method remains
+unchanged for v0 compatibility; strict applications should use `UseE`.
+
+Bear still embeds a public `*gin.Engine`, and `GroupE` still returns a raw
+`*gin.RouterGroup` for v0 source compatibility. Strict sealing therefore covers
+Bear-managed registration APIs, not arbitrary direct Gin mutation. Complete all
+direct Gin setup before startup and do not register modules, routes, or groups
+concurrently. Hiding the engine and replacing raw groups with an owned
+registration context is reserved for v0.10 because it would break existing
+applications.
+
+Development builds of `cmd/bear` do not guess a framework version. Pass
+`--framework-version` to `bear new`; release binaries receive their matching
+version through build metadata.
+
+## v0.9.3 Additive Behavior
+
+- `Authorizer` and `PermissionFairing` add resource/action/scope decisions
+  without changing or replacing the existing Casbin APIs.
+- Current scaffolds use strict runtime and envelope defaults. Existing projects
+  keep their current configuration until they opt in.
+- Current scaffolds maintain generated module registration through
+  `.bear/scaffold.json`. Existing projects without that file continue to receive
+  manual registration instructions.
+- CORS and authentication remain opt-in; generated projects do not assume that
+  either concern belongs inside the application process.
+
 ## v0.9.2 Security Behavior Changes
 
 The following forced security changes intentionally tighten runtime behavior

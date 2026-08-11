@@ -2,9 +2,10 @@
 
 ## Supported Versions
 
-`v0.9.1` is the current supported release. `v0.9.2` is an upcoming, unreleased
-maintenance candidate; it has not been pushed, tagged, or published and is not
-yet a supported published version. Users should plan an upgrade with the
+`v0.9.1` is the current supported release. `v0.9.3` is an upcoming, unreleased
+maintenance candidate that includes the `v0.9.2` runtime-hardening checkpoint;
+it has not been pushed, tagged, or published and is not yet a supported
+published version. Users should plan an upgrade with the
 [v0.9.2 strict migration guide](docs/migration-v0.9-to-v0.10.md).
 
 Generated applications should update from the scaffold regularly and run

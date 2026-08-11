@@ -26,7 +26,7 @@ func UserIDFromContext(ctx context.Context) (string, bool) {
 	if ctx == nil {
 		return "", false
 	}
-	for _, key := range []any{userIDContextKey{}, legacyUserIDKey, legacySubjectKey, "user_id", "sub"} {
+	for _, key := range []any{userIDContextKey{}, legacyUserIDKey, legacySubjectKey, "current_user_id", "user_id", "sub"} {
 		if userID, ok := normalizeUserID(ctx.Value(key)); ok {
 			return userID, true
 		}

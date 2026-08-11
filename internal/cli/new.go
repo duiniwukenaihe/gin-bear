@@ -10,12 +10,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const developmentFrameworkVersion = "v0.9.2"
-
 func defaultFrameworkVersion() string {
 	version := strings.TrimSpace(bear.Version)
 	if version == "" || version == "dev" {
-		return developmentFrameworkVersion
+		return ""
 	}
 	if !strings.HasPrefix(version, "v") {
 		version = "v" + version
@@ -32,6 +30,9 @@ func newCommand() *cobra.Command {
 		Short: "Create a new gin-bear project",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if frameworkVersion == "" {
+				return fmt.Errorf("development builds require --framework-version")
+			}
 			name := args[0]
 			projectModule := module
 			if projectModule == "" {

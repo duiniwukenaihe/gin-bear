@@ -20,7 +20,7 @@ func LoadConfig(paths ...string) (*SysConfig, error) {
 	env := configEnvironment()
 	production := isProductionEnvironment(env)
 	if len(paths) == 0 {
-		paths = existingDefaultConfigPaths(configFilenameEnvironment(rawEnvironment, env))
+		paths = existingDefaultConfigPaths(configFilenameEnvironment(rawEnvironment, env), rawEnvironment)
 	}
 
 	for _, path := range paths {
@@ -37,7 +37,9 @@ func LoadConfig(paths ...string) (*SysConfig, error) {
 		}
 	}
 
-	applyEnvOverrides(config)
+	if err := applyEnvOverrides(config); err != nil {
+		return nil, fmt.Errorf("invalid environment override: %w", err)
+	}
 	config.PostProcess()
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -82,14 +84,29 @@ func normalizeEnvironment(env string) string {
 }
 
 func configFilenameEnvironment(rawEnvironment, normalizedEnvironment string) string {
-	if rawEnvironment != "" {
-		return rawEnvironment
+	if normalized := normalizeEnvironment(normalizedEnvironment); normalized != "" {
+		return normalized
 	}
-	return normalizedEnvironment
+	return normalizeEnvironment(rawEnvironment)
 }
 
-func existingDefaultConfigPaths(env string) []string {
-	candidates := []string{"application.yaml", fmt.Sprintf("application-%s.yaml", env), "config.json"}
+func existingDefaultConfigPaths(env string, compatibilityEnvironments ...string) []string {
+	overlayPath := fmt.Sprintf("application-%s.yaml", env)
+	candidates := []string{"application.yaml", overlayPath}
+	if _, err := os.Stat(overlayPath); err != nil {
+		for _, compatibilityEnvironment := range compatibilityEnvironments {
+			compatibilityEnvironment = strings.TrimSpace(compatibilityEnvironment)
+			if compatibilityEnvironment == "" || compatibilityEnvironment == env {
+				continue
+			}
+			compatibilityPath := fmt.Sprintf("application-%s.yaml", compatibilityEnvironment)
+			if _, err := os.Stat(compatibilityPath); err == nil {
+				candidates = append(candidates, compatibilityPath)
+				break
+			}
+		}
+	}
+	candidates = append(candidates, "config.json")
 	paths := make([]string, 0, len(candidates))
 	for _, path := range candidates {
 		if _, err := os.Stat(path); err == nil {

@@ -17,7 +17,7 @@ type Responder interface {
 // JSONResponse adapts a context-aware Response producer.
 type JSONResponse func(*gin.Context) Response
 
-// StatusResponse lets a handler set the HTTP status for a successful response.
+// StatusResponse lets a handler set a 2xx or 3xx HTTP status for a successful response.
 type StatusResponse struct {
 	Status int
 	Value  any
@@ -85,7 +85,7 @@ func writeSuccessWithConfig(ctx *gin.Context, config *SysConfig, result any) {
 		status = response.Status
 		result = response.Value
 	}
-	if status < http.StatusOK || status > 599 {
+	if status < http.StatusOK || status >= http.StatusBadRequest {
 		WriteError(ctx, fmt.Errorf("invalid successful response status %d", status))
 		return
 	}

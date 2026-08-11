@@ -53,6 +53,9 @@ func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 
 	// 将用户信息存入上下文
 	ctx.Set("current_user_id", claims.UserID)
+	if userID, ok := normalizeUserID(claims.UserID); ok {
+		ctx.Request = ctx.Request.WithContext(WithUserID(ctx.Request.Context(), userID))
+	}
 	ctx.Set("current_token", tokenStr) // Save token for logout
 	return nil
 }

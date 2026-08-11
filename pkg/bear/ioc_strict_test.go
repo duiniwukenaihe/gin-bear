@@ -318,8 +318,8 @@ func TestStrictIOCRemoveRebuildsConcreteAndConflictIndexes(t *testing.T) {
 		config := NewSysConfig()
 		config.SetFrameworkStrict(true)
 		app := Ignite(config)
-		app.Beans(&strictDuplicateBean{name: "legacy-first"})
-		app.Beans(&strictDuplicateBean{name: "legacy-second"})
+		app.Runtime().Container.Set(&strictDuplicateBean{name: "legacy-first"})
+		app.Runtime().Container.Set(&strictDuplicateBean{name: "legacy-second"})
 		app.Runtime().Container.Remove(reflect.TypeFor[*strictDuplicateBean]())
 
 		replacement := &strictDuplicateBean{name: "strict-replacement"}
@@ -758,8 +758,8 @@ func TestStrictIOCApplyAllRejectsLegacyRegistrationConflict(t *testing.T) {
 	config := NewSysConfig()
 	config.SetFrameworkStrict(true)
 	app := Ignite(config)
-	app.Beans(&strictDuplicateBean{name: "first"})
-	app.Beans(&strictDuplicateBean{name: "second"})
+	app.Runtime().Container.Set(&strictDuplicateBean{name: "first"})
+	app.Runtime().Container.Set(&strictDuplicateBean{name: "second"})
 
 	err := app.ApplyAll(context.Background())
 	if !errors.Is(err, ErrBeanDuplicate) {

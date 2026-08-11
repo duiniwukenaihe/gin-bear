@@ -61,6 +61,9 @@ func Generate(ctx context.Context, opts Options) error {
 	if err := renderTemplateTree(ctx, templateFS, templateRoot, temporary, opts); err != nil {
 		return err
 	}
+	if err := WriteManifest(temporary, NewManifest(opts.Module, opts.FrameworkVersion)); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

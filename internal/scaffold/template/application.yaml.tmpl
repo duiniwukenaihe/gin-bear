@@ -3,6 +3,11 @@ server:
   name: {{yamlScalar .Name}}
   shutdown_timeout: "5s"
 
+config:
+  strict: true
+  framework.strict: true
+  framework.response_mode: "envelope"
+
 database:
   enabled: false
 

@@ -80,15 +80,27 @@ func TestReleaseDocumentationCoversV092RuntimeContracts(t *testing.T) {
 	}
 }
 
-func TestReleaseVersionReferencesUseV092Candidate(t *testing.T) {
-	for _, path := range []string{
+func TestReleaseVersionReferencesUseCurrentV09Candidate(t *testing.T) {
+	paths := []string{
 		"../README.md",
 		"../CHANGELOG.md",
 		"../SECURITY.md",
 		"../docs/production.md",
 		"../docs/runbook.md",
+		"../docs/compatibility.md",
+	}
+	for _, path := range paths {
+		text := readDocumentationFile(t, path)
+		if strings.Contains(text, "v0.10.0-rc.1") {
+			t.Errorf("%s still names stale unpublished candidate v0.10.0-rc.1", path)
+		}
+		if !strings.Contains(text, "v0.9.3") {
+			t.Errorf("%s does not name current unpublished candidate v0.9.3", path)
+		}
+	}
+
+	for _, path := range []string{
 		"../examples/migration/main.go",
-		"../internal/cli/new.go",
 		"../internal/scaffold/scaffold_test.go",
 		"release_check_test.go",
 		"releasee2e/release_e2e_test.go",
@@ -97,9 +109,11 @@ func TestReleaseVersionReferencesUseV092Candidate(t *testing.T) {
 		if strings.Contains(text, "v0.10.0-rc.1") {
 			t.Errorf("%s still names stale unpublished candidate v0.10.0-rc.1", path)
 		}
-		if !strings.Contains(text, "v0.9.2") {
-			t.Errorf("%s does not name unpublished candidate v0.9.2", path)
-		}
+	}
+
+	cli := readDocumentationFile(t, "../internal/cli/new.go")
+	if strings.Contains(cli, "v0.9.2") || strings.Contains(cli, "v0.9.3") || !strings.Contains(cli, "--framework-version") {
+		t.Fatal("development CLI must require an explicit framework version without hard-coding a candidate")
 	}
 }
 
@@ -192,7 +206,7 @@ func TestReleaseDocumentationSeparatesPublishedAndUpcomingVersions(t *testing.T)
 	normalizedReadme := strings.ToLower(strings.Join(strings.Fields(readme), " "))
 	for _, phrase := range []string{
 		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.1",
-		"v0.9.2",
+		"v0.9.3",
 		"after publication",
 		"not been pushed, tagged, or published",
 	} {
@@ -200,21 +214,21 @@ func TestReleaseDocumentationSeparatesPublishedAndUpcomingVersions(t *testing.T)
 			t.Fatalf("README missing publication-state guidance %q", phrase)
 		}
 	}
-	for _, phrase := range []string{"v0.9.1", "current", "v0.9.2", "upcoming", "unreleased"} {
+	for _, phrase := range []string{"v0.9.1", "current", "v0.9.3", "upcoming", "unreleased"} {
 		if !strings.Contains(strings.ToLower(security), strings.ToLower(phrase)) {
 			t.Fatalf("SECURITY.md missing publication-state guidance %q", phrase)
 		}
 	}
 }
 
-func TestReleaseChangelogKeepsV092CandidateUnreleased(t *testing.T) {
+func TestReleaseChangelogKeepsCurrentCandidateUnreleased(t *testing.T) {
 	changelog := readDocumentationFile(t, "../CHANGELOG.md")
-	const expectedHeading = "## [v0.9.2] - Unreleased"
+	const expectedHeading = "## [v0.9.3] - Unreleased"
 	if !strings.Contains(changelog, expectedHeading) {
 		t.Fatalf("CHANGELOG.md missing unreleased candidate heading %q", expectedHeading)
 	}
-	if strings.Contains(changelog, "## [v0.9.2] - 2026-") {
-		t.Fatal("CHANGELOG.md must not claim the v0.9.2 candidate is dated or published")
+	if strings.Contains(changelog, "## [v0.9.3] - 2026-") {
+		t.Fatal("CHANGELOG.md must not claim the v0.9.3 candidate is dated or published")
 	}
 }
 
@@ -303,7 +317,7 @@ func TestReleaseCandidateResultIsAuditableAndStillUnpublished(t *testing.T) {
 	runbook := readDocumentationFile(t, "../docs/runbook.md")
 	normalizedRunbook := strings.Join(strings.Fields(runbook), " ")
 	for _, phrase := range []string{
-		"v0.9.2",
+		"v0.9.3",
 		"75.8%",
 		"critical coverage handler 82.9%",
 		"critical coverage binding 88.5%",
