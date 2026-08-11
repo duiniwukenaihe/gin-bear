@@ -3,6 +3,7 @@ package bear
 import (
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"slices"
 	"strconv"
@@ -400,7 +401,13 @@ func (c *SysConfig) SetResponseMode(mode string) error {
 }
 
 func (c *SysConfig) validateRuntimeContract() error {
-	if c == nil || c.Config == nil {
+	if c == nil {
+		return nil
+	}
+	if err := validateWebSocketConnectionLimit(c); err != nil {
+		return err
+	}
+	if c.Config == nil {
 		return nil
 	}
 	mode, exists := c.Config[responseModeConfigKey]
@@ -542,6 +549,26 @@ func validateCORSConfig(config *SysConfig) error {
 	return nil
 }
 
+func validateProductionTrustedProxies(config *SysConfig) error {
+	if config == nil || config.Server == nil {
+		return nil
+	}
+	for _, configuredProxy := range config.Server.TrustedProxies {
+		proxy := strings.TrimSpace(configuredProxy)
+		prefix, prefixErr := netip.ParsePrefix(proxy)
+		if prefixErr == nil {
+			if prefix.Bits() == 0 {
+				return fmt.Errorf("server.trusted_proxies must not contain an all-address prefix: %q", configuredProxy)
+			}
+			continue
+		}
+		if _, err := netip.ParseAddr(proxy); err != nil {
+			return fmt.Errorf("server.trusted_proxies contains invalid address or prefix %q", configuredProxy)
+		}
+	}
+	return nil
+}
+
 func (c *SysConfig) Name() string {
 	return "SysConfig"
 }
@@ -656,7 +683,7 @@ func NewSysConfig() *SysConfig {
 			Level: "info",
 		},
 		WS: &WebSocketConfig{
-			HandshakeTimeout: 10000,
+			HandshakeTimeout: defaultWebSocketHandshakeTimeoutMilliseconds,
 			ReadBufferSize:   1024,
 			WriteBufferSize:  1024,
 			CheckOrigin:      true,
