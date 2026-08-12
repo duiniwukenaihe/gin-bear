@@ -2,6 +2,31 @@
 
 All notable changes to gin-bear are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Fairing recovery now treats `http.ErrAbortHandler`, broken pipes, and reset
+  connections as request termination instead of appending an HTTP 500 or
+  logging a misleading panic.
+- Query, form, and URI binding supports Gin 1.12's explicit
+  `parser=encoding.TextUnmarshaler` contract, including pointer fields and
+  propagated decoding errors.
+- Generated Windows projects use only signals supported by Windows, and
+  release-governance tests that execute shell scripts are limited to Unix.
+
+### Changed
+
+- Releases follow the framework-style Go module model: an immutable semantic
+  version tag, generated release notes, and GitHub-generated source archives.
+  Platform-specific CLI archives and GoReleaser are no longer part of the
+  release surface; install the CLI with `go install`.
+- The CLI reads its module version from Go build information, so installing a
+  tagged CLI generates projects pinned to that same version without custom
+  linker flags.
+- CI failures now retain concise command diagnostics, and releases explicitly
+  trigger Go Module indexing after publication.
+
 ## [v0.9.2] - 2026-08-12
 
 ### Added

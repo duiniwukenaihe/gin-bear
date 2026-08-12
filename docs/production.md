@@ -1,6 +1,7 @@
 # Production Guide
 
-This guide describes the `v0.9.2` release and its strict-runtime migration
+This guide describes the current `v0.9.2` release and the additional
+unreleased hardening on `main`, including its strict-runtime migration
 path from `v0.9.1`.
 
 ## Runtime

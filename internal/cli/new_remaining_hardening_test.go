@@ -40,3 +40,12 @@ func TestDefaultFrameworkVersionUsesReleaseBuildVersion(t *testing.T) {
 		t.Fatalf("defaultFrameworkVersion() = %q, want release build version v0.9.2", got)
 	}
 }
+
+func TestResolveFrameworkVersionUsesGoModuleVersionWithoutLinkerFlags(t *testing.T) {
+	if got := resolveFrameworkVersion("dev", "v1.2.3"); got != "v1.2.3" {
+		t.Fatalf("resolveFrameworkVersion() = %q, want v1.2.3", got)
+	}
+	if got := resolveFrameworkVersion("dev", "(devel)"); got != "" {
+		t.Fatalf("resolveFrameworkVersion() = %q, want development build to require an explicit version", got)
+	}
+}

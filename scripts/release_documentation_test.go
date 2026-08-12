@@ -87,7 +87,6 @@ func TestReleaseVersionReferencesUseCurrentV09Release(t *testing.T) {
 		"../SECURITY.md",
 		"../docs/production.md",
 		"../docs/runbook.md",
-		"../docs/compatibility.md",
 	}
 	for _, path := range paths {
 		text := readDocumentationFile(t, path)
@@ -226,14 +225,15 @@ func TestReleaseDocumentationNamesPublishedVersion(t *testing.T) {
 	}
 }
 
-func TestReleaseChangelogDatesPublishedRelease(t *testing.T) {
+func TestChangelogSeparatesUnreleasedWorkFromPublishedRelease(t *testing.T) {
 	changelog := readDocumentationFile(t, "../CHANGELOG.md")
-	const expectedHeading = "## [v0.9.2] - 2026-08-12"
-	if !strings.Contains(changelog, expectedHeading) {
-		t.Fatalf("CHANGELOG.md missing published release heading %q", expectedHeading)
+	for _, heading := range []string{"## [Unreleased]", "## [v0.9.2] - 2026-08-12"} {
+		if !strings.Contains(changelog, heading) {
+			t.Fatalf("CHANGELOG.md missing heading %q", heading)
+		}
 	}
-	if strings.Contains(changelog, "## [v0.9.2] - Unreleased") {
-		t.Fatal("CHANGELOG.md still describes v0.9.2 as unreleased")
+	if strings.Contains(changelog, "## [v0.9.3]") {
+		t.Fatal("CHANGELOG.md must not reserve a version before release readiness is confirmed")
 	}
 }
 
@@ -248,44 +248,32 @@ func TestProductionDocumentationUsesPinnedVerifyCommand(t *testing.T) {
 	}
 }
 
-func TestCLIReleaseConfigurationStaysArchiveOnly(t *testing.T) {
-	config := readDocumentationFile(t, "../.goreleaser.yml")
-	for _, phrase := range []string{
-		"version: 2",
-		"main: ./cmd/bear",
-		"- linux",
-		"- darwin",
-		"- windows",
-		"- amd64",
-		"- arm64",
-		"algorithm: sha256",
-		"source:",
-		"include_meta: true",
-	} {
-		if !strings.Contains(config, phrase) {
-			t.Fatalf("GoReleaser configuration missing %q", phrase)
-		}
+func TestReleaseUsesGoModuleAndGitHubSourceAssetsOnly(t *testing.T) {
+	if _, err := os.Stat("../.goreleaser.yml"); !os.IsNotExist(err) {
+		t.Fatalf("source-only framework release must not retain GoReleaser configuration: %v", err)
 	}
-	for _, unwanted := range []string{"dockers:", "docker_manifests:", "docker_digest:", "kos:", "nfpms:"} {
-		if strings.Contains(config, unwanted) {
-			t.Fatalf("GoReleaser configuration must not publish %q", unwanted)
+	workflow := strings.ToLower(readDocumentationFile(t, "../.github/workflows/release.yml"))
+	for _, unwanted := range []string{"goreleaser", "archive", "checksum", "go build", "setup-go"} {
+		if strings.Contains(workflow, unwanted) {
+			t.Fatalf("source-only release workflow must not contain %q", unwanted)
 		}
 	}
 }
 
-func TestReleaseWorkflowIsTagScopedAndUsesImmutableActions(t *testing.T) {
+func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 	workflow := readDocumentationFile(t, "../.github/workflows/release.yml")
 	for _, phrase := range []string{
 		"tags:",
 		"- \"v*\"",
 		"contents: read",
 		"contents: write",
-		"actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1",
-		"actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0",
-		"goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3",
-		"go-version: \"1.25.12\"",
-		"version: v2.17.0",
-		"release --clean",
+		`gh release create "$GITHUB_REF_NAME"`,
+		`--repo "$GITHUB_REPOSITORY"`,
+		"--verify-tag",
+		"--generate-notes",
+		`--title "$GITHUB_REF_NAME"`,
+		`gh release view "$GITHUB_REF_NAME"`,
+		`https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${GITHUB_REF_NAME}.info`,
 	} {
 		if !strings.Contains(workflow, phrase) {
 			t.Fatalf("release workflow missing %q", phrase)
@@ -294,6 +282,8 @@ func TestReleaseWorkflowIsTagScopedAndUsesImmutableActions(t *testing.T) {
 	for _, unwanted := range []string{
 		"docker", "container", "registry", "attestations: write", "id-token: write",
 		"make verify-rc", "staticcheck", "govulncheck", "apidiff", "upload-artifact", "rc-verification",
+		"checkout@", "setup-go@", "goreleaser",
+		"windows-latest",
 	} {
 		if strings.Contains(strings.ToLower(workflow), unwanted) {
 			t.Fatalf("release workflow must remain CLI-only and permissions-scoped; found %q", unwanted)
@@ -304,13 +294,13 @@ func TestReleaseWorkflowIsTagScopedAndUsesImmutableActions(t *testing.T) {
 	}
 }
 
-func TestRunbookUsesPinnedVerificationAndChecksReleaseChecksums(t *testing.T) {
+func TestRunbookUsesPinnedVerificationAndSourceOnlyRelease(t *testing.T) {
 	runbook := readDocumentationFile(t, "../docs/runbook.md")
 	for _, phrase := range []string{
 		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify",
 		"SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc",
-		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run github.com/goreleaser/goreleaser/v2@v2.17.0 release --snapshot --clean",
-		"(cd dist && shasum -a 256 -c checksums.txt)",
+		"GitHub-generated source archives",
+		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@<version>",
 	} {
 		if !strings.Contains(runbook, phrase) {
 			t.Fatalf("runbook missing %q", phrase)

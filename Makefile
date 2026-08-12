@@ -6,7 +6,7 @@ test:
 	go test ./...
 
 verify:
-	scripts/release-check.sh
+	scripts/ci-diagnostic.sh "Quality baseline failed" scripts/release-check.sh
 
 verify-rc:
 	scripts/verify-rc.sh

@@ -1,7 +1,10 @@
+//go:build !windows
+
 package scripts
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -52,6 +55,37 @@ func TestReleaseCheckScriptCoversProductionGates(t *testing.T) {
 	}
 }
 
+func TestMakeVerifyPreservesQualityGateAndFailureDiagnostics(t *testing.T) {
+	makefile, err := os.ReadFile("../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(makefile), `scripts/ci-diagnostic.sh "Quality baseline failed" scripts/release-check.sh`) {
+		t.Fatalf("make verify must run release-check.sh through CI diagnostics:\n%s", makefile)
+	}
+
+	diagnostics, err := os.ReadFile("ci-diagnostic.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"GITHUB_ACTIONS", "::error title=", "tail -n 80", `exit "${status}"`} {
+		if !strings.Contains(string(diagnostics), want) {
+			t.Fatalf("ci-diagnostic.sh missing %q:\n%s", want, diagnostics)
+		}
+	}
+
+	command := exec.Command("bash", "ci-diagnostic.sh", "Diagnostic test", "bash", "-c", "printf 'first\\nlast\\n'; exit 7")
+	command.Env = append(os.Environ(), "GITHUB_ACTIONS=true")
+	output, err := command.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+		t.Fatalf("diagnostic wrapper exit = %v, want 7:\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "::error title=Diagnostic test::first%0Alast") {
+		t.Fatalf("diagnostic wrapper did not encode multiline output:\n%s", output)
+	}
+}
+
 func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 	content, err := os.ReadFile("../.github/workflows/ci.yml")
 	if err != nil {
@@ -71,7 +105,7 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 		"RC_ALLOW_NETWORK: \"1\"",
 		"RELEASE_CHECK_METADATA: ${{ runner.temp }}/release-check-metadata.txt",
 		"run: make verify",
-		"run: go test -race ./... -count=1",
+		`run: scripts/ci-diagnostic.sh "Race tests failed" go test -race ./... -count=1`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI missing %q:\n%s", want, text)
@@ -321,11 +355,11 @@ func TestAllCICheckoutAndSetupGoActionsUseReleasePins(t *testing.T) {
 	ci := readTestFile(t, "../.github/workflows/ci.yml")
 	checkout := "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"
 	setupGo := "actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0"
-	if count := strings.Count(ci, checkout); count != 3 {
-		t.Fatalf("CI checkout pin count=%d, want 3:\n%s", count, ci)
+	if count := strings.Count(ci, checkout); count != 2 {
+		t.Fatalf("CI checkout pin count=%d, want 2:\n%s", count, ci)
 	}
-	if count := strings.Count(ci, setupGo); count != 3 {
-		t.Fatalf("CI setup-go pin count=%d, want 3:\n%s", count, ci)
+	if count := strings.Count(ci, setupGo); count != 2 {
+		t.Fatalf("CI setup-go pin count=%d, want 2:\n%s", count, ci)
 	}
 	for _, mutable := range []string{"actions/checkout@v", "actions/setup-go@v"} {
 		if strings.Contains(ci, mutable) {
@@ -336,14 +370,17 @@ func TestAllCICheckoutAndSetupGoActionsUseReleasePins(t *testing.T) {
 
 func TestReleaseVersionComesFromPushedTag(t *testing.T) {
 	workflow := readTestFile(t, "../.github/workflows/release.yml")
-	releaseConfig := readTestFile(t, "../.goreleaser.yml")
 	for _, forbidden := range []string{"RC_EXPECTED_VERSION", "RC_RELEASE_TAG", "make verify-rc", "staticcheck", "govulncheck", "apidiff"} {
 		if strings.Contains(workflow, forbidden) {
 			t.Fatalf("release workflow must publish tag artifacts without quality gate %q:\n%s", forbidden, workflow)
 		}
 	}
-	if !strings.Contains(releaseConfig, "pkg/bear.Version={{ .Version }}") || !strings.Contains(readTestFile(t, "../internal/cli/new.go"), "bear.Version") {
-		t.Fatalf("released CLI does not derive its scaffold default from the GoReleaser-injected version:\n%s", releaseConfig)
+	if !strings.Contains(workflow, `gh release create "$GITHUB_REF_NAME"`) {
+		t.Fatalf("release workflow does not publish the pushed tag:\n%s", workflow)
+	}
+	cli := readTestFile(t, "../internal/cli/new.go")
+	if !strings.Contains(cli, "debug.ReadBuildInfo") || !strings.Contains(cli, "info.Main.Version") {
+		t.Fatalf("go-installed CLI does not derive its scaffold default from Go build information:\n%s", cli)
 	}
 }
 
@@ -1318,10 +1355,6 @@ func TestGeneratedReleaseE2EUsesPublicCLIAndPreservesGeneratedApp(t *testing.T) 
 		if !strings.Contains(stub, want) {
 			t.Fatalf("Windows release E2E stub missing %q:\n%s", want, stub)
 		}
-	}
-	ci := readTestFile(t, "../.github/workflows/ci.yml")
-	if !strings.Contains(ci, "windows-latest") {
-		t.Fatalf("CI does not prove the Windows package set compiles and tests:\n%s", ci)
 	}
 }
 

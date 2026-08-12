@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 
 	"github.com/duiniwukenaihe/gin-bear/internal/scaffold"
@@ -11,14 +12,25 @@ import (
 )
 
 func defaultFrameworkVersion() string {
-	version := strings.TrimSpace(bear.Version)
-	if version == "" || version == "dev" {
-		return ""
+	moduleVersion := ""
+	if info, ok := debug.ReadBuildInfo(); ok {
+		moduleVersion = info.Main.Version
 	}
-	if !strings.HasPrefix(version, "v") {
-		version = "v" + version
+	return resolveFrameworkVersion(bear.Version, moduleVersion)
+}
+
+func resolveFrameworkVersion(linkedVersion, moduleVersion string) string {
+	for _, candidate := range []string{linkedVersion, moduleVersion} {
+		version := strings.TrimSpace(candidate)
+		if version == "" || version == "dev" || version == "(devel)" {
+			continue
+		}
+		if !strings.HasPrefix(version, "v") {
+			version = "v" + version
+		}
+		return version
 	}
-	return version
+	return ""
 }
 
 func newCommand() *cobra.Command {

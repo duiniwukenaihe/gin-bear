@@ -28,41 +28,33 @@
 9. Confirm each `CasbinFairing` receives a `CasbinEnforcer` from the current
    Bear container, JWT inputs over 16 KiB are rejected, and WebSocket origin,
    message, timeout, and connection boundaries match the production guide.
-10. For a tag release, confirm `.goreleaser.yml` still builds only `cmd/bear`
-   archives for Linux, macOS, and Windows, plus SHA-256 checksums, source
-   archive, changelog text, and release metadata.
-11. Before publishing, run the pinned local snapshot check:
+10. Confirm `main` CI passes, then create an annotated,
+    immutable semantic-version tag on the exact reviewed `main` commit.
+11. After the tag workflow completes, verify the GitHub Release, its generated
+    notes, and GitHub-generated source archives. Confirm the module and CLI are
+    available through the Go toolchain:
 
    ```bash
-   GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go run github.com/goreleaser/goreleaser/v2@v2.17.0 release --snapshot --clean
+   GOBIN=$(mktemp -d) go install github.com/duiniwukenaihe/gin-bear/cmd/bear@<version>
    ```
-
-   Verify the generated SHA-256 manifest, then inspect the CLI archives and
-   release metadata:
-
-   ```bash
-   (cd dist && shasum -a 256 -c checksums.txt)
-   ```
-
-   Inspect `dist/checksums.txt`, the CLI archives, and `dist/artifacts.json`.
-   Remove `dist/` after the check; snapshot artifacts are not committed.
 
 The release workflow runs only for `v*` tags and has one responsibility:
-GoReleaser builds and publishes the CLI archives, source archive, checksums,
-changelog, and release metadata. Framework quality checks run before tagging
+create the GitHub Release with generated notes. GitHub supplies the standard
+source archives automatically. Framework quality checks run before tagging
 and in the `main` CI workflow; the tag workflow does not repeat them. The
 release job grants `contents: write` only for publishing. The pushed release
-tag must be annotated and target the exact reviewed `main` commit. GoReleaser
-injects its normalized dynamic `.Version` into
-`pkg/bear.Version`; the CLI derives the scaffold dependency from that value and
-restores the leading `v`, while local `dev` builds retain the development
-default.
+tag must be annotated and target the exact reviewed `main` commit. After
+publishing, the workflow requests the matching version from `proxy.golang.org`
+so the Go Module is indexed. A CLI
+installed with `go install ...@version` reads that module version from Go build
+information and uses it as the generated project's framework dependency;
+local development builds still require `--framework-version` explicitly.
 
 The full `verify-rc` command remains available for an explicit pre-tag audit.
 A local release operator with an isolated trusted `GNUPGHOME` can run:
 
 ```bash
-RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.9.2 RC_EXPECTED_VERSION=v0.9.2 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
+RC_BASE_REF=origin/main RC_RELEASE_TAG=<version> RC_EXPECTED_VERSION=<version> RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
 ```
 
 When `RC_RELEASE_TAG` is non-empty, `RC_VERIFY_TAG_SIGNATURE` is mandatory and
@@ -88,8 +80,8 @@ The RC path always enforces total coverage `70.0` and every critical group
 `v0.9.2` is the next published release after `v0.9.1`. The historical
 diagnostics below are not formal release gate evidence. Publication requires
 the complete gate to pass against the exact clean commit referenced by the
-annotated release tag, and release CI repeats that gate before creating GitHub
-assets.
+annotated release tag. The source-only release workflow publishes that already
+reviewed tag without repeating the quality gate.
 All commands use `GOSUMDB=sum.golang.org` and `GOTOOLCHAIN=go1.25.12`, run in
 the foreground, and complete before the next command starts.
 

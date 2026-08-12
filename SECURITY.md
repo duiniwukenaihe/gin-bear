@@ -8,8 +8,9 @@ should follow the
 
 Generated applications should update from the scaffold regularly and run
 `GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify` before release.
-Published CLI archives include SHA-256 checksums and release metadata so a
-deployment can be traced to its source commit and verified before use.
+Published tags are immutable Go module versions. GitHub provides source
+archives and release metadata so a deployment can be traced to its source
+commit.
 
 ## Reporting a Vulnerability
 
