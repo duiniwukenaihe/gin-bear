@@ -128,6 +128,21 @@ func TestGeneratedStrictRuntimeTemplateStartup(t *testing.T) {
 	}
 }
 
+func TestGeneratedWindowsShutdownSignalsCompileWithGoRuntime(t *testing.T) {
+	project := generateStrictRuntimeProject(t)
+	path := filepath.Join(project, "cmd", "server", "signals_windows.go")
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(source), "syscall.SIGBREAK") {
+		t.Fatalf("generated Windows signals reference unsupported syscall.SIGBREAK:\n%s", source)
+	}
+	if !strings.Contains(string(source), "[]os.Signal{os.Interrupt}") {
+		t.Fatalf("generated Windows signals do not use os.Interrupt:\n%s", source)
+	}
+}
+
 func TestProductionExamplesUseLocalServiceEndpoints(t *testing.T) {
 	project := generateStrictRuntimeProject(t)
 	paths := []string{

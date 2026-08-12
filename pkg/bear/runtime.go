@@ -4,8 +4,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -244,6 +246,10 @@ func runtimeRecoveryMiddleware(runtime *Runtime) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				if isHTTPConnectionAbort(recovered) {
+					ctx.Abort()
+					return
+				}
 				rid, _ := ctx.Get(RequestIDKey)
 				runtime.Logger.ErrorContext(ctx.Request.Context(), "Panic recovered",
 					"error_code", "BEAR_RUNTIME_PANIC",
@@ -255,6 +261,11 @@ func runtimeRecoveryMiddleware(runtime *Runtime) gin.HandlerFunc {
 		}()
 		ctx.Next()
 	}
+}
+
+func isHTTPConnectionAbort(recovered any) bool {
+	err, ok := recovered.(error)
+	return ok && (errors.Is(err, http.ErrAbortHandler) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET))
 }
 
 func runtimePanicCategory(recovered any) string {

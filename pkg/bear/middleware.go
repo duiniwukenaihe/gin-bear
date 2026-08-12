@@ -193,6 +193,10 @@ func RecoveryMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
+				if isHTTPConnectionAbort(err) {
+					c.Abort()
+					return
+				}
 				rid, _ := c.Get(RequestIDKey)
 				slog.ErrorContext(c.Request.Context(), "Panic recovered",
 					"error_code", "BEAR_RUNTIME_PANIC",

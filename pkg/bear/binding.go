@@ -1,6 +1,7 @@
 package bear
 
 import (
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -244,7 +245,8 @@ func bindTaggedFields(value reflect.Value, values map[string][]string, tagName s
 			}
 			continue
 		}
-		name := tagFieldName(structField.Tag.Get(tagName))
+		tag := structField.Tag.Get(tagName)
+		name := tagFieldName(tag)
 		if name == "" {
 			continue
 		}
@@ -252,11 +254,43 @@ func bindTaggedFields(value reflect.Value, values map[string][]string, tagName s
 		if !ok || len(rawValues) == 0 {
 			continue
 		}
-		if err := setFieldValue(field, rawValues[0]); err != nil {
+		if err := setTaggedFieldValue(field, rawValues[0], tag); err != nil {
 			return fmt.Errorf("bind %s field %s: %w", tagName, structField.Name, err)
 		}
 	}
 	return nil
+}
+
+func setTaggedFieldValue(field reflect.Value, raw, tag string) error {
+	for options := tag; options != ""; {
+		var option string
+		option, options, _ = strings.Cut(options, ",")
+		if option == "parser=encoding.TextUnmarshaler" {
+			return setTextUnmarshalerValue(field, raw)
+		}
+	}
+	return setFieldValue(field, raw)
+}
+
+func setTextUnmarshalerValue(field reflect.Value, raw string) error {
+	if !field.CanSet() || raw == "" {
+		return nil
+	}
+	if field.Kind() == reflect.Pointer {
+		if field.IsNil() {
+			field.Set(reflect.New(field.Type().Elem()))
+		}
+		if unmarshaler, ok := field.Interface().(encoding.TextUnmarshaler); ok {
+			return unmarshaler.UnmarshalText([]byte(raw))
+		}
+		return setTextUnmarshalerValue(field.Elem(), raw)
+	}
+	if field.CanAddr() {
+		if unmarshaler, ok := field.Addr().Interface().(encoding.TextUnmarshaler); ok {
+			return unmarshaler.UnmarshalText([]byte(raw))
+		}
+	}
+	return setFieldValue(field, raw)
 }
 
 func tagFieldName(tag string) string {
