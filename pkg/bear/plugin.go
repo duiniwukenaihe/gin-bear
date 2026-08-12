@@ -122,6 +122,10 @@ func (b *pluginRegistrationBarrier) end() {
 }
 
 func (b *pluginRegistrationBarrier) close(ctx context.Context) error {
+	return b.closeWithCommit(ctx, nil)
+}
+
+func (b *pluginRegistrationBarrier) closeWithCommit(ctx context.Context, commit func()) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -163,6 +167,9 @@ func (b *pluginRegistrationBarrier) close(ctx context.Context) error {
 				b.mu.Unlock()
 				return ctx.Err()
 			}
+		}
+		if commit != nil {
+			commit()
 		}
 		b.transition = nil
 		close(transition)

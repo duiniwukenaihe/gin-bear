@@ -1997,6 +1997,9 @@ func (b *Bear) closePluginRegistration(ctx context.Context) error {
 	if b == nil || b.pluginBarrier == nil {
 		return ErrPluginHotReloadUnsupported
 	}
+	if !b.frameworkStrict() {
+		return b.pluginBarrier.closeWithCommit(ctx, b.runtime.Lifecycle.sealRegistration)
+	}
 	return b.pluginBarrier.close(ctx)
 }
 
