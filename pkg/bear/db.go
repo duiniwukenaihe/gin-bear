@@ -193,8 +193,19 @@ func postgresTLSVerifiesHostname(cfg *pgconn.Config) bool {
 	return true
 }
 
-// NewGormAdapter 创建 GORM 适配器
+// NewGormAdapter creates a database adapter using the compatibility startup contract.
 func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
+	return OpenGormAdapter(context.Background(), cfg)
+}
+
+// OpenGormAdapter creates and verifies a database adapter within ctx.
+func OpenGormAdapter(ctx context.Context, cfg *DBConfig) (*GormAdapter, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("database startup canceled: %w", err)
+	}
 	validationCfg := cfg
 	if cfg != nil && !cfg.Enabled {
 		activeCfg := *cfg
@@ -213,6 +224,10 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 	if dbType == "" {
 		dbType = "mysql"
 	}
+	dsn, err = databaseStartupDSN(ctx, dbType, dsn)
+	if err != nil {
+		return nil, err
+	}
 
 	var dialector gorm.Dialector
 	switch dbType {
@@ -226,7 +241,9 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 		return nil, fmt.Errorf("unsupported database type: %s", dbType)
 	}
 
-	db, err := gorm.Open(dialector, buildGormConfig(cfg))
+	gormConfig := buildGormConfig(cfg)
+	gormConfig.DisableAutomaticPing = true
+	db, err := gorm.Open(dialector, gormConfig)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect database: %w", err)
@@ -245,6 +262,10 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 	sqlDB, err := db.DB()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sql.DB: %w", err)
+	}
+	if err := sqlDB.PingContext(ctx); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("failed to connect database: %w", err)
 	}
 
 	// 动态连接池配置
@@ -273,6 +294,35 @@ func NewGormAdapter(cfg *DBConfig) (*GormAdapter, error) {
 		"max_idle", maxIdle,
 		"max_open", maxOpen)
 	return &GormAdapter{DB: db}, nil
+}
+
+func databaseStartupDSN(ctx context.Context, dbType, dsn string) (string, error) {
+	if !strings.EqualFold(strings.TrimSpace(dbType), "mysql") {
+		return dsn, nil
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return dsn, nil
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return "", fmt.Errorf("database startup canceled: %w", context.DeadlineExceeded)
+	}
+	config, err := mysqldriver.ParseDSN(dsn)
+	if err != nil {
+		return "", errors.New("invalid MySQL DSN configuration")
+	}
+	config.Timeout = boundedDatabaseTimeout(config.Timeout, remaining)
+	config.ReadTimeout = boundedDatabaseTimeout(config.ReadTimeout, remaining)
+	config.WriteTimeout = boundedDatabaseTimeout(config.WriteTimeout, remaining)
+	return config.FormatDSN(), nil
+}
+
+func boundedDatabaseTimeout(configured, remaining time.Duration) time.Duration {
+	if configured <= 0 || configured > remaining {
+		return remaining
+	}
+	return configured
 }
 
 func buildGormConfig(cfg *DBConfig) *gorm.Config {

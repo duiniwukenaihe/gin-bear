@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"google.golang.org/grpc"
 )
@@ -125,15 +126,19 @@ var reservedGRPCServiceNames = map[string]struct{}{
 }
 
 type safeGRPCServiceRegistrar struct {
+	mu           *sync.Mutex
 	server       grpc.ServiceRegistrar
 	serviceNames map[string]struct{}
 	err          error
+	closed       bool
 }
 
 func newSafeGRPCServiceRegistrar(server grpc.ServiceRegistrar) *safeGRPCServiceRegistrar {
 	return &safeGRPCServiceRegistrar{
+		mu:           &sync.Mutex{},
 		server:       server,
 		serviceNames: make(map[string]struct{}),
+		closed:       true,
 	}
 }
 
@@ -141,7 +146,18 @@ func newSafeGRPCServiceRegistrar(server grpc.ServiceRegistrar) *safeGRPCServiceR
 // retained and returned by register because generated registration helpers do
 // not expose an error result.
 func (r *safeGRPCServiceRegistrar) RegisterService(desc *grpc.ServiceDesc, implementation any) {
-	if r == nil || r.err != nil {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		if r.err == nil {
+			r.err = errors.New("gRPC service registration is closed")
+		}
+		return
+	}
+	if r.err != nil {
 		return
 	}
 	if err := validateGRPCServiceRegistration(desc, implementation, r.serviceNames); err != nil {
@@ -163,20 +179,37 @@ func (r *safeGRPCServiceRegistrar) register(service GRPCServiceRegistrar) (err e
 	if service == nil || isNilBean(service) {
 		return errors.New("gRPC service registrar must not be nil")
 	}
+	r.mu.Lock()
 	before := len(r.serviceNames)
+	callbackRegistrar := &safeGRPCServiceRegistrar{
+		mu:           r.mu,
+		server:       r.server,
+		serviceNames: r.serviceNames,
+	}
+	r.mu.Unlock()
 	defer func() {
+		callbackRegistrar.mu.Lock()
+		callbackRegistrar.closed = true
+		registrationErr := callbackRegistrar.err
+		after := len(callbackRegistrar.serviceNames)
+		callbackRegistrar.mu.Unlock()
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("gRPC service %q registration panic: %v", service.Name(), recovered)
+			return
+		}
+		if err != nil {
+			return
+		}
+		if registrationErr != nil {
+			err = fmt.Errorf("register gRPC service %q: %w", service.Name(), registrationErr)
+			return
+		}
+		if after == before {
+			err = fmt.Errorf("register gRPC service %q: no service was registered", service.Name())
 		}
 	}()
-	if err := service.RegisterGRPC(r); err != nil {
+	if err := service.RegisterGRPC(callbackRegistrar); err != nil {
 		return fmt.Errorf("register gRPC service %q: %w", service.Name(), err)
-	}
-	if r.err != nil {
-		return fmt.Errorf("register gRPC service %q: %w", service.Name(), r.err)
-	}
-	if len(r.serviceNames) == before {
-		return fmt.Errorf("register gRPC service %q: no service was registered", service.Name())
 	}
 	return nil
 }

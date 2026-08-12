@@ -189,7 +189,7 @@ func TestGRPCShutdownFallsBackToStopAtDeadline(t *testing.T) {
 	}
 	select {
 	case <-server.stopped:
-	default:
+	case <-time.After(100 * time.Millisecond):
 		t.Fatal("fallback Stop was not called")
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"text/template"
 
 	"github.com/duiniwukenaihe/gin-bear/internal/atomicdir"
+	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"gopkg.in/yaml.v2"
 )
@@ -25,6 +26,7 @@ type Options struct {
 	Module           string
 	Directory        string
 	FrameworkVersion string
+	FrameworkReplace string
 }
 
 //go:embed template/**
@@ -98,6 +100,39 @@ func validateOptions(opts Options) error {
 	if err := module.Check(frameworkModule, opts.FrameworkVersion); err != nil {
 		return fmt.Errorf("framework version %q is invalid: %w", opts.FrameworkVersion, err)
 	}
+	if err := validateFrameworkReplace(opts.FrameworkVersion, opts.FrameworkReplace); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateFrameworkReplace(frameworkVersion, replacement string) error {
+	if replacement == "" {
+		if frameworkVersion == "v0.0.0" {
+			return errors.New("framework version v0.0.0 requires a local framework replacement")
+		}
+		return nil
+	}
+	if frameworkVersion != "v0.0.0" {
+		return fmt.Errorf("local framework replacement requires framework version v0.0.0, got %q", frameworkVersion)
+	}
+	if strings.ContainsAny(replacement, "\r\n\x00") || !filepath.IsAbs(replacement) {
+		return fmt.Errorf("framework replacement %q must be an absolute path without control characters", replacement)
+	}
+	info, err := os.Stat(replacement)
+	if err != nil {
+		return fmt.Errorf("inspect framework replacement %q: %w", replacement, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("framework replacement %q is not a directory", replacement)
+	}
+	goMod, err := os.ReadFile(filepath.Join(replacement, "go.mod"))
+	if err != nil {
+		return fmt.Errorf("read framework replacement module: %w", err)
+	}
+	if modulePath := modfile.ModulePath(goMod); modulePath != frameworkModule {
+		return fmt.Errorf("framework replacement module is %q, want %q", modulePath, frameworkModule)
+	}
 	return nil
 }
 
@@ -147,7 +182,7 @@ func renderTemplateTree(ctx context.Context, source fs.FS, root, destination str
 
 func renderTemplate(name string, source []byte, data Options) ([]byte, error) {
 	tmpl, err := template.New(name).
-		Funcs(template.FuncMap{"yamlScalar": yamlScalar}).
+		Funcs(template.FuncMap{"goModString": modfile.AutoQuote, "yamlScalar": yamlScalar}).
 		Option("missingkey=error").
 		Parse(string(source))
 	if err != nil {

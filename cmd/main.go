@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -19,10 +20,17 @@ func main() {
 	}
 }
 
-func run(ctx context.Context) error {
+func run(ctx context.Context) (resultErr error) {
 	app, err := bear.IgniteE()
 	if err != nil {
 		return fmt.Errorf("initialize application: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, app.Shutdown(context.Background())) }()
+	if err := app.EnableDatabaseE(ctx); err != nil {
+		return fmt.Errorf("initialize database: %w", err)
+	}
+	if err := app.EnableRedisE(ctx); err != nil {
+		return fmt.Errorf("initialize Redis: %w", err)
 	}
 	if err := app.MountE("/api", &UserController{}); err != nil {
 		return fmt.Errorf("register user controller: %w", err)

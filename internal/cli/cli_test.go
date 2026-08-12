@@ -41,7 +41,8 @@ func TestExecuteNewCreatesProjectAndPreservesExistingDestination(t *testing.T) {
 		"new", "billing",
 		"--module", "example.com/billing",
 		"--directory", destination,
-		"--framework-version", "v1.2.3",
+		"--framework-version", "dev",
+		"--framework-replace", repositoryRoot(t),
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("new exit code = %d, stderr=%s", code, stderr.String())
@@ -63,7 +64,13 @@ func TestExecuteNewCreatesProjectAndPreservesExistingDestination(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Execute([]string{"new", "billing", "--directory", destination}, &stdout, &stderr); code != 1 {
+	if code := Execute([]string{
+		"new", "billing",
+		"--module", "example.com/billing",
+		"--directory", destination,
+		"--framework-version", "dev",
+		"--framework-replace", repositoryRoot(t),
+	}, &stdout, &stderr); code != 1 {
 		t.Fatalf("duplicate new exit code = %d", code)
 	}
 	if got, err := os.ReadFile(marker); err != nil || string(got) != "keep" {

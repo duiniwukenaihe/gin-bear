@@ -2,18 +2,23 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
-func Run(ctx context.Context) error {
+func Run(ctx context.Context) (resultErr error) {
 	application, err := bear.IgniteE()
 	if err != nil {
 		return fmt.Errorf("initialize application: %w", err)
 	}
+	defer func() { resultErr = errors.Join(resultErr, application.Shutdown(context.Background())) }()
 	if err := application.EnableDatabaseE(ctx); err != nil {
 		return fmt.Errorf("initialize database: %w", err)
+	}
+	if err := application.EnableRedisE(ctx); err != nil {
+		return fmt.Errorf("initialize Redis: %w", err)
 	}
 	if err := application.EnableTracingE(ctx); err != nil {
 		return fmt.Errorf("initialize tracing: %w", err)

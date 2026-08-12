@@ -3,3 +3,6 @@ module {{.Module}}
 go 1.25.12
 
 require github.com/duiniwukenaihe/gin-bear {{.FrameworkVersion}}
+{{if .FrameworkReplace}}
+replace github.com/duiniwukenaihe/gin-bear => {{goModString .FrameworkReplace}}
+{{end}}

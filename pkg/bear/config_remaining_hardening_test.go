@@ -37,6 +37,27 @@ func TestDevelopmentAllowsCompatibilityRuntime(t *testing.T) {
 	}
 }
 
+func TestAuthStorageTypeHasExplicitRuntimeContract(t *testing.T) {
+	config := NewSysConfig()
+	if config.Auth.StorageType != "jwt" {
+		t.Fatalf("default auth storage type = %q, want jwt", config.Auth.StorageType)
+	}
+
+	config.Auth.StorageType = "database"
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "auth.storage_type") {
+		t.Fatalf("Validate() error = %v, want unsupported auth storage rejection", err)
+	}
+
+	config.Auth.StorageType = "file"
+	if err := config.Validate(); err != nil {
+		t.Fatalf("legacy file storage alias should remain compatible: %v", err)
+	}
+	warnings := config.compatibilityWarnings()
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "no file revocation store") {
+		t.Fatalf("compatibility warnings = %#v, want file storage alias warning", warnings)
+	}
+}
+
 func TestAllowCompatibilityInProductionMustBeBoolean(t *testing.T) {
 	t.Setenv("BEAR_ENV", "dev")
 	t.Setenv("GIN_MODE", "")

@@ -483,7 +483,7 @@ func TestCoreRemainingEnableEAPIsRegisterWorkingResources(t *testing.T) {
 	}
 }
 
-func TestCoreRemainingIgniteDoesNotAutomaticallyEnableCORSOrAuthentication(t *testing.T) {
+func TestCoreRemainingIgniteEnablesConfiguredCORSWithoutAuthentication(t *testing.T) {
 	resetGinModeForTest(t)
 	config := NewSysConfig()
 	config.CORS.Enabled = true
@@ -500,8 +500,8 @@ func TestCoreRemainingIgniteDoesNotAutomaticallyEnableCORSOrAuthentication(t *te
 	if response.Code != http.StatusOK {
 		t.Fatalf("unauthenticated response status = %d, want %d", response.Code, http.StatusOK)
 	}
-	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "" {
-		t.Fatalf("automatic CORS header = %q, want empty", got)
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://client.example" {
+		t.Fatalf("automatic CORS header = %q, want configured origin", got)
 	}
 }
 

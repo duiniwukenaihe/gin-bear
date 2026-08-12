@@ -10,6 +10,8 @@ All notable changes to gin-bear are documented in this file.
   `GRPCServiceRegistrar` services, unary/stream interceptors, TLS and mTLS,
   loopback-only proxy plaintext, health, reflection opt-in, resource limits,
   recovery, logging, and coordinated shutdown.
+- Context-bounded database and Redis startup APIs, including lifecycle-owned
+  Redis initialization for required authentication revocation storage.
 
 ### Changed
 
@@ -20,6 +22,12 @@ All notable changes to gin-bear are documented in this file.
   registration APIs, and `Serve`; legacy APIs remain available.
 - `OpenAPIConfig.Apps`, `TimeWindow`, `ReplayCheck`, and `HeaderPrefix` remain
   compatibility fields but are deprecated and do not provide request signing.
+- Automatic authentication uses an effective explicit `AuthFairing`, validates
+  plugin route policies, runs browser preflight safely, and enforces declared
+  Redis revocation storage in production. The legacy `file` storage value is a
+  warned alias for stateless `jwt` validation.
+- Development generators require an explicit local replacement and cannot mix
+  unreleased HEAD templates with a published framework tag.
 
 ## [v0.9.3] - 2026-08-12
 

@@ -35,18 +35,37 @@ func (r *RedisAdapter) Name() string {
 }
 
 func (r *RedisAdapter) Shutdown() error {
+	if r == nil || r.Client == nil {
+		return nil
+	}
 	slog.Info("Closing Redis connection pool...")
 	return r.Client.Close()
 }
 
 func (r *RedisAdapter) CheckReady(ctx context.Context) error {
+	if r == nil || r.Client == nil {
+		return errors.New("redis client is unavailable")
+	}
 	return r.Client.Ping(ctx).Err()
 }
 
+func (*RedisAdapter) lifecyclePrestarted() bool { return true }
+
 // OpenRedisAdapter creates a Redis adapter and reports startup ping failures.
 func OpenRedisAdapter(cfg *RedisConfig) (*RedisAdapter, error) {
+	return OpenRedisAdapterContext(context.Background(), cfg)
+}
+
+// OpenRedisAdapterContext creates and verifies a Redis adapter within ctx.
+func OpenRedisAdapterContext(ctx context.Context, cfg *RedisConfig) (*RedisAdapter, error) {
 	if cfg == nil {
 		return nil, errors.New("redis config is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("redis startup canceled: %w", err)
 	}
 	client := redis.NewClient(redisOptions(cfg))
 	adapter := &RedisAdapter{Client: client}
@@ -60,10 +79,10 @@ func OpenRedisAdapter(cfg *RedisConfig) (*RedisAdapter, error) {
 	}
 
 	// 测试连接
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if err := client.Ping(ctx).Err(); err != nil {
+	if err := client.Ping(pingCtx).Err(); err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("ping Redis at %s: %w", cfg.Addr, err)
 	}

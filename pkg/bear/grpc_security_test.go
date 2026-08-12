@@ -9,7 +9,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net"
@@ -47,6 +50,8 @@ type grpcSecurityEchoService struct {
 	panicUnary  atomic.Bool
 	panicStream atomic.Bool
 	unaryCalls  atomic.Int32
+	unaryErr    error
+	streamErr   error
 }
 
 func (*grpcSecurityEchoService) Name() string { return "grpc-security-echo" }
@@ -61,12 +66,18 @@ func (s *grpcSecurityEchoService) Echo(_ context.Context, request *wrapperspb.By
 	if s.panicUnary.Swap(false) {
 		panic("grpc security unary panic must not escape")
 	}
+	if s.unaryErr != nil {
+		return nil, s.unaryErr
+	}
 	return wrapperspb.Bytes(append([]byte(nil), request.Value...)), nil
 }
 
 func (s *grpcSecurityEchoService) EchoStream(stream grpc.ServerStream) error {
 	if s.panicStream.Swap(false) {
 		panic("grpc security stream panic must not escape")
+	}
+	if s.streamErr != nil {
+		return s.streamErr
 	}
 	request := new(wrapperspb.BytesValue)
 	if err := stream.RecvMsg(request); err != nil {
@@ -282,7 +293,8 @@ func TestGRPCConfigTransportSecurityEnvironmentRules(t *testing.T) {
 		{name: "production IPv4 loopback plaintext", environment: "production", host: "127.0.0.1", transport: "plaintext"},
 		{name: "production IPv4 loopback range plaintext", environment: "production", host: "127.12.34.56", transport: "plaintext"},
 		{name: "production IPv6 loopback plaintext", environment: "production", host: "::1", transport: "plaintext"},
-		{name: "production localhost plaintext", environment: "production", host: "localhost", transport: "plaintext"},
+		{name: "production localhost plaintext rejected", environment: "production", host: "localhost", transport: "plaintext", wantErr: "loopback"},
+		{name: "production bracketed IPv6 loopback rejected", environment: "production", host: "[::1]", transport: "plaintext", wantErr: "loopback"},
 		{name: "production wildcard plaintext rejected", environment: "production", host: "0.0.0.0", transport: "plaintext", wantErr: "loopback"},
 		{name: "production IPv6 wildcard plaintext rejected", environment: "production", host: "::", transport: "plaintext", wantErr: "loopback"},
 		{name: "production public plaintext rejected", environment: "production", host: "192.0.2.10", transport: "plaintext", wantErr: "loopback"},
@@ -402,6 +414,61 @@ func TestGRPCUnaryPanicLogsRequestIDAndInternalAccessStatus(t *testing.T) {
 	for _, want := range []string{"grpc-panic-rid", "gRPC panic recovered", "gRPC request handled", `"status":"Internal"`} {
 		if !strings.Contains(logs.String(), want) {
 			t.Fatalf("panic logs = %s, want %q", logs.String(), want)
+		}
+	}
+}
+
+func TestGRPCObservabilityLogsClientStatusForHandlerErrors(t *testing.T) {
+	errorsToTest := []struct {
+		name string
+		err  error
+		code codes.Code
+	}{
+		{name: "canceled", err: context.Canceled, code: codes.Canceled},
+		{name: "wrapped canceled", err: fmt.Errorf("wrapped: %w", context.Canceled), code: codes.Canceled},
+		{name: "deadline exceeded", err: context.DeadlineExceeded, code: codes.DeadlineExceeded},
+		{name: "wrapped deadline exceeded", err: fmt.Errorf("wrapped: %w", context.DeadlineExceeded), code: codes.DeadlineExceeded},
+		{name: "status error", err: status.Error(codes.PermissionDenied, "denied"), code: codes.PermissionDenied},
+		{name: "wrapped status error", err: fmt.Errorf("wrapped: %w", status.Error(codes.ResourceExhausted, "busy")), code: codes.ResourceExhausted},
+		{name: "ordinary error", err: errors.New("ordinary handler error"), code: codes.Unknown},
+	}
+	for _, rpcType := range []string{"unary", "stream"} {
+		for _, test := range errorsToTest {
+			t.Run(rpcType+"/"+test.name, func(t *testing.T) {
+				var logs bytes.Buffer
+				app := grpcSecurityNewApp(t, grpcSecurityPlaintextConfig())
+				app.Runtime().Logger = slog.New(&ContextHandler{Handler: slog.NewJSONHandler(&logs, nil)})
+				service := &grpcSecurityEchoService{}
+				if rpcType == "unary" {
+					service.unaryErr = test.err
+				} else {
+					service.streamErr = test.err
+				}
+				grpcSecurityAddService(t, app, service)
+				runtime, err := app.buildGRPCRuntime()
+				if err != nil {
+					t.Fatalf("buildGRPCRuntime() failed: %v", err)
+				}
+				connection := grpcSecurityServeBufconn(t, runtime)
+
+				var rpcErr error
+				if rpcType == "unary" {
+					rpcErr = connection.Invoke(context.Background(), grpcSecurityUnaryMethod, wrapperspb.Bytes(nil), new(wrapperspb.BytesValue))
+				} else {
+					stream, err := connection.NewStream(context.Background(), &grpcSecurityServiceDesc.Streams[0], grpcSecurityStreamMethod)
+					if err != nil {
+						t.Fatalf("NewStream() failed: %v", err)
+					}
+					_ = stream.CloseSend()
+					rpcErr = stream.RecvMsg(new(wrapperspb.BytesValue))
+				}
+				if got := status.Code(rpcErr); got != test.code {
+					t.Fatalf("client status = %s, want %s (error %v)", got, test.code, rpcErr)
+				}
+				if got := grpcSecurityAccessLogStatus(t, logs.Bytes()); got != test.code.String() {
+					t.Fatalf("access log status = %q, want client status %q", got, test.code.String())
+				}
+			})
 		}
 	}
 }
@@ -644,6 +711,24 @@ func grpcSecurityRequireConfigError(t *testing.T, config *SysConfig, want string
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), want) {
 		t.Fatalf("validateGRPCConfig() = %v, want error containing %q", err, want)
 	}
+}
+
+func grpcSecurityAccessLogStatus(t *testing.T, logs []byte) string {
+	t.Helper()
+	for _, line := range bytes.Split(bytes.TrimSpace(logs), []byte("\n")) {
+		var record struct {
+			Message string `json:"msg"`
+			Status  string `json:"status"`
+		}
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode gRPC log %q: %v", line, err)
+		}
+		if record.Message == "gRPC request handled" {
+			return record.Status
+		}
+	}
+	t.Fatalf("gRPC access log not found in %s", logs)
+	return ""
 }
 
 func grpcSecurityDurationAbove(t *testing.T, maximum string) string {

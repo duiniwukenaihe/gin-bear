@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -99,13 +100,22 @@ func (r *grpcTestRegistrarFunc) RegisterGRPC(registrar grpc.ServiceRegistrar) er
 }
 
 type grpcTestRecordingServiceRegistrar struct {
+	mu           sync.Mutex
 	descriptions []*grpc.ServiceDesc
 	services     []any
 }
 
 func (r *grpcTestRecordingServiceRegistrar) RegisterService(desc *grpc.ServiceDesc, service any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.descriptions = append(r.descriptions, desc)
 	r.services = append(r.services, service)
+}
+
+func (r *grpcTestRecordingServiceRegistrar) registrationCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.descriptions)
 }
 
 func newGRPCTestStrictApp(t *testing.T) *Bear {
@@ -265,6 +275,77 @@ func TestSafeGRPCServiceRegistrarRegistersManualEchoService(t *testing.T) {
 	}
 	if _, ok := server.GetServiceInfo()[grpcTestEchoServiceName]; !ok {
 		t.Fatalf("registered services = %v, want %q", server.GetServiceInfo(), grpcTestEchoServiceName)
+	}
+}
+
+func TestSafeGRPCServiceRegistrarRejectsConcurrentRegistrationAfterCallbackReturns(t *testing.T) {
+	target := &grpcTestRecordingServiceRegistrar{}
+	safe := newSafeGRPCServiceRegistrar(target)
+	var retained grpc.ServiceRegistrar
+	service := &grpcTestRegistrarFunc{
+		name: "retained-registrar",
+		registerFn: func(registrar grpc.ServiceRegistrar) error {
+			retained = registrar
+			registrar.RegisterService(&grpcTestEchoServiceDesc, &grpcTestEchoRegistrar{})
+			return nil
+		},
+	}
+
+	if err := safe.register(service); err != nil {
+		t.Fatalf("register() error = %v", err)
+	}
+	lateDesc := grpcTestEchoServiceDesc
+	lateDesc.ServiceName = "bear.test.v1.LateEchoService"
+	var wait sync.WaitGroup
+	for range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			retained.RegisterService(&lateDesc, &grpcTestEchoRegistrar{})
+		}()
+	}
+	wait.Wait()
+
+	if got := target.registrationCount(); got != 1 {
+		t.Fatalf("underlying registrations = %d, want 1 after late registration", got)
+	}
+	retainedSafe, ok := retained.(*safeGRPCServiceRegistrar)
+	if !ok {
+		t.Fatalf("callback registrar type = %T, want *safeGRPCServiceRegistrar", retained)
+	}
+	if retainedSafe.err == nil || !strings.Contains(strings.ToLower(retainedSafe.err.Error()), "closed") {
+		t.Fatalf("late registration error = %v, want closed registration error", retainedSafe.err)
+	}
+}
+
+func TestSafeGRPCServiceRegistrarIsRaceFreeDuringConcurrentCallbackRegistration(t *testing.T) {
+	target := &grpcTestRecordingServiceRegistrar{}
+	safe := newSafeGRPCServiceRegistrar(target)
+	service := &grpcTestRegistrarFunc{
+		name: "concurrent-registration",
+		registerFn: func(registrar grpc.ServiceRegistrar) error {
+			start := make(chan struct{})
+			var wait sync.WaitGroup
+			wait.Add(2)
+			go func() {
+				defer wait.Done()
+				<-start
+				registrar.RegisterService(&grpcTestEchoServiceDesc, &grpcTestEchoRegistrar{})
+			}()
+			go func() {
+				defer wait.Done()
+				<-start
+				registrar.RegisterService(nil, &grpcTestEchoRegistrar{})
+			}()
+			close(start)
+			wait.Wait()
+			return nil
+		},
+	}
+
+	err := safe.register(service)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "description") {
+		t.Fatalf("register() error = %v, want service description error", err)
 	}
 }
 

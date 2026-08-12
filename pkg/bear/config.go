@@ -550,6 +550,10 @@ func (c *SysConfig) validateSemantic() error {
 		}
 	}
 	if c.Auth != nil {
+		storageType := strings.ToLower(strings.TrimSpace(c.Auth.StorageType))
+		if !slices.Contains([]string{"", "jwt", "file", "redis"}, storageType) {
+			return fmt.Errorf("auth.storage_type must be one of jwt or redis")
+		}
 		if err := validateTokenExpirationHours(c.Auth.TokenExpireHours); err != nil {
 			return err
 		}
@@ -711,6 +715,8 @@ func (c *SysConfig) compatibilityWarnings() []string {
 	add(c.Schema != nil && c.Schema.Enabled, "schema is compatibility-only and is not loaded")
 	add(c.CircuitBreaker != nil && c.CircuitBreaker.Enabled, "circuit_breaker is compatibility-only and is not started")
 	add(c.ConfigCenter != nil && c.ConfigCenter.Enabled, "config_center is compatibility-only and is not loaded")
+	add(c.Auth != nil && strings.EqualFold(strings.TrimSpace(c.Auth.StorageType), "file"),
+		"auth.storage_type=file is a compatibility alias for jwt; there is no file revocation store")
 	add(isProductionMode(c) && !c.FrameworkStrict() && c.AllowCompatibilityInProduction(),
 		"production compatibility runtime explicitly enabled; fail-soft IoC remains active")
 	if c.DB != nil {
@@ -750,7 +756,7 @@ func NewSysConfig() *SysConfig {
 			MaxRequestBodyBytes: 1 << 20,
 		},
 		Auth: &AuthConfig{
-			StorageType:      "file",
+			StorageType:      "jwt",
 			JWTSecret:        "bear-secret",
 			TokenExpireHours: 24,
 			PublicPaths:      stringSlicePointer("/health", "/live", "/ready", "/version", "/swagger/*", "/login"),

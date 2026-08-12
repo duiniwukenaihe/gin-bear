@@ -105,10 +105,6 @@ func grpcListenAddress(config *GRPCConfig) string {
 }
 
 func isLoopbackHost(host string) bool {
-	host = strings.Trim(strings.TrimSpace(strings.ToLower(host)), "[]")
-	if host == "localhost" {
-		return true
-	}
 	address := net.ParseIP(host)
 	return address != nil && address.IsLoopback()
 }

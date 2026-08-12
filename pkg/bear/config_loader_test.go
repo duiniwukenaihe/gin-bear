@@ -310,7 +310,7 @@ func TestAuthEnabledAndManualAttachDoNotDuplicateAuthFairing(t *testing.T) {
 	}
 }
 
-func TestConcurrentAttachEIdempotentlyRegistersOneAuthFairing(t *testing.T) {
+func TestConcurrentAttachERegistersOneAuthFairingAndRejectsDuplicates(t *testing.T) {
 	resetGinModeForTest(t)
 	config := NewSysConfig()
 	config.SetFrameworkStrict(true)
@@ -334,10 +334,20 @@ func TestConcurrentAttachEIdempotentlyRegistersOneAuthFairing(t *testing.T) {
 	close(start)
 	wait.Wait()
 	close(errorsByWorker)
+	successes := 0
+	duplicates := 0
 	for err := range errorsByWorker {
-		if err != nil {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrBeanDuplicate):
+			duplicates++
+		default:
 			t.Fatalf("concurrent AttachE(AuthFairing) error = %v", err)
 		}
+	}
+	if successes != 1 || duplicates != workers-1 {
+		t.Fatalf("concurrent AttachE results: successes=%d duplicates=%d, want 1/%d", successes, duplicates, workers-1)
 	}
 
 	count := 0

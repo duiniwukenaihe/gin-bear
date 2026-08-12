@@ -174,7 +174,9 @@ func TestGeneratedStrictRuntimeTemplateStartup(t *testing.T) {
 
 	wantCalls := []string{
 		"bear.IgniteE",
+		"application.Shutdown",
 		"application.EnableDatabaseE",
+		"application.EnableRedisE",
 		"application.EnableTracingE",
 		"application.EnableMetricsE",
 		"application.EnableHealthE",
@@ -188,6 +190,7 @@ func TestGeneratedStrictRuntimeTemplateStartup(t *testing.T) {
 	for _, stage := range []string{
 		"initialize application",
 		"initialize database",
+		"initialize Redis",
 		"initialize tracing",
 		"initialize metrics",
 		"initialize health",

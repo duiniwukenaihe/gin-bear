@@ -25,7 +25,8 @@ func TestScaffoldGenerateProjectBuildsTestsAndServesHealth(t *testing.T) {
 		Name:             "billing-api",
 		Module:           "example.com/billing-api",
 		Directory:        dir,
-		FrameworkVersion: "v0.9.2",
+		FrameworkVersion: "v0.0.0",
+		FrameworkReplace: repoRoot(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +38,8 @@ func TestScaffoldGenerateProjectBuildsTestsAndServesHealth(t *testing.T) {
 	}
 	for _, want := range []string{
 		"module example.com/billing-api",
-		"require github.com/duiniwukenaihe/gin-bear v0.9.2",
+		"require github.com/duiniwukenaihe/gin-bear v0.0.0",
+		"replace github.com/duiniwukenaihe/gin-bear => " + repoRoot(t),
 	} {
 		if !strings.Contains(string(goMod), want) {
 			t.Fatalf("generated go.mod missing %q:\n%s", want, goMod)
@@ -49,7 +51,6 @@ func TestScaffoldGenerateProjectBuildsTestsAndServesHealth(t *testing.T) {
 		}
 	}
 
-	runGo(t, dir, "mod", "edit", "-replace", "github.com/duiniwukenaihe/gin-bear="+repoRoot(t))
 	runGo(t, dir, "mod", "tidy")
 	runGo(t, dir, "test", "./...", "-count=1")
 	runGeneratedServerHealthCheck(t, dir, "/live")
@@ -366,7 +367,8 @@ func TestGeneratedAPIHandlesRealCRUDRequestsWithSQLite(t *testing.T) {
 		Name:             "crud-api",
 		Module:           "example.com/crud-api",
 		Directory:        project,
-		FrameworkVersion: "v0.9.2",
+		FrameworkVersion: "v0.0.0",
+		FrameworkReplace: repoRoot(t),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +378,6 @@ func TestGeneratedAPIHandlesRealCRUDRequestsWithSQLite(t *testing.T) {
 		t.Fatalf("resource generation failed (%d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 
-	runGo(t, project, "mod", "edit", "-replace", "github.com/duiniwukenaihe/gin-bear="+repoRoot(t))
 	runGo(t, project, "mod", "edit", "-require", "github.com/glebarez/sqlite@v1.7.0")
 	fixture := `package crud_test
 
@@ -468,7 +469,8 @@ func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
 		Name:             "secure-api",
 		Module:           "example.com/secure-api",
 		Directory:        project,
-		FrameworkVersion: "v0.9.2",
+		FrameworkVersion: "v0.0.0",
+		FrameworkReplace: repoRoot(t),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +478,6 @@ func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, "application-production.yaml"), []byte(productionConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runGo(t, project, "mod", "edit", "-replace", "github.com/duiniwukenaihe/gin-bear="+repoRoot(t))
 	runGo(t, project, "mod", "tidy")
 
 	serverBinary := filepath.Join(t.TempDir(), "secure-server")

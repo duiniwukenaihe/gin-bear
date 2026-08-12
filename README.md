@@ -15,10 +15,11 @@ go get github.com/duiniwukenaihe/gin-bear@v0.9.3
 ```
 
 Application code imports the runtime from
-`github.com/duiniwukenaihe/gin-bear/pkg/bear`. `v0.9.3` is the current release.
-The production gRPC work described in this checkout remains under
-[Unreleased](CHANGELOG.md#unreleased) until it is reviewed, verified, and
-included in a future tag.
+`github.com/duiniwukenaihe/gin-bear/pkg/bear`. `v0.9.3` is the latest published
+release. The production gRPC work and the generator templates in this checkout
+are unreleased HEAD content; `v0.9.3` does not include or support those HEAD
+template fields. They remain under [Unreleased](CHANGELOG.md#unreleased) until
+they are reviewed, verified, and included in a future tag.
 
 ## Generate A Project (Optional)
 
@@ -30,15 +31,23 @@ go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3
 bear new my-service
 ```
 
-The generated project's `go.mod` pins the same `gin-bear` framework version.
+The published `v0.9.3` generator contains the `v0.9.3` templates and pins the
+generated project's `go.mod` to `v0.9.3`. A released generator is bound to its
+own module version and rejects attempts to select another framework version.
 Existing applications do not need to install the generator.
 
-When running an unversioned development build of the CLI, select the framework
-dependency explicitly so generated code cannot silently target another version:
+To exercise the unreleased templates from a local checkout, run the development
+generator against that same checkout explicitly:
 
 ```bash
-bear new my-service --framework-version v0.9.3
+go run ./cmd/bear new my-service \
+  --framework-version dev \
+  --framework-replace "$(pwd)"
 ```
+
+This development flow writes a local `replace` directive. It does not claim
+compatibility with `v0.9.3` or any other published tag. An unversioned HEAD
+generator rejects `--framework-version v0.9.3` before creating a project.
 
 ## Recommended Startup
 
@@ -51,6 +60,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -59,12 +69,19 @@ import (
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
-func run(ctx context.Context) error {
+func run(ctx context.Context) (resultErr error) {
 	config := bear.NewSysConfig()
 	config.SetFrameworkStrict(true)
 	application, err := bear.IgniteE(config)
 	if err != nil {
 		return fmt.Errorf("initialize application: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, application.Shutdown(context.Background())) }()
+	if err := application.EnableDatabaseE(ctx); err != nil {
+		return fmt.Errorf("initialize database: %w", err)
+	}
+	if err := application.EnableRedisE(ctx); err != nil {
+		return fmt.Errorf("initialize Redis: %w", err)
 	}
 	if err := application.HandleE("GET", "/hello", func() string { return "hello" }); err != nil {
 		return fmt.Errorf("register hello route: %w", err)
@@ -90,6 +107,8 @@ func main() {
 
 `Ignite`, fluent registration, and `Launch` remain available for v0 source
 compatibility, but they are not the recommended path for new services.
+`EnableDatabaseE` is a no-op when the database is disabled. `EnableRedisE` is a
+no-op unless Redis is required directly or by `auth.storage_type: redis`.
 
 ## Runnable Examples
 

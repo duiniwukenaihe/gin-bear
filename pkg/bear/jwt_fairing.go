@@ -65,8 +65,13 @@ func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 	return nil
 }
 
-func authFairingMiddleware(fairing *AuthFairing) gin.HandlerFunc {
+func authFairingMiddleware(current func() *AuthFairing) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		fairing := current()
+		if fairing == nil {
+			ctx.Next()
+			return
+		}
 		if err := fairing.OnRequest(ctx); err != nil {
 			WriteError(ctx, err)
 			return

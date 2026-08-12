@@ -149,6 +149,9 @@ CORS startup validation rejects `allow_origins: ["*"]` when
 browser requests. CORS remains disabled unless the application enables it; a
 deployment whose browser-origin policy is enforced by Nginx, Apache, or another
 trusted gateway does not need to enable framework CORS.
+When enabled, `IgniteE` installs the CORS middleware before automatic
+authentication so browser preflight requests can complete. Other caller
+middleware remains after authentication and cannot bypass protected routes.
 
 ## JWT Authentication
 
@@ -159,6 +162,7 @@ skew must be between zero and five minutes:
 ```yaml
 auth:
   enabled: false
+  storage_type: "jwt"
   jwt_secret: ""
   jwt_issuer: "https://auth.example.com"
   jwt_audience: "gin-bear-api"
@@ -176,8 +180,20 @@ fallback. Configure matching
 the JWT utility. Generated tokens include configured issuer and audience
 claims, and parsing requires them when configured.
 
-Redis-backed token revocation is optional. Without a Redis client, ordinary JWT
-validation still succeeds. `RevokeToken` and direct blacklist checks return
+`auth.storage_type: jwt` performs stateless JWT validation. Set
+`auth.storage_type: redis` to require Redis-backed token revocation, then call
+`application.EnableRedisE(ctx)` before registering modules or serving. Startup
+fails if the configured Redis connection cannot be established; the connection
+is registered in the application lifecycle and closed during rollback or
+shutdown. The legacy `file` value remains a compatibility alias for `jwt` and
+emits a warning because Gin-Bear has no file revocation store.
+
+Call `application.Shutdown(ctx)` on startup paths that may return before
+`Serve`. Generated applications install this as a deferred cleanup and join any
+cleanup failure with the original startup error.
+
+Without a Redis client, ordinary JWT validation still succeeds. `RevokeToken`
+and direct blacklist checks return
 `ErrTokenRevocationUnavailable`, which callers can detect with `errors.Is`,
 instead of panicking. Treat that error as a failed logout/revocation operation.
 The tested typed-error handling pattern is in

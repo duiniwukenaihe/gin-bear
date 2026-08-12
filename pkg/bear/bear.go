@@ -126,6 +126,8 @@ type Bear struct {
 	pluginDispatcher          *PluginDispatcher
 	pluginManager             *PluginManager
 	pluginMode                bool // 标记当前是否处于插件加载模式
+	automaticAuthFairing      *AuthFairing
+	activeAuthFairing         atomic.Pointer[AuthFairing]
 	metricsRegistered         atomic.Bool
 	tracingRegistered         atomic.Bool
 	webSocketRoutes           atomic.Int64
@@ -245,13 +247,16 @@ func IgniteE(args ...any) (*Bear, error) {
 	// 注册核心底座 Bean
 	runtime.Container.Set(b)
 	runtime.Container.Set(config)
-	runtime.Container.Set(newJWTUtilFromAuthConfig(config.Auth))
+	jwtUtil := newJWTUtilFromAuthConfig(config.Auth)
+	runtime.Container.Set(jwtUtil)
 	var automaticAuth *AuthFairing
 	if config.Auth != nil && config.Auth.Enabled {
-		automaticAuth = NewAuthFairing()
-		if err := b.AttachE(automaticAuth); err != nil {
-			return nil, fmt.Errorf("enable framework authentication: %w", err)
-		}
+		tokenManager := NewAuthTokenManager()
+		tokenManager.JWTUtil = jwtUtil
+		automaticAuth = &AuthFairing{JWTUtil: jwtUtil, TokenManager: tokenManager}
+		b.automaticAuthFairing = automaticAuth
+		b.activeAuthFairing.Store(automaticAuth)
+		b.fairingHandler.AddFairing(automaticAuth)
 	}
 	for _, warning := range config.compatibilityWarnings() {
 		runtime.Logger.Warn(warning)
@@ -264,8 +269,11 @@ func IgniteE(args ...any) (*Bear, error) {
 	b.Use(RequestIDMiddleware())
 	b.Use(runtimePerformanceMiddleware(runtime))
 	b.Use(runtimeRecoveryMiddleware(runtime))
+	if config.CORS != nil && config.CORS.Enabled {
+		b.Use(CORSMiddleware())
+	}
 	if automaticAuth != nil {
-		b.Use(authFairingMiddleware(automaticAuth))
+		b.Use(authFairingMiddleware(b.activeAuthFairing.Load))
 	}
 	b.Use(b.pluginDispatcher.Dispatch())
 	for _, middleware := range ginMiddlewares {
@@ -411,6 +419,9 @@ func (b *Bear) Serve(ctx context.Context) error {
 
 	httpListener, err := net.Listen("tcp", httpServer.Addr)
 	if err != nil {
+		if grpcServer != nil {
+			grpcServer.Stop()
+		}
 		return b.cleanupLaunchFailure(config, fmt.Errorf("failed to listen for HTTP: %w", err))
 	}
 
@@ -418,6 +429,7 @@ func (b *Bear) Serve(ctx context.Context) error {
 	if grpcServer != nil {
 		grpcListener, err = net.Listen("tcp", grpcListenAddress(config.GRPC))
 		if err != nil {
+			grpcServer.Stop()
 			return b.cleanupLaunchFailure(config, fmt.Errorf("failed to listen for gRPC: %w", err), httpListener)
 		}
 	}
@@ -596,6 +608,23 @@ func (b *Bear) cleanupLaunchFailure(config *SysConfig, cause error, listeners ..
 	return errors.Join(errorsToJoin...)
 }
 
+// Shutdown releases application-owned resources before or after Serve.
+func (b *Bear) Shutdown(ctx context.Context) error {
+	if b == nil || b.runtime == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, shutdownTimeout(b.runtime.Config))
+		defer cancel()
+	}
+	b.runtime.beginHijackedShutdown()
+	return errors.Join(b.runtime.closeHijackedConnections(), b.runtime.Lifecycle.Stop(ctx))
+}
+
 func runShutdownPhase(timeout time.Duration, phase func(context.Context) error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -634,6 +663,8 @@ func shutdownGRPCServer(ctx context.Context, server grpcShutdownServer) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
+		// grpc.Server.Stop synchronously closes transports and cancels active RPC
+		// contexts before application resources begin shutting down.
 		server.Stop()
 		return fmt.Errorf("gRPC graceful shutdown: %w", ctx.Err())
 	}
@@ -927,22 +958,65 @@ func (b *Bear) EnableDatabaseE(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	adapter, err := NewGormAdapter(config.DB)
+	checkCtx, cancel := context.WithTimeout(ctx, readinessTimeout(config))
+	defer cancel()
+	adapter, err := OpenGormAdapter(checkCtx, config.DB)
 	if err != nil {
 		return err
-	}
-	checkCtx, cancel := context.WithTimeout(ctx, readinessTimeout(config))
-	err = adapter.CheckReady(checkCtx)
-	cancel()
-	if err != nil {
-		_ = adapter.Shutdown()
-		return fmt.Errorf("database readiness check failed: %w", err)
 	}
 	if err := b.BeansE(adapter); err != nil {
 		_ = adapter.Shutdown()
 		return fmt.Errorf("register database adapter: %w", err)
 	}
 	return nil
+}
+
+// EnableRedis opens and registers Redis when configuration marks it required.
+func (b *Bear) EnableRedis(ctx context.Context) *Bear {
+	if err := b.EnableRedisE(ctx); err != nil && b != nil && b.runtime != nil {
+		b.runtime.Logger.Error("Redis initialization failed", "error_code", "BEAR_REDIS_INIT")
+	}
+	return b
+}
+
+// EnableRedisE opens and registers Redis when required directly or by authentication.
+func (b *Bear) EnableRedisE(ctx context.Context) error {
+	if b == nil || b.runtime == nil {
+		return errors.New("bear runtime is unavailable")
+	}
+	config := b.runtime.Config
+	if config == nil || config.Redis == nil || !redisRequiredByConfig(config) {
+		return nil
+	}
+	unlock, err := b.beginGinRegistration()
+	if err != nil {
+		return err
+	}
+	unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, readinessTimeout(config))
+	defer cancel()
+	adapter, err := OpenRedisAdapterContext(checkCtx, config.Redis)
+	if err != nil {
+		return err
+	}
+	if err := b.BeansE(adapter); err != nil {
+		_ = adapter.Shutdown()
+		return fmt.Errorf("register Redis adapter: %w", err)
+	}
+	return nil
+}
+
+func redisRequiredByConfig(config *SysConfig) bool {
+	if config == nil || config.Redis == nil {
+		return false
+	}
+	if config.Redis.Required {
+		return true
+	}
+	return config.Auth != nil && config.Auth.Enabled && strings.EqualFold(strings.TrimSpace(config.Auth.StorageType), "redis")
 }
 
 // EnableGzip 启用 Gzip 响应压缩 (阶段 84)
@@ -1027,11 +1101,14 @@ func (b *Bear) Attach(f ...Fairing) *Bear {
 	}
 	b.eRegistrationMu.Lock()
 	defer b.eRegistrationMu.Unlock()
-	f = b.uniqueAuthFairingsLocked(f)
-	b.fairingHandler.AddFairing(f...)
-	for _, f1 := range f {
+	registration := b.planFairingRegistrationLocked(f)
+	if registration.err != nil {
+		b.runtime.Logger.Warn("Duplicate AuthFairing ignored; keeping the first explicit authentication policy")
+	}
+	for _, f1 := range registration.beans {
 		b.runtime.Container.Set(f1)
 	}
+	b.publishFairingRegistrationLocked(registration)
 	return b
 }
 
@@ -1047,40 +1124,88 @@ func (b *Bear) AttachE(fairings ...Fairing) error {
 	}
 	b.eRegistrationMu.Lock()
 	defer b.eRegistrationMu.Unlock()
-	fairings = b.uniqueAuthFairingsLocked(fairings)
-	if len(fairings) == 0 {
+	registration := b.planFairingRegistrationLocked(fairings)
+	if registration.err != nil {
+		return registration.err
+	}
+	if len(registration.beans) == 0 {
 		return nil
 	}
-	values := make([]any, len(fairings))
-	for index, fairing := range fairings {
+	values := make([]any, len(registration.beans))
+	for index, fairing := range registration.beans {
 		values[index] = fairing
 	}
 	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
 		return fmt.Errorf("register fairings: %w", err)
 	}
-	b.fairingHandler.AddFairing(fairings...)
+	b.publishFairingRegistrationLocked(registration)
 	b.strictRegistrationVersion++
 	return nil
 }
 
-// uniqueAuthFairingsLocked requires eRegistrationMu. Fairing slices are also
-// read while deciding whether an AuthFairing has already been registered.
-func (b *Bear) uniqueAuthFairingsLocked(fairings []Fairing) []Fairing {
+type fairingRegistration struct {
+	beans           []Fairing
+	additions       []Fairing
+	authReplacement *AuthFairing
+	activeAuth      *AuthFairing
+	err             error
+}
+
+// planFairingRegistrationLocked requires eRegistrationMu.
+func (b *Bear) planFairingRegistrationLocked(fairings []Fairing) fairingRegistration {
+	var registration fairingRegistration
 	if len(fairings) == 0 {
-		return nil
+		return registration
 	}
-	hasAuth := openAPIHasAuthFairing(openAPIGlobalFairings(b))
-	result := make([]Fairing, 0, len(fairings))
+	currentAuth := b.activeAuthFairing.Load()
+	registration.beans = make([]Fairing, 0, len(fairings))
+	registration.additions = make([]Fairing, 0, len(fairings))
 	for _, fairing := range fairings {
-		if _, auth := fairing.(*AuthFairing); auth {
-			if hasAuth {
+		if auth, ok := fairing.(*AuthFairing); ok {
+			switch {
+			case currentAuth == nil:
+				currentAuth = auth
+				registration.activeAuth = auth
+			case currentAuth == auth:
+				continue
+			case currentAuth == b.automaticAuthFairing:
+				currentAuth = auth
+				registration.authReplacement = auth
+				registration.activeAuth = auth
+			default:
+				registration.err = fmt.Errorf("%w: concrete bean type %T", ErrBeanDuplicate, auth)
 				continue
 			}
-			hasAuth = true
 		}
-		result = append(result, fairing)
+		registration.beans = append(registration.beans, fairing)
+		if fairing != registration.authReplacement {
+			registration.additions = append(registration.additions, fairing)
+		}
 	}
-	return result
+	return registration
+}
+
+func (b *Bear) publishFairingRegistrationLocked(registration fairingRegistration) {
+	if registration.authReplacement != nil {
+		replaceFairingInstance(b.fairingHandler, b.automaticAuthFairing, registration.authReplacement)
+	}
+	b.fairingHandler.AddFairing(registration.additions...)
+	if registration.activeAuth != nil {
+		b.activeAuthFairing.Store(registration.activeAuth)
+	}
+}
+
+func replaceFairingInstance(handler *FairingHandler, previous, replacement Fairing) {
+	if handler == nil || previous == nil || replacement == nil {
+		return
+	}
+	for _, fairings := range [][]Fairing{handler.fairings, handler.requestFairings, handler.responseFairings} {
+		for index, fairing := range fairings {
+			if fairing == previous {
+				fairings[index] = replacement
+			}
+		}
+	}
 }
 
 // LoadPlugin 动态加载 .so 插件 (阶段 85)
@@ -1345,12 +1470,7 @@ func (b *Bear) registerHandler(httpMethod, relativePath string, handler interfac
 }
 
 func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler interface{}, wrapped gin.HandlerFunc, routeFairings []Fairing) {
-	if b.pluginMode {
-		b.pluginDispatcher.Register(httpMethod, relativePath, wrapped)
-		return
-	}
 	group := b.activeGroup()
-	group.Handle(httpMethod, relativePath, wrapped)
 	registration := b.registration
 	groupName := ""
 	var controller IOpenAPI
@@ -1371,6 +1491,11 @@ func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler 
 	effectiveFairings := append([]Fairing(nil), controllerFairings...)
 	effectiveFairings = append(effectiveFairings, routeFairings...)
 	b.setOpenAPIRouteMetadata(route, joinRoutePath(group.BasePath(), relativePath), controller, effectiveFairings...)
+	if b.pluginMode {
+		b.pluginDispatcher.Register(httpMethod, relativePath, wrapped)
+		return
+	}
+	group.Handle(httpMethod, relativePath, wrapped)
 }
 
 func joinRoutePath(basePath, relativePath string) string {
@@ -1652,6 +1777,12 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 				return err
 			}
 		}
+		if err := b.configureAuthRuntimeDependencies(); err != nil {
+			return err
+		}
+		if err := b.validateAuthRuntimeDependencies(); err != nil {
+			return err
+		}
 		if err := b.validateProductionAuthPolicy(); err != nil {
 			return err
 		}
@@ -1669,6 +1800,12 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 		if v.Kind() == reflect.Ptr && v.Elem().Kind() == reflect.Struct {
 			b.runtime.Container.Apply(bean)
 		}
+	}
+	if err := b.configureAuthRuntimeDependencies(); err != nil {
+		return err
+	}
+	if err := b.validateAuthRuntimeDependencies(); err != nil {
+		return err
 	}
 	if err := b.validateProductionAuthPolicy(); err != nil {
 		return err
@@ -1695,6 +1832,40 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 		return err
 	}
 
+	return nil
+}
+
+func (b *Bear) configureAuthRuntimeDependencies() error {
+	if b == nil || b.runtime == nil {
+		return nil
+	}
+	auth := b.activeAuthFairing.Load()
+	if auth == nil || auth.TokenManager == nil || auth.TokenManager.Redis != nil {
+		return nil
+	}
+	redis, err := ResolveE[*RedisAdapter](b.runtime.Container)
+	if err == nil {
+		auth.TokenManager.Redis = redis
+		return nil
+	}
+	if errors.Is(err, ErrBeanMissing) {
+		return nil
+	}
+	return fmt.Errorf("resolve optional Redis authentication storage: %w", err)
+}
+
+func (b *Bear) validateAuthRuntimeDependencies() error {
+	if b == nil || b.runtime == nil {
+		return nil
+	}
+	config := b.runtime.Config
+	if config == nil || config.Auth == nil || !config.Auth.Enabled || !strings.EqualFold(strings.TrimSpace(config.Auth.StorageType), "redis") {
+		return nil
+	}
+	auth := b.activeAuthFairing.Load()
+	if auth == nil || auth.TokenManager == nil || auth.TokenManager.Redis == nil || auth.TokenManager.Redis.Client == nil {
+		return errors.New("auth.storage_type=redis requires a usable RedisAdapter bean")
+	}
 	return nil
 }
 

@@ -55,6 +55,31 @@ var runtimeStaticInjectorsE = make(map[string]RuntimeStaticInjectorE)
 var staticMu sync.RWMutex
 
 func init() {
+	RegisterRuntimeStaticInjector("AuthTokenManager", func(factory *BeanFactory, obj interface{}) {
+		target, ok := obj.(*AuthTokenManager)
+		if !ok {
+			return
+		}
+		if target.JWTUtil == nil {
+			target.JWTUtil = Resolve[*JWTUtil](factory)
+		}
+		if target.Redis == nil {
+			target.Redis = Resolve[*RedisAdapter](factory)
+		}
+	})
+	RegisterRuntimeStaticInjector("AuthFairing", func(factory *BeanFactory, obj interface{}) {
+		target, ok := obj.(*AuthFairing)
+		if !ok {
+			return
+		}
+		hasExplicitJWTUtil := target.JWTUtil != nil
+		if target.JWTUtil == nil {
+			target.JWTUtil = Resolve[*JWTUtil](factory)
+		}
+		if target.TokenManager == nil && !hasExplicitJWTUtil {
+			target.TokenManager = Resolve[*AuthTokenManager](factory)
+		}
+	})
 	RegisterRuntimeStaticInjectorE(runtimeStaticInjectorKey(reflect.TypeFor[JWTUtil]()), func(factory *BeanFactory, obj any) error {
 		target, ok := obj.(*JWTUtil)
 		if !ok {
@@ -79,11 +104,15 @@ func init() {
 		if err != nil {
 			return fmt.Errorf("resolve JWT utility: %w", err)
 		}
-		target.JWTUtil = jwtUtil
-		if redis, err := ResolveE[*RedisAdapter](factory); err == nil {
-			target.Redis = redis
-		} else if !errors.Is(err, ErrBeanMissing) {
-			return fmt.Errorf("resolve optional Redis token revocation store: %w", err)
+		if target.JWTUtil == nil {
+			target.JWTUtil = jwtUtil
+		}
+		if target.Redis == nil {
+			if redis, err := ResolveE[*RedisAdapter](factory); err == nil {
+				target.Redis = redis
+			} else if !errors.Is(err, ErrBeanMissing) {
+				return fmt.Errorf("resolve optional Redis token revocation store: %w", err)
+			}
 		}
 		return nil
 	})
@@ -92,15 +121,20 @@ func init() {
 		if !ok {
 			return fmt.Errorf("strict static injector received %T, want *bear.AuthFairing", obj)
 		}
+		hasExplicitJWTUtil := target.JWTUtil != nil
 		jwtUtil, err := ResolveE[*JWTUtil](factory)
 		if err != nil {
 			return fmt.Errorf("resolve JWT utility: %w", err)
 		}
-		target.JWTUtil = jwtUtil
-		if manager, err := ResolveE[*AuthTokenManager](factory); err == nil {
-			target.TokenManager = manager
-		} else if !errors.Is(err, ErrBeanMissing) {
-			return fmt.Errorf("resolve optional authentication token manager: %w", err)
+		if target.JWTUtil == nil {
+			target.JWTUtil = jwtUtil
+		}
+		if target.TokenManager == nil && !hasExplicitJWTUtil {
+			if manager, err := ResolveE[*AuthTokenManager](factory); err == nil {
+				target.TokenManager = manager
+			} else if !errors.Is(err, ErrBeanMissing) {
+				return fmt.Errorf("resolve optional authentication token manager: %w", err)
+			}
 		}
 		return nil
 	})

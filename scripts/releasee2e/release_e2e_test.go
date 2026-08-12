@@ -111,7 +111,7 @@ func TestReleaseCandidateApplications(t *testing.T) {
 	repository := repositoryRoot(t)
 	bearCLI := buildFixture(t, repository, "./cmd/bear")
 
-	t.Run("legacy-v0.9-style", func(t *testing.T) {
+	t.Run("legacy-api-style-on-head", func(t *testing.T) {
 		directory := createLegacyFixture(t, repository)
 		binary := buildFixture(t, directory, ".")
 		exerciseApplication(t, binary, directory)
@@ -124,6 +124,33 @@ func TestReleaseCandidateApplications(t *testing.T) {
 	})
 }
 
+func TestDevelopmentGeneratorRejectsPublishedVersionWithoutReplacingHead(t *testing.T) {
+	repository := repositoryRoot(t)
+	bearCLI := buildFixture(t, repository, "./cmd/bear")
+	directory := filepath.Join(t.TempDir(), "must-not-exist")
+	command := exec.Command(
+		bearCLI,
+		"new", "published-version-check",
+		"--module", "example.com/published-version-check",
+		"--directory", directory,
+		"--framework-version", "v0.9.3",
+	)
+	command.Dir = filepath.Dir(directory)
+	command.Env = commandEnvironment(nil)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("development generator accepted v0.9.3 and could be replaced with HEAD:\n%s", output)
+	}
+	for _, want := range []string{"development generator", "v0.9.3", "unreleased HEAD"} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("version rejection missing %q:\n%s", want, output)
+		}
+	}
+	if _, statErr := os.Stat(directory); !os.IsNotExist(statErr) {
+		t.Fatalf("rejected version published destination: %v", statErr)
+	}
+}
+
 func createLegacyFixture(t *testing.T, repository string) string {
 	t.Helper()
 	directory := t.TempDir()
@@ -131,7 +158,7 @@ func createLegacyFixture(t *testing.T, repository string) string {
 
 go 1.25.0
 
-require github.com/duiniwukenaihe/gin-bear v0.9.2
+require github.com/duiniwukenaihe/gin-bear v0.0.0
 
 replace github.com/duiniwukenaihe/gin-bear => %s
 `, repository))
@@ -147,13 +174,13 @@ func createGeneratedFixture(t *testing.T, repository, bearCLI string) string {
 		"new", "generated-release-check",
 		"--module", "example.com/generated-release-check",
 		"--directory", directory,
-		"--framework-version", "v0.9.2",
+		"--framework-version", "dev",
+		"--framework-replace", repository,
 	)
 	appPath := filepath.Join(directory, "internal", "app", "app.go")
 	generatedApp := readFile(t, appPath)
 	writeFile(t, filepath.Join(directory, "internal", "app", "routes.go"), generatedFixtureRoutesSource)
 	writeFile(t, filepath.Join(directory, "application.yaml"), generatedFixtureConfig)
-	runGo(t, directory, "mod", "edit", "-replace", "github.com/duiniwukenaihe/gin-bear="+repository)
 	runGo(t, directory, "mod", "tidy")
 	generateFixtureResource(t, directory, bearCLI)
 	runGo(t, directory, "mod", "tidy")

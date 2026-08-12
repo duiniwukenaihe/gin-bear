@@ -75,13 +75,17 @@ manually attach `AuthFairing` remain supported, and production secret validation
 still applies to that path. The setting does not authenticate gRPC; gRPC policy
 belongs in unary and stream interceptors.
 
+`auth.storage_type` accepts `jwt` or `redis`. The legacy `file` value maps to
+stateless JWT validation with a startup warning.
+
 `OpenAPIConfig.Apps`, `TimeWindow`, `ReplayCheck`, and `HeaderPrefix` remain
 accepted for v0 configuration and source compatibility but are deprecated.
 They do not implement request signing or authentication.
 
-Development builds of `cmd/bear` do not guess a framework version. Pass
-`--framework-version` to `bear new`; release binaries receive their matching
-version through build metadata.
+Development builds of `cmd/bear` do not guess a framework version. Use
+`--framework-version dev --framework-replace /absolute/path/to/gin-bear` with
+`bear new`; release binaries receive their matching version through build
+metadata and reject requests for another framework version.
 
 ## v0.9.2 Additive Behavior
 

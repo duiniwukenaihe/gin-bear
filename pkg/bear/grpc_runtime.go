@@ -154,7 +154,7 @@ func grpcUnaryObservabilityInterceptor(logger *slog.Logger) grpc.UnaryServerInte
 				logGRPCRequest(logger, ctx, info.FullMethod, codes.Internal, time.Since(start))
 				panic(recovered)
 			}
-			logGRPCRequest(logger, ctx, info.FullMethod, status.Code(err), time.Since(start))
+			logGRPCRequest(logger, ctx, info.FullMethod, grpcHandlerStatusCode(err), time.Since(start))
 		}()
 		return handler(ctx, request)
 	}
@@ -169,7 +169,7 @@ func grpcStreamObservabilityInterceptor(logger *slog.Logger) grpc.StreamServerIn
 				logGRPCRequest(logger, ctx, info.FullMethod, codes.Internal, time.Since(start))
 				panic(recovered)
 			}
-			logGRPCRequest(logger, ctx, info.FullMethod, status.Code(err), time.Since(start))
+			logGRPCRequest(logger, ctx, info.FullMethod, grpcHandlerStatusCode(err), time.Since(start))
 		}()
 		return handler(service, &grpcContextServerStream{ServerStream: stream, ctx: ctx})
 	}
@@ -200,6 +200,13 @@ func grpcRequestContext(ctx context.Context) context.Context {
 	}
 	_ = grpc.SetHeader(ctx, metadata.Pairs("x-request-id", requestID))
 	return context.WithValue(ctx, RequestIDKey, requestID)
+}
+
+func grpcHandlerStatusCode(err error) codes.Code {
+	if grpcStatus, ok := status.FromError(err); ok {
+		return grpcStatus.Code()
+	}
+	return status.FromContextError(err).Code()
 }
 
 func logGRPCRequest(logger *slog.Logger, ctx context.Context, method string, code codes.Code, duration time.Duration) {
