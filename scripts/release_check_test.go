@@ -1576,7 +1576,10 @@ func releaseTestEnvironment(overrides ...string) []string {
 		"RC_RELEASE_TAG":            {},
 		"RC_REMOTE_HYGIENE":         {},
 		"RC_SHUFFLE_TIMEOUT":        {},
+		"RC_TRUSTED_KEYRING":        {},
+		"RC_VERIFY_TAG_SIGNATURE":   {},
 		"RELEASE_CHECK_METADATA":    {},
+		"SHUFFLE_SEED":              {},
 	}
 	for _, override := range overrides {
 		name, _, found := strings.Cut(override, "=")
@@ -1596,6 +1599,35 @@ func releaseTestEnvironment(overrides ...string) []string {
 		environment = append(environment, entry)
 	}
 	return append(environment, overrides...)
+}
+
+func TestReleaseTestEnvironmentIsolatesOuterReleaseContract(t *testing.T) {
+	for name, value := range map[string]string{
+		"RC_EXPECTED_VERSION":     "v9.9.9",
+		"RC_RELEASE_TAG":          "v9.9.9",
+		"RC_TRUSTED_KEYRING":      "/tmp/outer-keyring",
+		"RC_VERIFY_TAG_SIGNATURE": "true",
+		"SHUFFLE_SEED":            "outer-seed",
+	} {
+		t.Setenv(name, value)
+	}
+
+	environment := releaseTestEnvironment("RC_RELEASE_TAG=v0.9.2")
+	values := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			values[name] = value
+		}
+	}
+	if got := values["RC_RELEASE_TAG"]; got != "v0.9.2" {
+		t.Fatalf("RC_RELEASE_TAG = %q, want explicit test override", got)
+	}
+	for _, name := range []string{"RC_EXPECTED_VERSION", "RC_TRUSTED_KEYRING", "RC_VERIFY_TAG_SIGNATURE", "SHUFFLE_SEED"} {
+		if value, found := values[name]; found {
+			t.Fatalf("%s leaked from outer environment with value %q", name, value)
+		}
+	}
 }
 
 func fileSHA256(t *testing.T, path string) string {
