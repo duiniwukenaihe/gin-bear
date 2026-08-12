@@ -627,4 +627,5 @@ Run the project verification gate locally before cutting a release:
 GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
 ```
 
-This is the same pinned verification command used by the release workflow.
+This is the pinned framework verification command used by `main` CI. The tag
+release workflow only builds and publishes artifacts from the reviewed commit.

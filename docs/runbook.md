@@ -47,23 +47,19 @@
    Inspect `dist/checksums.txt`, the CLI archives, and `dist/artifacts.json`.
    Remove `dist/` after the check; snapshot artifacts are not committed.
 
-The release workflow runs only for `v*` tags. It runs `make verify-rc` before
-GoReleaser with Go 1.25.12, uploads the `rc-verification` logs even on failure,
-and grants `contents: write` only to the release job. CI resolves
-`RC_BASE_REF=origin/main` and requires it to be an ancestor of the candidate.
-The pushed release tag must be annotated, match the dynamic
-`RC_EXPECTED_VERSION` supplied from `github.ref_name`, and target the exact
-candidate HEAD. This permits later RC and final tags without editing a pinned
-workflow version. GoReleaser injects its normalized dynamic `.Version` into
+The release workflow runs only for `v*` tags and has one responsibility:
+GoReleaser builds and publishes the CLI archives, source archive, checksums,
+changelog, and release metadata. Framework quality checks run before tagging
+and in the `main` CI workflow; the tag workflow does not repeat them. The
+release job grants `contents: write` only for publishing. The pushed release
+tag must be annotated and target the exact reviewed `main` commit. GoReleaser
+injects its normalized dynamic `.Version` into
 `pkg/bear.Version`; the CLI derives the scaffold dependency from that value and
 restores the leading `v`, while local `dev` builds retain the development
 default.
 
-GitHub-hosted CI has no project trust keyring, so it records
-`signature_policy=false` and
-`tag_signature_verification=explicitly-exempted`; this is an explicit release
-workflow exemption, not signature verification. A local release operator with
-an isolated trusted `GNUPGHOME` must run:
+The full `verify-rc` command remains available for an explicit pre-tag audit.
+A local release operator with an isolated trusted `GNUPGHOME` can run:
 
 ```bash
 RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.9.2 RC_EXPECTED_VERSION=v0.9.2 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
@@ -76,17 +72,7 @@ both `VALIDSIG` and `TRUST_FULLY` or `TRUST_ULTIMATE`. `false` is recorded as an
 explicit exemption. Supplying the signature variable without a release tag is
 invalid.
 
-The workflow installs pinned `staticcheck`, `govulncheck`, and `apidiff`
-binaries before the gate. All three builds fix Go 1.25.12, Linux/amd64,
-`CGO_ENABLED=0`, trim paths, and remove the Go build ID. The workflow verifies
-the independently reproduced SHA-256 values `968c4cdeff3a18eef976ecdbcd83dbea35ca3c12c58b87c9f4684e1ea6adfc75`
-for staticcheck, `15ad0c7081d061d06f83a39b1783318d90659f3404d83a75bcdda51eda3ef75f`
-for govulncheck, and `84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f`
-for apidiff. It explicitly sets `RC_ALLOW_NETWORK=1`, recorded as
-`network_mode=online-opt-in`, because govulncheck refreshes vulnerability data.
-The API gate still receives the controlled `APIDIFF_BIN` and leaves
-`API_COMPAT_ALLOW_NETWORK=0`.
-The ordinary CI quality job uses the same pinned versions under
+The ordinary CI quality job installs pinned versions under
 `${RUNNER_TEMP}/bin` and passes all three absolute binary paths to `make verify`,
 so the gate does not depend on tools preinstalled by the runner image.
 Offline verification rejects remote vulnerability database URLs. It accepts

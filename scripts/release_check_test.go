@@ -334,24 +334,13 @@ func TestAllCICheckoutAndSetupGoActionsUseReleasePins(t *testing.T) {
 	}
 }
 
-func TestReleaseExpectedVersionComesFromPushedTag(t *testing.T) {
+func TestReleaseVersionComesFromPushedTag(t *testing.T) {
 	workflow := readTestFile(t, "../.github/workflows/release.yml")
 	releaseConfig := readTestFile(t, "../.goreleaser.yml")
-	if !strings.Contains(workflow, "RC_EXPECTED_VERSION: ${{ github.ref_name }}") {
-		t.Fatalf("release workflow does not pass the pushed tag as the expected module version:\n%s", workflow)
-	}
-	if strings.Contains(workflow, "RC_EXPECTED_VERSION: v0.9.2") {
-		t.Fatalf("release workflow pins every v* tag to rc.1:\n%s", workflow)
-	}
-	if !strings.Contains(workflow, `CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/exp/cmd/apidiff@`) ||
-		!strings.Contains(workflow, "APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff") ||
-		!strings.Contains(workflow, "APIDIFF_EXPECTED_SHA256: 84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f") ||
-		!strings.Contains(workflow, "STATICCHECK_EXPECTED_SHA256: 968c4cdeff3a18eef976ecdbcd83dbea35ca3c12c58b87c9f4684e1ea6adfc75") ||
-		!strings.Contains(workflow, "GOVULNCHECK_EXPECTED_SHA256: 15ad0c7081d061d06f83a39b1783318d90659f3404d83a75bcdda51eda3ef75f") {
-		t.Fatalf("release workflow does not prepare and pass a pinned local apidiff binary:\n%s", workflow)
-	}
-	if strings.Contains(workflow, "API_COMPAT_ALLOW_NETWORK:") {
-		t.Fatalf("release verification gate enables API network fallback:\n%s", workflow)
+	for _, forbidden := range []string{"RC_EXPECTED_VERSION", "RC_RELEASE_TAG", "make verify-rc", "staticcheck", "govulncheck", "apidiff"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("release workflow must publish tag artifacts without quality gate %q:\n%s", forbidden, workflow)
+		}
 	}
 	if !strings.Contains(releaseConfig, "pkg/bear.Version={{ .Version }}") || !strings.Contains(readTestFile(t, "../internal/cli/new.go"), "bear.Version") {
 		t.Fatalf("released CLI does not derive its scaffold default from the GoReleaser-injected version:\n%s", releaseConfig)
@@ -509,9 +498,9 @@ func TestRCGateAndReleaseWorkflowAreAuditable(t *testing.T) {
 		t.Fatalf("ordinary verify unexpectedly runs the full RC gate:\n%s", makefile)
 	}
 	release := readTestFile(t, "../.github/workflows/release.yml")
-	for _, want := range []string{"run: make verify-rc", "actions/upload-artifact", "rc-verification"} {
-		if !strings.Contains(release, want) {
-			t.Fatalf("release workflow missing %q:\n%s", want, release)
+	for _, unwanted := range []string{"run: make verify-rc", "actions/upload-artifact", "rc-verification"} {
+		if strings.Contains(release, unwanted) {
+			t.Fatalf("release workflow must not duplicate main CI through %q:\n%s", unwanted, release)
 		}
 	}
 }
