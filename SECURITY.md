@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-`v0.9.2` is the current supported release. Users upgrading from `v0.9.1`
+`v0.9.3` is the current supported release. Users upgrading from `v0.9.1`
 should follow the
 [v0.9.1 to v0.9.2 migration guide](docs/migration-v0.9.1-to-v0.9.2.md).
 

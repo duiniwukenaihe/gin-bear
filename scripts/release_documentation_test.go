@@ -93,8 +93,8 @@ func TestReleaseVersionReferencesUseCurrentV09Release(t *testing.T) {
 		if strings.Contains(text, "v0.10.0-rc.1") {
 			t.Errorf("%s still names stale unpublished candidate v0.10.0-rc.1", path)
 		}
-		if !strings.Contains(text, "v0.9.2") {
-			t.Errorf("%s does not name current release v0.9.2", path)
+		if !strings.Contains(text, "v0.9.3") {
+			t.Errorf("%s does not name current release v0.9.3", path)
 		}
 	}
 
@@ -190,7 +190,7 @@ func TestReadmeUsesTestedExamplesAndCanonicalCLInstallPath(t *testing.T) {
 		"examples/basic/main.go",
 		"examples/auth/main.go",
 		"examples/migration/main.go",
-		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.2",
+		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3",
 		"go test ./...",
 	} {
 		if !strings.Contains(text, phrase) {
@@ -204,14 +204,14 @@ func TestReleaseDocumentationNamesPublishedVersion(t *testing.T) {
 	security := readDocumentationFile(t, "../SECURITY.md")
 	normalizedReadme := strings.ToLower(strings.Join(strings.Fields(readme), " "))
 	for _, phrase := range []string{
-		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.2",
+		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3",
 		"current release",
 	} {
 		if !strings.Contains(normalizedReadme, strings.ToLower(phrase)) {
 			t.Fatalf("README missing publication-state guidance %q", phrase)
 		}
 	}
-	for _, phrase := range []string{"v0.9.2", "current supported release"} {
+	for _, phrase := range []string{"v0.9.3", "current supported release"} {
 		if !strings.Contains(strings.ToLower(security), strings.ToLower(phrase)) {
 			t.Fatalf("SECURITY.md missing publication-state guidance %q", phrase)
 		}
@@ -225,15 +225,15 @@ func TestReleaseDocumentationNamesPublishedVersion(t *testing.T) {
 	}
 }
 
-func TestChangelogSeparatesUnreleasedWorkFromPublishedRelease(t *testing.T) {
+func TestChangelogSeparatesFutureWorkFromPublishedRelease(t *testing.T) {
 	changelog := readDocumentationFile(t, "../CHANGELOG.md")
-	for _, heading := range []string{"## [Unreleased]", "## [v0.9.2] - 2026-08-12"} {
+	for _, heading := range []string{"## [Unreleased]", "## [v0.9.3] - 2026-08-12", "## [v0.9.2] - 2026-08-12"} {
 		if !strings.Contains(changelog, heading) {
 			t.Fatalf("CHANGELOG.md missing heading %q", heading)
 		}
 	}
-	if strings.Contains(changelog, "## [v0.9.3]") {
-		t.Fatal("CHANGELOG.md must not reserve a version before release readiness is confirmed")
+	if strings.Index(changelog, "## [v0.9.3]") > strings.Index(changelog, "## [v0.9.2]") {
+		t.Fatal("CHANGELOG.md release headings are not newest-first")
 	}
 }
 
@@ -300,7 +300,7 @@ func TestRunbookUsesPinnedVerificationAndSourceOnlyRelease(t *testing.T) {
 		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify",
 		"SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc",
 		"GitHub-generated source archives",
-		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@<version>",
+		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3",
 	} {
 		if !strings.Contains(runbook, phrase) {
 			t.Fatalf("runbook missing %q", phrase)

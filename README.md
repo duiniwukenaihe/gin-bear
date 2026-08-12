@@ -8,11 +8,11 @@ configuration, authentication, health, metrics, tracing, and OpenAPI support.
 Install the current release from its canonical package path:
 
 ```bash
-go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.2
+go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3
 bear new my-service
 ```
 
-`v0.9.2` is the current release. GitHub publishes source archives for each
+`v0.9.3` is the current release. GitHub publishes source archives for each
 immutable release tag; the Go toolchain installs the CLI directly from the
 module version.
 
@@ -20,7 +20,7 @@ When running an unversioned development build of the CLI, select the framework
 dependency explicitly so generated code cannot silently target another version:
 
 ```bash
-bear new my-service --framework-version v0.9.2
+bear new my-service --framework-version v0.9.3
 ```
 
 ## Runnable Examples

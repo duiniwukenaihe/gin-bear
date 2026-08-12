@@ -4,6 +4,8 @@ All notable changes to gin-bear are documented in this file.
 
 ## [Unreleased]
 
+## [v0.9.3] - 2026-08-12
+
 ### Fixed
 
 - Fairing recovery now treats `http.ErrAbortHandler`, broken pipes, and reset
@@ -22,8 +24,9 @@ All notable changes to gin-bear are documented in this file.
   Platform-specific CLI archives and GoReleaser are no longer part of the
   release surface; install the CLI with `go install`.
 - The CLI reads its module version from Go build information, so installing a
-  tagged CLI generates projects pinned to that same version without custom
-  linker flags.
+  tagged CLI such as
+  `go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3` generates
+  projects pinned to that same version without custom linker flags.
 - CI failures now retain concise command diagnostics, and releases explicitly
   trigger Go Module indexing after publication.
 

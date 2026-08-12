@@ -35,7 +35,7 @@
     available through the Go toolchain:
 
    ```bash
-   GOBIN=$(mktemp -d) go install github.com/duiniwukenaihe/gin-bear/cmd/bear@<version>
+   GOBIN=$(mktemp -d) go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3
    ```
 
 The release workflow runs only for `v*` tags and has one responsibility:
@@ -54,7 +54,7 @@ The full `verify-rc` command remains available for an explicit pre-tag audit.
 A local release operator with an isolated trusted `GNUPGHOME` can run:
 
 ```bash
-RC_BASE_REF=origin/main RC_RELEASE_TAG=<version> RC_EXPECTED_VERSION=<version> RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
+RC_BASE_REF=origin/main RC_RELEASE_TAG=v0.9.3 RC_EXPECTED_VERSION=v0.9.3 RC_VERIFY_TAG_SIGNATURE=true RC_TRUSTED_KEYRING=/opt/gin-bear/release-gnupg SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc
 ```
 
 When `RC_RELEASE_TAG` is non-empty, `RC_VERIFY_TAG_SIGNATURE` is mandatory and
