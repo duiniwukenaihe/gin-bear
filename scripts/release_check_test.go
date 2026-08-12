@@ -857,12 +857,12 @@ func TestVerifyRCHygieneRejectsUnexpectedLocalBranch(t *testing.T) {
 	}
 }
 
-func TestVerifyRCHygieneAcceptsV092CandidateBranch(t *testing.T) {
+func TestVerifyRCHygieneAcceptsV09DevelopmentBranch(t *testing.T) {
 	repository, artifact, state := fakeRCRepository(t)
 	branches := "main,codex/production-baseline,codex/v09x-framework-hardening"
 	output, err := runFakeRC(repository, artifact, state, "RC_TEST_LOCAL_BRANCHES="+branches)
 	if err != nil {
-		t.Fatalf("verify-rc.sh rejected the v0.9.2 candidate branches: %v\n%s", err, output)
+		t.Fatalf("verify-rc.sh rejected the v0.9.x development branches: %v\n%s", err, output)
 	}
 }
 

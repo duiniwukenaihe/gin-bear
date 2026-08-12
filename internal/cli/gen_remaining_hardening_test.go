@@ -370,7 +370,7 @@ func newManagedGenerationProject(t *testing.T) string {
 	t.Helper()
 	project := t.TempDir()
 	writeGeneratedTestGoMod(t, project, "example.com/managed")
-	if err := scaffold.WriteManifest(project, scaffold.NewManifest("example.com/managed", "v0.9.3")); err != nil {
+	if err := scaffold.WriteManifest(project, scaffold.NewManifest("example.com/managed", "v0.9.2")); err != nil {
 		t.Fatal(err)
 	}
 	registryPath := filepath.Join(project, filepath.FromSlash(scaffold.ModulesPath))

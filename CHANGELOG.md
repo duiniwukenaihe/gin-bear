@@ -2,7 +2,7 @@
 
 All notable changes to gin-bear are documented in this file.
 
-## [v0.9.3] - Unreleased
+## [v0.9.2] - 2026-08-12
 
 ### Added
 
@@ -51,11 +51,10 @@ All notable changes to gin-bear are documented in this file.
   escape hatches; direct mutation and concurrent application registration are
   unsupported after startup begins. Removing those escape hatches requires a
   v0.10 API change.
-- This candidate has not been pushed, tagged, or published.
+- The formal release gate runs against the exact clean annotated tag and is
+  repeated by release CI before publishing archives and checksums.
 
-## [v0.9.2] - Unreleased
-
-### Added
+### Runtime And Operations
 
 - Production configuration loading with strict decoding, environment overrides,
   and validation errors returned by `LoadConfig`.
@@ -67,7 +66,7 @@ All notable changes to gin-bear are documented in this file.
   or envelope responses through `framework.response_mode`, and
   error-returning `IgniteE` and `Serve` startup APIs.
 
-### Changed
+### Security And Compatibility
 
 - Production defaults now require explicit trusted proxies, request body
   limits, and safe configuration.
@@ -93,7 +92,7 @@ All notable changes to gin-bear are documented in this file.
 
 ### Upgrade Notes
 
-Read [the v0.9.2 strict migration guide](docs/migration-v0.9-to-v0.10.md)
+Read [the v0.9.1 to v0.9.2 migration guide](docs/migration-v0.9.1-to-v0.9.2.md)
 before deploying. It separates compatibility defaults, strict opt-in behavior,
 forced security changes, and rollback steps.
 
@@ -119,9 +118,8 @@ forced security changes, and rollback steps.
   used a dirty worktree and is retained only as development-time validation;
   it is not evidence for the current commit. Formal release-candidate evidence
   requires a complete `make verify-rc` run from the clean, committed fixes.
-- The candidate awaits human review. It has not been pushed, tagged, or
-  published; the documentation and focused tests are not final release-gate
-  evidence.
+- These historical development diagnostics are not formal release-gate
+  evidence for `v0.9.2`.
 
 ## [0.9.1]
 

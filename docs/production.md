@@ -1,8 +1,7 @@
 # Production Guide
 
-This guide describes the unpublished `v0.9.3` candidate, including the
-`v0.9.2` strict-runtime migration checkpoint. Neither candidate is a published
-release.
+This guide describes the `v0.9.2` release and its strict-runtime migration
+path from `v0.9.1`.
 
 ## Runtime
 

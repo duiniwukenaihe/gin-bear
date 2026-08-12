@@ -11,7 +11,7 @@ import (
 
 func TestManifestRoundTripSortsGeneratedAPIs(t *testing.T) {
 	root := t.TempDir()
-	manifest := NewManifest("example.com/service", "v0.9.3")
+	manifest := NewManifest("example.com/service", "v0.9.2")
 	manifest.APIs = []GeneratedAPI{
 		{Name: "Users", Package: "users", Path: "internal/users", ModuleType: "users.Module"},
 		{Name: "Accounts", Package: "accounts", Path: "internal/accounts", ModuleType: "accounts.Module"},
@@ -34,7 +34,7 @@ func TestGenerateWritesMinimalManifestAndModuleRegistry(t *testing.T) {
 		Name:             "service",
 		Module:           "example.com/service",
 		Directory:        root,
-		FrameworkVersion: "v0.9.3",
+		FrameworkVersion: "v0.9.2",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestGenerateWritesMinimalManifestAndModuleRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Module != "example.com/service" || manifest.FrameworkVersion != "v0.9.3" || len(manifest.APIs) != 0 {
+	if manifest.Module != "example.com/service" || manifest.FrameworkVersion != "v0.9.2" || len(manifest.APIs) != 0 {
 		t.Fatalf("generated manifest = %#v", manifest)
 	}
 	registry, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(ModulesPath)))
@@ -87,7 +87,7 @@ func TestManifestRejectsUnsafeOrAmbiguousRecords(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manifest := NewManifest("example.com/service", "v0.9.3")
+			manifest := NewManifest("example.com/service", "v0.9.2")
 			tt.mutate(&manifest)
 			if err := manifest.Validate(); err == nil {
 				t.Fatal("Validate() succeeded")
@@ -98,7 +98,7 @@ func TestManifestRejectsUnsafeOrAmbiguousRecords(t *testing.T) {
 
 func TestReadManifestRejectsTrailingJSON(t *testing.T) {
 	root := t.TempDir()
-	manifest := NewManifest("example.com/service", "v0.9.3")
+	manifest := NewManifest("example.com/service", "v0.9.2")
 	contents, err := MarshalManifest(manifest)
 	if err != nil {
 		t.Fatal(err)

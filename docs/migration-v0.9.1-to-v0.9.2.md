@@ -1,10 +1,9 @@
-# Migrating v0.9 Applications To v0.9.2
+# Migrating v0.9.1 Applications To v0.9.2
 
-The established filename is retained for existing links, but this revision
-documents the unpublished `v0.9.2` candidate. It has not been pushed, tagged,
-or published. v0.9.2 strengthens production defaults, adds opt-in runtime
-contracts, and changes several operational boundaries. Test the configuration
-and deployment in staging before switching traffic. The examples in
+This guide documents the changes published in `v0.9.2`. They strengthen
+production defaults, add opt-in runtime contracts, and change several
+operational boundaries from `v0.9.1`. Test the configuration and deployment in
+staging before switching traffic. The examples in
 `examples/migration`, `examples/basic`, and `examples/auth` are compiled by
 `go test ./...`.
 
@@ -184,8 +183,8 @@ not provide value-equality semantics.
    JWT secret.
 4. Decide whether metrics should be enabled and protect the metrics endpoint.
 5. Update logout flows to detect `ErrTokenRevocationUnavailable`.
-6. Only if the application used an early unpublished v0.9.2 candidate, migrate
-   direct collection assignments to the new setter/getter APIs.
+6. Migrate direct collection assignments to the new setter/getter APIs when
+   adopting the new configuration fields.
 7. Follow the strict migration above, including current-container Casbin
    injection and explicit response-mode client testing.
 8. Run `GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify` and deploy

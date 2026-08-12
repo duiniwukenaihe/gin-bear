@@ -70,7 +70,7 @@ Development builds of `cmd/bear` do not guess a framework version. Pass
 `--framework-version` to `bear new`; release binaries receive their matching
 version through build metadata.
 
-## v0.9.3 Additive Behavior
+## v0.9.2 Additive Behavior
 
 - `Authorizer` and `PermissionFairing` add resource/action/scope decisions
   without changing or replacing the existing Casbin APIs.

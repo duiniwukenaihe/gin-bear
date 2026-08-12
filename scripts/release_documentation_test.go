@@ -7,7 +7,7 @@ import (
 )
 
 func TestReleaseDocumentationNamesEveryCompatibilityChange(t *testing.T) {
-	text := readDocumentationFile(t, "../docs/migration-v0.9-to-v0.10.md")
+	text := readDocumentationFile(t, "../docs/migration-v0.9.1-to-v0.9.2.md")
 	for _, phrase := range []string{
 		"v0.9.2",
 		"strict production configuration",
@@ -80,7 +80,7 @@ func TestReleaseDocumentationCoversV092RuntimeContracts(t *testing.T) {
 	}
 }
 
-func TestReleaseVersionReferencesUseCurrentV09Candidate(t *testing.T) {
+func TestReleaseVersionReferencesUseCurrentV09Release(t *testing.T) {
 	paths := []string{
 		"../README.md",
 		"../CHANGELOG.md",
@@ -94,8 +94,8 @@ func TestReleaseVersionReferencesUseCurrentV09Candidate(t *testing.T) {
 		if strings.Contains(text, "v0.10.0-rc.1") {
 			t.Errorf("%s still names stale unpublished candidate v0.10.0-rc.1", path)
 		}
-		if !strings.Contains(text, "v0.9.3") {
-			t.Errorf("%s does not name current unpublished candidate v0.9.3", path)
+		if !strings.Contains(text, "v0.9.2") {
+			t.Errorf("%s does not name current release v0.9.2", path)
 		}
 	}
 
@@ -112,13 +112,13 @@ func TestReleaseVersionReferencesUseCurrentV09Candidate(t *testing.T) {
 	}
 
 	cli := readDocumentationFile(t, "../internal/cli/new.go")
-	if strings.Contains(cli, "v0.9.2") || strings.Contains(cli, "v0.9.3") || !strings.Contains(cli, "--framework-version") {
+	if strings.Contains(cli, "v0.9.2") || !strings.Contains(cli, "--framework-version") {
 		t.Fatal("development CLI must require an explicit framework version without hard-coding a candidate")
 	}
 }
 
 func TestMigrationMetricsGuidanceMatchesConfigurationAndCompatibilityBehavior(t *testing.T) {
-	text := readDocumentationFile(t, "../docs/migration-v0.9-to-v0.10.md")
+	text := readDocumentationFile(t, "../docs/migration-v0.9.1-to-v0.9.2.md")
 	normalized := strings.Join(strings.Fields(text), " ")
 	for _, phrase := range []string{
 		"Newly generated `application-prod.yaml.example` files set `metrics.enabled: false`",
@@ -137,7 +137,7 @@ func TestMigrationMetricsGuidanceMatchesConfigurationAndCompatibilityBehavior(t 
 }
 
 func TestMigrationDocumentsComparableCollectionFieldSourceChange(t *testing.T) {
-	text := strings.Join(strings.Fields(readDocumentationFile(t, "../docs/migration-v0.9-to-v0.10.md")), " ")
+	text := strings.Join(strings.Fields(readDocumentationFile(t, "../docs/migration-v0.9.1-to-v0.9.2.md")), " ")
 	for _, phrase := range []string{
 		"`AuthConfig.PublicPaths`",
 		"`WebSocketConfig.AllowedOrigins`",
@@ -173,11 +173,11 @@ func TestProductionDocumentationSeparatesIgniteAndServeErrorStages(t *testing.T)
 	}
 }
 
-func TestV092CandidateBranchPolicyHasNoV010Residue(t *testing.T) {
+func TestV09DevelopmentBranchPolicyHasNoV010Residue(t *testing.T) {
 	for _, path := range []string{"verify-rc.sh", "release_check_test.go", "../docs/runbook.md"} {
 		text := readDocumentationFile(t, path)
 		if !strings.Contains(text, "codex/v09x-framework-hardening") {
-			t.Errorf("%s does not allow the current v0.9.2 candidate branch", path)
+			t.Errorf("%s does not allow the current v0.9.x development branch", path)
 		}
 		if strings.Contains(text, "codex/production-framework-v010") {
 			t.Errorf("%s still names the superseded v010 candidate branch", path)
@@ -191,7 +191,7 @@ func TestReadmeUsesTestedExamplesAndCanonicalCLInstallPath(t *testing.T) {
 		"examples/basic/main.go",
 		"examples/auth/main.go",
 		"examples/migration/main.go",
-		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.1",
+		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.2",
 		"go test ./...",
 	} {
 		if !strings.Contains(text, phrase) {
@@ -200,35 +200,40 @@ func TestReadmeUsesTestedExamplesAndCanonicalCLInstallPath(t *testing.T) {
 	}
 }
 
-func TestReleaseDocumentationSeparatesPublishedAndUpcomingVersions(t *testing.T) {
+func TestReleaseDocumentationNamesPublishedVersion(t *testing.T) {
 	readme := readDocumentationFile(t, "../README.md")
 	security := readDocumentationFile(t, "../SECURITY.md")
 	normalizedReadme := strings.ToLower(strings.Join(strings.Fields(readme), " "))
 	for _, phrase := range []string{
-		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.1",
-		"v0.9.3",
-		"after publication",
-		"not been pushed, tagged, or published",
+		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.2",
+		"current release",
 	} {
 		if !strings.Contains(normalizedReadme, strings.ToLower(phrase)) {
 			t.Fatalf("README missing publication-state guidance %q", phrase)
 		}
 	}
-	for _, phrase := range []string{"v0.9.1", "current", "v0.9.3", "upcoming", "unreleased"} {
+	for _, phrase := range []string{"v0.9.2", "current supported release"} {
 		if !strings.Contains(strings.ToLower(security), strings.ToLower(phrase)) {
 			t.Fatalf("SECURITY.md missing publication-state guidance %q", phrase)
 		}
 	}
+	for path, text := range map[string]string{"README.md": normalizedReadme, "SECURITY.md": strings.ToLower(security)} {
+		for _, stale := range []string{"upcoming", "unreleased candidate", "not been pushed, tagged, or published"} {
+			if strings.Contains(text, stale) {
+				t.Fatalf("%s still describes v0.9.2 as unpublished: %q", path, stale)
+			}
+		}
+	}
 }
 
-func TestReleaseChangelogKeepsCurrentCandidateUnreleased(t *testing.T) {
+func TestReleaseChangelogDatesPublishedRelease(t *testing.T) {
 	changelog := readDocumentationFile(t, "../CHANGELOG.md")
-	const expectedHeading = "## [v0.9.3] - Unreleased"
+	const expectedHeading = "## [v0.9.2] - 2026-08-12"
 	if !strings.Contains(changelog, expectedHeading) {
-		t.Fatalf("CHANGELOG.md missing unreleased candidate heading %q", expectedHeading)
+		t.Fatalf("CHANGELOG.md missing published release heading %q", expectedHeading)
 	}
-	if strings.Contains(changelog, "## [v0.9.3] - 2026-") {
-		t.Fatal("CHANGELOG.md must not claim the v0.9.3 candidate is dated or published")
+	if strings.Contains(changelog, "## [v0.9.2] - Unreleased") {
+		t.Fatal("CHANGELOG.md still describes v0.9.2 as unreleased")
 	}
 }
 
@@ -313,11 +318,11 @@ func TestRunbookUsesPinnedVerificationAndChecksReleaseChecksums(t *testing.T) {
 	}
 }
 
-func TestReleaseCandidateResultIsAuditableAndStillUnpublished(t *testing.T) {
+func TestReleaseResultIsAuditableAndPublished(t *testing.T) {
 	runbook := readDocumentationFile(t, "../docs/runbook.md")
 	normalizedRunbook := strings.Join(strings.Fields(runbook), " ")
 	for _, phrase := range []string{
-		"v0.9.3",
+		"v0.9.2",
 		"75.8%",
 		"critical coverage handler 82.9%",
 		"critical coverage binding 88.5%",
@@ -325,7 +330,7 @@ func TestReleaseCandidateResultIsAuditableAndStillUnpublished(t *testing.T) {
 		"scripts/check-api-compat.sh",
 		"SHUFFLE_SEED=20260711",
 		"BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e",
-		"not been pushed, tagged, or published",
+		"formal release gate",
 	} {
 		if !strings.Contains(normalizedRunbook, phrase) {
 			t.Fatalf("runbook missing RC audit evidence %q", phrase)
@@ -334,7 +339,7 @@ func TestReleaseCandidateResultIsAuditableAndStillUnpublished(t *testing.T) {
 
 	changelog := readDocumentationFile(t, "../CHANGELOG.md")
 	normalizedChangelog := strings.ToLower(strings.Join(strings.Fields(changelog), " "))
-	for _, phrase := range []string{"local release-candidate verification", "awaits human review", "not been pushed, tagged, or published"} {
+	for _, phrase := range []string{"v0.9.2", "2026-08-12", "formal release gate"} {
 		if !strings.Contains(normalizedChangelog, phrase) {
 			t.Fatalf("changelog missing RC publication state %q", phrase)
 		}
