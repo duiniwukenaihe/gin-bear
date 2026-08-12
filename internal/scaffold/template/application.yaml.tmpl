@@ -8,6 +8,9 @@ config:
   framework.strict: true
   framework.response_mode: "envelope"
 
+grpc:
+  enabled: false
+
 database:
   enabled: false
 
@@ -18,7 +21,8 @@ tracing:
   sample_rate: 1.0
 
 auth:
-  jwt_secret: "" # Required via BEAR_AUTH_JWT_SECRET in production.
+  enabled: false
+  jwt_secret: "" # Required via BEAR_AUTH_JWT_SECRET when auth.enabled=true in production.
   token_expire_hours: 24
   public_paths:
     - "/health"

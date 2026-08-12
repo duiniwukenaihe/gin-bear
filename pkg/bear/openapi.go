@@ -267,6 +267,38 @@ func openAPIHasAuthFairing(fairings []Fairing) bool {
 	return false
 }
 
+func (b *Bear) hasAuthFairing() bool {
+	if openAPIHasAuthFairing(openAPIGlobalFairings(b)) {
+		return true
+	}
+	if b == nil || b.exprData == nil {
+		return false
+	}
+	store, _ := b.exprData[openAPIRouteMetadataStoreKey].(*openAPIRouteMetadataStore)
+	if store == nil {
+		return false
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	for _, metadata := range store.routes {
+		if openAPIHasAuthFairing(metadata.fairings) {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Bear) validateProductionAuthPolicy() error {
+	if b == nil || b.runtime == nil || !isProductionMode(b.runtime.Config) || !b.hasAuthFairing() {
+		return nil
+	}
+	config := b.runtime.Config
+	if config == nil || config.Auth == nil || isWeakProductionJWTSecret(config.Auth.JWTSecret) {
+		return fmt.Errorf("weak jwt secret is not allowed in production when AuthFairing is registered")
+	}
+	return nil
+}
+
 func openAPIControllerInfo(metadata openAPIRouteMetadata, route RouteMetadata, openAPIPath string) (OpenAPIInfo, bool) {
 	provider := metadata.controller
 	if provider == nil || openAPIReflectValueIsNil(provider) {

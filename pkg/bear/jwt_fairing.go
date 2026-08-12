@@ -6,6 +6,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const automaticAuthFairingStateKey = "bear.automatic_auth_fairing"
+
 // AuthFairing JWT 鉴权拦截器
 type AuthFairing struct {
 	BaseFairing
@@ -18,6 +20,9 @@ func NewAuthFairing() *AuthFairing {
 }
 
 func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
+	if automatic, ok := ctx.Get(automaticAuthFairingStateKey); ok && automatic == f {
+		return nil
+	}
 	path := ctx.Request.URL.Path
 	if isPublicAuthPathForContext(ctx, path) {
 		return nil
@@ -58,6 +63,17 @@ func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 	}
 	ctx.Set("current_token", tokenStr) // Save token for logout
 	return nil
+}
+
+func authFairingMiddleware(fairing *AuthFairing) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if err := fairing.OnRequest(ctx); err != nil {
+			WriteError(ctx, err)
+			return
+		}
+		ctx.Set(automaticAuthFairingStateKey, fairing)
+		ctx.Next()
+	}
 }
 
 func isPublicAuthPathForContext(ctx *gin.Context, path string) bool {

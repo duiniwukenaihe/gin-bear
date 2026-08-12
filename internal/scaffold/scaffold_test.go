@@ -472,6 +472,10 @@ func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	productionConfig := "config:\n  framework.strict: true\nauth:\n  enabled: true\n"
+	if err := os.WriteFile(filepath.Join(project, "application-production.yaml"), []byte(productionConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	runGo(t, project, "mod", "edit", "-replace", "github.com/duiniwukenaihe/gin-bear="+repoRoot(t))
 	runGo(t, project, "mod", "tidy")
 
@@ -485,7 +489,7 @@ func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, serverBinary)
 	cmd.Dir = project

@@ -5,7 +5,62 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
+
+func TestProductionRequiresStrictRuntimeUnlessExplicitlyAllowed(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	t.Setenv("GIN_MODE", "")
+
+	config := NewSysConfig()
+	config.Server.Mode = gin.ReleaseMode
+	config.Auth = nil
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "framework.strict") {
+		t.Fatalf("Validate() error = %v, want strict runtime rejection", err)
+	}
+
+	config.SetAllowCompatibilityInProduction(true)
+	if err := config.Validate(); err != nil {
+		t.Fatalf("explicit production compatibility should validate: %v", err)
+	}
+}
+
+func TestDevelopmentAllowsCompatibilityRuntime(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	t.Setenv("GIN_MODE", "")
+
+	config := NewSysConfig()
+	config.Auth = nil
+	if err := config.Validate(); err != nil {
+		t.Fatalf("development compatibility should validate: %v", err)
+	}
+}
+
+func TestAllowCompatibilityInProductionMustBeBoolean(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	t.Setenv("GIN_MODE", "")
+
+	config := NewSysConfig()
+	config.SetFrameworkStrict(true)
+	config.Config[frameworkAllowCompatibilityProductionKey] = "true"
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), frameworkAllowCompatibilityProductionKey) {
+		t.Fatalf("Validate() error = %v, want boolean policy rejection", err)
+	}
+}
+
+func TestProductionCompatibilityOptOutEmitsHighRiskWarning(t *testing.T) {
+	t.Setenv("BEAR_ENV", "dev")
+	t.Setenv("GIN_MODE", "")
+
+	config := NewSysConfig()
+	config.Server.Mode = gin.ReleaseMode
+	config.SetAllowCompatibilityInProduction(true)
+	warnings := config.compatibilityWarnings()
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "fail-soft IoC") {
+		t.Fatalf("compatibility warnings = %#v, want production high-risk warning", warnings)
+	}
+}
 
 func TestLoadConfigRejectsInvalidEnvironmentOverrides(t *testing.T) {
 	tests := []struct {
@@ -83,7 +138,7 @@ func TestLoadConfigUsesNormalizedEnvironmentFilename(t *testing.T) {
 			t.Setenv("JWT_SECRET", "remaining-hardening-random-jwt-key-2026")
 			directory := t.TempDir()
 			t.Chdir(directory)
-			contents := []byte("server:\n  name: " + tt.serverName + "\n")
+			contents := []byte("server:\n  name: " + tt.serverName + "\nconfig:\n  framework.strict: true\n")
 			if err := os.WriteFile(filepath.Join(directory, tt.filename), contents, 0o600); err != nil {
 				t.Fatal(err)
 			}

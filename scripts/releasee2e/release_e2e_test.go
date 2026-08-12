@@ -533,6 +533,7 @@ func main() {
 	config := bear.NewSysConfig()
 	config.Server.Port = int32(port)
 	config.DB.Enabled = false
+	config.SetAllowCompatibilityInProduction(true)
 	config.Auth.JWTSecret = os.Getenv("JWT_SECRET")
 	publicPaths := []string{"/live", "/ready", "/success", "/validate"}
 	config.Auth.PublicPaths = &publicPaths
@@ -587,6 +588,12 @@ const generatedFixtureConfig = `server:
   port: 8080
   name: "generated-release-check"
   shutdown_timeout: "5s"
+
+config:
+  strict: true
+  framework.strict: true
+  framework.allow_compatibility_in_production: false
+  framework.response_mode: "envelope"
 
 database:
   enabled: false

@@ -299,6 +299,9 @@ func TestTask10ReviewLaunchesAndShutsDownHTTPAndGRPC(t *testing.T) {
 	}
 	config.Server.ShutdownTimeout = "2s"
 	app := Ignite(config)
+	if err := app.AddGRPCServiceE(&grpcServeService{}); err != nil {
+		t.Fatalf("register gRPC service: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

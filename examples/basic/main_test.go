@@ -8,7 +8,10 @@ import (
 )
 
 func TestBasicExampleBuildsMountedRoute(t *testing.T) {
-	app := newApp()
+	app, err := buildApp()
+	if err != nil {
+		t.Fatalf("buildApp() error = %v", err)
+	}
 	if err := app.ApplyAll(context.Background()); err != nil {
 		t.Fatalf("ApplyAll() error = %v", err)
 	}

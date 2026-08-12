@@ -15,7 +15,35 @@ server:
 config:
   strict: true
   framework.strict: true
+  framework.allow_compatibility_in_production: false
   framework.response_mode: "envelope"
+
+# gRPC remains disabled. Uncomment and set enabled: true only after registering
+# a business service with AddGRPCServiceE.
+# Plaintext is only for a same-host Nginx or Envoy that terminates TLS before
+# proxying to this loopback listener.
+# grpc:
+#   enabled: false
+#   host: "127.0.0.1"
+#   port: 9090
+#   transport_security: "plaintext"
+#   tls_cert_file: ""
+#   tls_key_file: ""
+#   client_ca_file: ""
+#   max_recv_message_bytes: 4194304
+#   max_send_message_bytes: 4194304
+#   max_concurrent_streams: 128
+#   keepalive_min_time: "5m"
+#   keepalive_time: "2h"
+#   keepalive_timeout: "20s"
+#   max_connection_idle: "15m"
+#   max_connection_age: "2h"
+#   max_connection_age_grace: "5m"
+#   health_enabled: true
+#   reflection_enabled: false
+# For process-terminated TLS, set transport_security: "tls" and provide real
+# tls_cert_file and tls_key_file paths through deployment-owned configuration.
+# For mutual TLS, set transport_security: "mtls" and also provide client_ca_file.
 
 cors:
   enabled: false
@@ -59,7 +87,8 @@ tracing:
   sample_rate: 1.0
 
 auth:
-  jwt_secret: "" # Required via BEAR_AUTH_JWT_SECRET.
+  enabled: false
+  jwt_secret: "" # Required via BEAR_AUTH_JWT_SECRET when auth.enabled=true.
   token_expire_hours: 24
   public_paths:
     - "/health"

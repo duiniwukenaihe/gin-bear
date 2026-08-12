@@ -82,6 +82,7 @@ websocket:
     - "https://example.com"
 
 auth:
+  enabled: true
   storage_type: "redis"
   jwt_secret: "" # Required via BEAR_AUTH_JWT_SECRET.
   jwt_issuer: "https://auth.example.com"

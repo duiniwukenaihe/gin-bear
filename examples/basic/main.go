@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -18,24 +17,39 @@ type greetingController struct{}
 func (greetingController) Name() string { return "greetingController" }
 
 func (greetingController) Build(app *bear.Bear) {
-	app.Handle("GET", "/hello", func() string { return "hello from gin-bear" })
+	if err := (greetingController{}).BuildE(app); err != nil {
+		panic(err)
+	}
 }
 
-func newApp() *bear.Bear {
+func (greetingController) BuildE(app *bear.Bear) error {
+	return app.HandleE("GET", "/hello", func() string { return "hello from gin-bear" })
+}
+
+func buildApp() (*bear.Bear, error) {
 	config := bear.NewSysConfig()
 	config.Server.Port = 8080
-	return bear.Ignite(config).
-		Mount("/api", greetingController{}).
-		EnableHealth()
+	config.SetFrameworkStrict(true)
+	app, err := bear.IgniteE(config)
+	if err != nil {
+		return nil, fmt.Errorf("initialize application: %w", err)
+	}
+	if err := app.MountE("/api", greetingController{}); err != nil {
+		return nil, fmt.Errorf("register greeting controller: %w", err)
+	}
+	if err := app.EnableHealthE(); err != nil {
+		return nil, fmt.Errorf("initialize health: %w", err)
+	}
+	return app, nil
 }
 
 func run(ctx context.Context) error {
-	app := newApp()
-	if err := app.ApplyAll(ctx); err != nil {
-		return fmt.Errorf("initialize application: %w", err)
+	app, err := buildApp()
+	if err != nil {
+		return err
 	}
-	if err := app.Launch(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("launch application: %w", err)
+	if err := app.Serve(ctx); err != nil {
+		return fmt.Errorf("serve application: %w", err)
 	}
 	return nil
 }

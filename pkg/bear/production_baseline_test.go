@@ -1089,6 +1089,7 @@ func TestIgniteConfiguresGinReleaseMode(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
+	cfg.SetFrameworkStrict(true)
 	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	Ignite(cfg)
@@ -1104,6 +1105,8 @@ func TestIgniteRejectsWeakJWTSecretInProduction(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
+	cfg.SetFrameworkStrict(true)
+	cfg.Auth.Enabled = true
 	cfg.Auth.JWTSecret = "bear-secret"
 
 	defer func() {
@@ -1125,6 +1128,8 @@ func TestIgniteRejectsScaffoldJWTPlaceholderInRelease(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
+	cfg.SetFrameworkStrict(true)
+	cfg.Auth.Enabled = true
 	cfg.Auth.JWTSecret = "replace-with-at-least-32-random-characters"
 
 	defer func() {
@@ -1147,6 +1152,7 @@ func TestIgniteUsesBearEnvProductionMode(t *testing.T) {
 	t.Setenv("GIN_MODE", "")
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
+	cfg.SetFrameworkStrict(true)
 	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 
 	Ignite(cfg)
@@ -1899,6 +1905,7 @@ func TestIgniteRejectsDisabledWebSocketOriginCheckInProduction(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
+	cfg.SetFrameworkStrict(true)
 	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 	cfg.WS.CheckOrigin = false
 
@@ -1923,6 +1930,7 @@ func TestProductionValidationChecksWebSocketOriginWhenAuthConfigIsNil(t *testing
 	cfg.Auth = nil
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
+	cfg.SetFrameworkStrict(true)
 	cfg.WS.CheckOrigin = false
 
 	defer func() {

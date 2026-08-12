@@ -231,6 +231,7 @@ func TestSysConfigValidateEnforcesProductionDBTLS(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")
 	cfg := NewSysConfig()
+	cfg.SetFrameworkStrict(true)
 	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 	cfg.DB.Enabled = true
 	cfg.DB.Type = "postgres"
@@ -259,6 +260,8 @@ database:
   enabled: true
   type: postgres
   dsn: postgres://user:yaml-secret@db.example/app?sslmode=disable
+config:
+  framework.strict: true
 `)
 
 	_, err := LoadConfig(path)
@@ -334,6 +337,7 @@ func TestProductionMySQLTLSFailsAtAllStartupBoundaries(t *testing.T) {
 
 	t.Run("Validate", func(t *testing.T) {
 		cfg := NewSysConfig()
+		cfg.SetFrameworkStrict(true)
 		cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 		cfg.DB.Enabled = true
 		cfg.DB.Type = "mysql"
@@ -348,6 +352,8 @@ database:
   enabled: true
   type: mysql
   dsn: app:mysql-path-secret@tcp(db.example:3306)/app?tls=false
+config:
+  framework.strict: true
 `)
 		_, err := LoadConfig(path)
 		assertMySQLProductionTLSFailure(t, err)

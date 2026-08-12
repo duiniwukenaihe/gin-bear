@@ -615,6 +615,7 @@ func TestEnableSwaggerIsDisabledInProduction(t *testing.T) {
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
 	cfg.Server.Mode = "release"
+	cfg.SetFrameworkStrict(true)
 	cfg.Auth.JWTSecret = randomProductionJWTKey(t)
 	app := Ignite(cfg)
 	app.EnableSwagger()

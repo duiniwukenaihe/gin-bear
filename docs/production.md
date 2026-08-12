@@ -1,7 +1,9 @@
 # Production Guide
 
-This guide describes the current `v0.9.3` release, including its strict-runtime
-migration path from `v0.9.1`.
+`v0.9.3` is the current release. This guide also describes the repository source
+tree and its strict-runtime migration path. Entries under `Unreleased`,
+including the production gRPC runtime, are not a published release until the
+release gate and tagging process complete.
 
 ## Runtime
 
@@ -10,6 +12,7 @@ Use production mode in deployed environments:
 ```bash
 export BEAR_ENV=prod
 export GIN_MODE=release
+# Required only when framework HTTP authentication is enabled:
 export BEAR_AUTH_JWT_SECRET="$(openssl rand -base64 48)"
 ```
 
@@ -73,8 +76,14 @@ runtime contract explicitly during migration:
 config:
   strict: true
   framework.strict: true
+  framework.allow_compatibility_in_production: false
   framework.response_mode: envelope
 ```
+
+Production rejects `framework.strict: false` unless the migration-only escape
+hatch `framework.allow_compatibility_in_production: true` is explicitly set.
+That opt-out preserves a temporary compatibility window and emits a high-risk
+warning; it is not a production default or a substitute for migration.
 
 `framework.response_mode` accepts only `raw` or `envelope`. Raw mode preserves
 existing bare object and array responses. Envelope mode wraps ordinary handler
@@ -149,14 +158,19 @@ skew must be between zero and five minutes:
 
 ```yaml
 auth:
+  enabled: false
   jwt_secret: ""
   jwt_issuer: "https://auth.example.com"
   jwt_audience: "gin-bear-api"
   jwt_clock_skew: "30s"
 ```
 
-Set the actual secret with `BEAR_AUTH_JWT_SECRET`; production startup rejects
-the empty example value. `JWT_SECRET` remains a lower-priority compatibility
+`auth.enabled: true` means the application requires Gin-Bear to install the
+global HTTP `AuthFairing`; `false` means the framework makes no claim that
+routes are authenticated. JWT fields may still be present for application use.
+When framework authentication is enabled, or an `AuthFairing` is attached
+manually, set the actual secret with `BEAR_AUTH_JWT_SECRET`; production startup
+rejects weak or empty values. `JWT_SECRET` remains a lower-priority compatibility
 fallback. Configure matching
 `Issuer`, `Audience`, and `ClockSkew` fields on `JWTUtil.Config` when creating
 the JWT utility. Generated tokens include configured issuer and audience
@@ -256,6 +270,52 @@ health:
 
 The equivalent configuration keys are `server.shutdown_timeout` and `health.readiness_timeout`.
 
+## gRPC
+
+gRPC is an optional runtime and remains disabled unless `grpc.enabled: true` is
+set. Modern services implement `GRPCServiceRegistrar`, whose
+`RegisterGRPC(grpc.ServiceRegistrar) error` method registers generated protobuf
+servers without exposing the underlying `*grpc.Server`. Register services and
+interceptors before `Serve`:
+
+```go
+if err := application.AddGRPCServiceE(inventoryService); err != nil {
+	return fmt.Errorf("register gRPC service: %w", err)
+}
+if err := application.AddGRPCUnaryInterceptorE(authUnary); err != nil {
+	return fmt.Errorf("register gRPC unary interceptor: %w", err)
+}
+if err := application.AddGRPCStreamInterceptorE(authStream); err != nil {
+	return fmt.Errorf("register gRPC stream interceptor: %w", err)
+}
+```
+
+An enabled listener requires at least one business service. Framework recovery
+and access logging wrap user interceptors; user interceptors own JWT, mTLS
+identity mapping, Casbin, tracing, and other application policy. HTTP Fairings
+are not applied to gRPC calls.
+
+Production requires an explicit `transport_security` mode:
+
+- `tls`: provide readable, matching `tls_cert_file` and `tls_key_file` paths.
+- `mtls`: provide the TLS pair plus `client_ca_file`; clients must present a
+  certificate accepted by that CA.
+- `plaintext`: bind only to a loopback `host`, and use it solely when a
+  same-host Nginx or Envoy terminates TLS before forwarding to Gin-Bear.
+
+Do not expose a plaintext listener on a public or private network interface.
+The scaffold keeps the entire production gRPC block commented and does not
+generate certificates or fake certificate paths.
+
+The standard gRPC Health Service defaults to enabled and reflection defaults to
+disabled. Explicitly configure message sizes, concurrent streams, keepalive,
+connection idle/age, and shutdown timeout for the service profile. The
+supported keys are `max_recv_message_bytes`, `max_send_message_bytes`,
+`max_concurrent_streams`, `keepalive_min_time`, `keepalive_time`,
+`keepalive_timeout`, `max_connection_idle`, `max_connection_age`, and
+`max_connection_age_grace`. Gin-Bear does not provide gRPC-Gateway, service
+discovery, load balancing, protobuf generation, or client SDK generation.
+
 ## Version Metadata
 
 Inject release identity at build time:
@@ -306,8 +366,9 @@ it through a separately protected listener, network policy, or an explicit
 ## Tested Startup Example
 
 [`examples/basic/main.go`](../examples/basic/main.go) is the source behind the
-README lifecycle guidance. It checks the error returned by `ApplyAll`, starts
-with a signal-cancellable context, and returns any `Launch` error to `main`.
+README lifecycle guidance. It uses error-returning initialization and
+registration, starts with a signal-cancellable context, and returns any `Serve`
+error to `main`.
 Its route setup is exercised by `examples/basic/main_test.go` as part of
 `go test ./...`.
 
@@ -324,7 +385,7 @@ tracing:
   sample_rate: 1.0
 ```
 
-Call `app.EnableTracing(ctx)` during startup. The HTTP middleware extracts W3C `traceparent` headers, creates server spans named like `GET /users/:id`, and records method, route, status, client address, generated request id, service version, and Gin errors. Raw query strings are not recorded. Supported exporters are `stdout`, `otlp`, and `none`.
+Call `app.EnableTracingE(ctx)` during startup and return any error. The HTTP middleware extracts W3C `traceparent` headers, creates server spans named like `GET /users/:id`, and records method, route, status, client address, generated request id, service version, and Gin errors. Raw query strings are not recorded. Supported exporters are `stdout`, `otlp`, and `none`.
 
 ## OpenAPI And Swagger
 
@@ -367,6 +428,10 @@ Generation fails on invalid route metadata, duplicate method/path entries, and
 duplicate explicit operation IDs. For externally consumed APIs, review the
 generated document in code review and add explicit documentation around
 business errors and pagination.
+
+`OpenAPIConfig.Apps`, `TimeWindow`, `ReplayCheck`, and `HeaderPrefix` are
+deprecated compatibility fields. They do not validate request signatures or
+provide API authentication; OpenAPI support generates documentation only.
 
 ## Database Migrations
 

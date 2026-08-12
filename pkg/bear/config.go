@@ -17,8 +17,9 @@ import (
 type UserConfig map[string]interface{}
 
 const (
-	frameworkStrictConfigKey = "framework.strict"
-	responseModeConfigKey    = "framework.response_mode"
+	frameworkStrictConfigKey                 = "framework.strict"
+	frameworkAllowCompatibilityProductionKey = "framework.allow_compatibility_in_production"
+	responseModeConfigKey                    = "framework.response_mode"
 )
 
 type ServerConfig struct {
@@ -87,14 +88,19 @@ type MiddlewareConfig struct {
 }
 
 type OpenAPIConfig struct {
-	Enabled      bool         `yaml:"enabled" json:"enabled"`
-	TimeWindow   int          `yaml:"time_window_seconds" json:"time_window_seconds"` // 默认 60 秒
-	ReplayCheck  bool         `yaml:"replay_check" json:"replay_check"`
-	Apps         []OpenAPIApp `yaml:"apps" json:"apps"`
-	HeaderPrefix string       `yaml:"header_prefix" json:"header_prefix"` // X-API (X-API-Timestamp, X-API-Nonce)
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Deprecated: OpenAPI does not implement request signing.
+	TimeWindow int `yaml:"time_window_seconds" json:"time_window_seconds"`
+	// Deprecated: OpenAPI does not implement replay protection.
+	ReplayCheck bool `yaml:"replay_check" json:"replay_check"`
+	// Deprecated: OpenAPI does not authenticate configured applications.
+	Apps []OpenAPIApp `yaml:"apps" json:"apps"`
+	// Deprecated: OpenAPI does not consume signing headers.
+	HeaderPrefix string `yaml:"header_prefix" json:"header_prefix"`
 }
 
 type OpenAPIApp struct {
+	// Deprecated: OpenAPIApp is retained for configuration compatibility only.
 	AppKey    string `yaml:"app_key" json:"app_key"`
 	AppSecret string `yaml:"app_secret" json:"app_secret"`
 }
@@ -166,6 +172,7 @@ type I18nConfig struct {
 }
 
 type AuthConfig struct {
+	Enabled          bool      `yaml:"enabled" json:"enabled"`
 	StorageType      string    `yaml:"storage_type" json:"storage_type"`
 	JWTSecret        string    `yaml:"jwt_secret" json:"jwt_secret" validate:"required_with=JWT"`
 	JWTIssuer        string    `yaml:"jwt_issuer" json:"jwt_issuer"`
@@ -243,10 +250,25 @@ func (c *WebSocketConfig) GetAllowedOrigins() []string {
 	return cloneStringSlice(*c.AllowedOrigins)
 }
 
-// Deprecated: GRPCConfig is compatibility-only. Prefer the supported HTTP lifecycle.
 type GRPCConfig struct {
-	Enabled bool  `yaml:"enabled" json:"enabled"`
-	Port    int32 `yaml:"port" json:"port"`
+	Enabled               bool   `yaml:"enabled" json:"enabled"`
+	Host                  string `yaml:"host" json:"host"`
+	Port                  int32  `yaml:"port" json:"port"`
+	TransportSecurity     string `yaml:"transport_security" json:"transport_security"`
+	TLSCertFile           string `yaml:"tls_cert_file" json:"tls_cert_file"`
+	TLSKeyFile            string `yaml:"tls_key_file" json:"tls_key_file"`
+	ClientCAFile          string `yaml:"client_ca_file" json:"client_ca_file"`
+	MaxRecvMessageBytes   int    `yaml:"max_recv_message_bytes" json:"max_recv_message_bytes"`
+	MaxSendMessageBytes   int    `yaml:"max_send_message_bytes" json:"max_send_message_bytes"`
+	MaxConcurrentStreams  uint32 `yaml:"max_concurrent_streams" json:"max_concurrent_streams"`
+	KeepaliveMinTime      string `yaml:"keepalive_min_time" json:"keepalive_min_time"`
+	KeepaliveTime         string `yaml:"keepalive_time" json:"keepalive_time"`
+	KeepaliveTimeout      string `yaml:"keepalive_timeout" json:"keepalive_timeout"`
+	MaxConnectionIdle     string `yaml:"max_connection_idle" json:"max_connection_idle"`
+	MaxConnectionAge      string `yaml:"max_connection_age" json:"max_connection_age"`
+	MaxConnectionAgeGrace string `yaml:"max_connection_age_grace" json:"max_connection_age_grace"`
+	HealthEnabled         bool   `yaml:"health_enabled" json:"health_enabled"`
+	ReflectionEnabled     bool   `yaml:"reflection_enabled" json:"reflection_enabled"`
 }
 
 // Deprecated: CircuitBreakerConfig is compatibility-only and is not started.
@@ -374,6 +396,27 @@ func (c *SysConfig) SetFrameworkStrict(strict bool) {
 	c.Config[frameworkStrictConfigKey] = strict
 }
 
+// AllowCompatibilityInProduction reports whether release mode may use the
+// compatibility runtime during a migration window.
+func (c *SysConfig) AllowCompatibilityInProduction() bool {
+	if c == nil || c.Config == nil {
+		return false
+	}
+	allow, _ := c.Config[frameworkAllowCompatibilityProductionKey].(bool)
+	return allow
+}
+
+// SetAllowCompatibilityInProduction updates the release compatibility policy.
+func (c *SysConfig) SetAllowCompatibilityInProduction(allow bool) {
+	if c == nil {
+		return
+	}
+	if c.Config == nil {
+		c.Config = UserConfig{}
+	}
+	c.Config[frameworkAllowCompatibilityProductionKey] = allow
+}
+
 // ResponseMode reports the configured response contract mode.
 func (c *SysConfig) ResponseMode() string {
 	if c == nil || c.Config == nil {
@@ -409,17 +452,30 @@ func (c *SysConfig) validateRuntimeContract() error {
 		return err
 	}
 	if c.Config == nil {
+		if isProductionMode(c) && !c.FrameworkStrict() {
+			return fmt.Errorf("%s must be true in production unless %s=true", frameworkStrictConfigKey, frameworkAllowCompatibilityProductionKey)
+		}
 		return nil
+	}
+	if allow, exists := c.Config[frameworkAllowCompatibilityProductionKey]; exists {
+		if _, ok := allow.(bool); !ok {
+			return fmt.Errorf("%s must be a boolean", frameworkAllowCompatibilityProductionKey)
+		}
 	}
 	mode, exists := c.Config[responseModeConfigKey]
-	if !exists {
-		return nil
+	if exists {
+		responseMode, ok := mode.(string)
+		if !ok {
+			return fmt.Errorf("%s must be one of raw, envelope", responseModeConfigKey)
+		}
+		if err := validateResponseMode(responseMode); err != nil {
+			return err
+		}
 	}
-	responseMode, ok := mode.(string)
-	if !ok {
-		return fmt.Errorf("%s must be one of raw, envelope", responseModeConfigKey)
+	if isProductionMode(c) && !c.FrameworkStrict() && !c.AllowCompatibilityInProduction() {
+		return fmt.Errorf("%s must be true in production unless %s=true", frameworkStrictConfigKey, frameworkAllowCompatibilityProductionKey)
 	}
-	return validateResponseMode(responseMode)
+	return nil
 }
 
 func validateResponseMode(mode string) error {
@@ -485,13 +541,8 @@ func (c *SysConfig) validateSemantic() error {
 			}
 		}
 	}
-	if c.GRPC != nil && c.GRPC.Enabled {
-		if c.GRPC.Port < 1 || c.GRPC.Port > 65535 {
-			return fmt.Errorf("grpc.port must be between 1 and 65535")
-		}
-		if c.Server != nil && c.GRPC.Port == c.Server.Port {
-			return fmt.Errorf("grpc.port must differ from server.port")
-		}
+	if err := validateGRPCConfig(c); err != nil {
+		return err
 	}
 	if c.Health != nil && c.Health.ReadinessTimeout != "" {
 		if _, err := time.ParseDuration(c.Health.ReadinessTimeout); err != nil {
@@ -511,7 +562,7 @@ func (c *SysConfig) validateSemantic() error {
 				return fmt.Errorf("auth.jwt_clock_skew must be between 0 and 5m")
 			}
 		}
-		if isProductionMode(c) && isWeakProductionJWTSecret(c.Auth.JWTSecret) {
+		if isProductionMode(c) && c.Auth.Enabled && isWeakProductionJWTSecret(c.Auth.JWTSecret) {
 			return fmt.Errorf("weak jwt secret is not allowed in production")
 		}
 	}
@@ -660,6 +711,8 @@ func (c *SysConfig) compatibilityWarnings() []string {
 	add(c.Schema != nil && c.Schema.Enabled, "schema is compatibility-only and is not loaded")
 	add(c.CircuitBreaker != nil && c.CircuitBreaker.Enabled, "circuit_breaker is compatibility-only and is not started")
 	add(c.ConfigCenter != nil && c.ConfigCenter.Enabled, "config_center is compatibility-only and is not loaded")
+	add(isProductionMode(c) && !c.FrameworkStrict() && c.AllowCompatibilityInProduction(),
+		"production compatibility runtime explicitly enabled; fail-soft IoC remains active")
 	if c.DB != nil {
 		dbType := strings.ToLower(strings.TrimSpace(c.DB.Type))
 		add((dbType == "" || dbType == "mysql") && strings.TrimSpace(c.DB.SSLMode) != "",
@@ -751,8 +804,20 @@ func NewSysConfig() *SysConfig {
 			Enabled: false,
 		},
 		GRPC: &GRPCConfig{
-			Enabled: false,
-			Port:    9090,
+			Enabled:               false,
+			Host:                  "127.0.0.1",
+			Port:                  9090,
+			MaxRecvMessageBytes:   4 << 20,
+			MaxSendMessageBytes:   4 << 20,
+			MaxConcurrentStreams:  128,
+			KeepaliveMinTime:      "5m",
+			KeepaliveTime:         "2h",
+			KeepaliveTimeout:      "20s",
+			MaxConnectionIdle:     "15m",
+			MaxConnectionAge:      "2h",
+			MaxConnectionAgeGrace: "5m",
+			HealthEnabled:         true,
+			ReflectionEnabled:     false,
 		},
 		CircuitBreaker: &CircuitBreakerConfig{
 			Enabled:             false,
@@ -768,13 +833,7 @@ func NewSysConfig() *SysConfig {
 			Key:     "gin-bear:config",
 			Format:  "yaml",
 		},
-		OpenAPI: &OpenAPIConfig{
-			Enabled:      false,
-			TimeWindow:   60,
-			ReplayCheck:  true,
-			HeaderPrefix: "X-API",
-			Apps:         []OpenAPIApp{{AppKey: "test", AppSecret: "test_secret"}},
-		},
+		OpenAPI: &OpenAPIConfig{Enabled: false},
 		Swagger: &SwaggerConfig{
 			Enabled:  true,
 			Title:    "Bear API",

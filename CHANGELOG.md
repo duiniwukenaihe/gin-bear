@@ -4,6 +4,23 @@ All notable changes to gin-bear are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Optional gRPC production runtime contracts for injectable
+  `GRPCServiceRegistrar` services, unary/stream interceptors, TLS and mTLS,
+  loopback-only proxy plaintext, health, reflection opt-in, resource limits,
+  recovery, logging, and coordinated shutdown.
+
+### Changed
+
+- New scaffolds make `auth.enabled: false` explicit, prohibit compatibility
+  runtime in production by default, keep gRPC disabled, and show only commented
+  production transport guidance without generated certificates.
+- Runnable examples and the primary README path use `IgniteE`, error-returning
+  registration APIs, and `Serve`; legacy APIs remain available.
+- `OpenAPIConfig.Apps`, `TimeWindow`, `ReplayCheck`, and `HeaderPrefix` remain
+  compatibility fields but are deprecated and do not provide request signing.
+
 ## [v0.9.3] - 2026-08-12
 
 ### Fixed

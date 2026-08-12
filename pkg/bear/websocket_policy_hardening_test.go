@@ -19,6 +19,7 @@ func TestProductionWebSocketZeroHandshakeTimeoutUsesRuntimeDefault(t *testing.T)
 
 	config := NewSysConfig()
 	config.Server.Mode = "release"
+	config.SetFrameworkStrict(true)
 	config.Auth.JWTSecret = "websocket-zero-timeout-production-secret-2026"
 	config.WS = &WebSocketConfig{CheckOrigin: true}
 

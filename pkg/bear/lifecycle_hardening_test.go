@@ -150,6 +150,7 @@ func TestProductionRejectsPlaceholderJWTSecrets(t *testing.T) {
 	} {
 		t.Run(secret, func(t *testing.T) {
 			config := NewSysConfig()
+			config.Auth.Enabled = true
 			config.Auth.JWTSecret = secret
 			if err := validateProductionSecurity(config); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
 				t.Fatalf("validateProductionSecurity() error = %v, want placeholder rejection", err)
@@ -556,6 +557,7 @@ func TestLoadConfigRejectsUnsafeProductionWebSocketDynamicPolicy(t *testing.T) {
 auth:
   jwt_secret: websocket-load-test-secret-with-32-characters
 config:
+  framework.strict: true
   websocket.read_timeout: 24h
 `)
 	_, err := LoadConfig(path)

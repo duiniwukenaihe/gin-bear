@@ -70,6 +70,40 @@ func init() {
 		target.Config = newJWTUtilFromAuthConfig(config.Auth).Config
 		return nil
 	})
+	RegisterRuntimeStaticInjectorE(runtimeStaticInjectorKey(reflect.TypeFor[AuthTokenManager]()), func(factory *BeanFactory, obj any) error {
+		target, ok := obj.(*AuthTokenManager)
+		if !ok {
+			return fmt.Errorf("strict static injector received %T, want *bear.AuthTokenManager", obj)
+		}
+		jwtUtil, err := ResolveE[*JWTUtil](factory)
+		if err != nil {
+			return fmt.Errorf("resolve JWT utility: %w", err)
+		}
+		target.JWTUtil = jwtUtil
+		if redis, err := ResolveE[*RedisAdapter](factory); err == nil {
+			target.Redis = redis
+		} else if !errors.Is(err, ErrBeanMissing) {
+			return fmt.Errorf("resolve optional Redis token revocation store: %w", err)
+		}
+		return nil
+	})
+	RegisterRuntimeStaticInjectorE(runtimeStaticInjectorKey(reflect.TypeFor[AuthFairing]()), func(factory *BeanFactory, obj any) error {
+		target, ok := obj.(*AuthFairing)
+		if !ok {
+			return fmt.Errorf("strict static injector received %T, want *bear.AuthFairing", obj)
+		}
+		jwtUtil, err := ResolveE[*JWTUtil](factory)
+		if err != nil {
+			return fmt.Errorf("resolve JWT utility: %w", err)
+		}
+		target.JWTUtil = jwtUtil
+		if manager, err := ResolveE[*AuthTokenManager](factory); err == nil {
+			target.TokenManager = manager
+		} else if !errors.Is(err, ErrBeanMissing) {
+			return fmt.Errorf("resolve optional authentication token manager: %w", err)
+		}
+		return nil
+	})
 }
 
 // RegisterStaticInjector 注册静态注入器

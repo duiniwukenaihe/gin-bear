@@ -24,8 +24,9 @@ configuration that is currently a no-op. The warning keys are `waf`, `geoip`,
 startup.
 
 The ID generator is retained as a deprecated method without an enabled config
-flag. gRPC remains a compatibility-only API; its current launch path is not a
-no-op, so enabling it does not produce a no-op warning.
+flag. The legacy `GRPCService` interface remains for source compatibility; new
+gRPC services use the supported optional `GRPCServiceRegistrar` and
+error-returning registration APIs.
 
 ## Runtime Modes And Additive APIs
 
@@ -40,7 +41,9 @@ automatic response envelopes independently with
 `framework.strict` is not the same setting as `config.strict`. The latter
 controls unknown configuration fields and is forced on in production; the
 former controls strict framework runtime behavior and remains opt-in for an
-existing application.
+existing application. Production rejects compatibility runtime mode unless the
+migration-only `framework.allow_compatibility_in_production: true` override is
+explicitly configured; new scaffolds set it to `false`.
 
 `IgniteE` is the error-returning startup alternative to `Ignite`; the legacy
 API remains a panic-compatible wrapper. `Serve` is the signal-free,
@@ -65,6 +68,16 @@ direct Gin setup before startup and do not register modules, routes, or groups
 concurrently. Hiding the engine and replacing raw groups with an owned
 registration context is reserved for v0.10 because it would break existing
 applications.
+
+`auth.enabled` is additive and defaults to `false`. Setting it to `true`
+requests automatic global HTTP authentication. Existing applications that
+manually attach `AuthFairing` remain supported, and production secret validation
+still applies to that path. The setting does not authenticate gRPC; gRPC policy
+belongs in unary and stream interceptors.
+
+`OpenAPIConfig.Apps`, `TimeWindow`, `ReplayCheck`, and `HeaderPrefix` remain
+accepted for v0 configuration and source compatibility but are deprecated.
+They do not implement request signing or authentication.
 
 Development builds of `cmd/bear` do not guess a framework version. Pass
 `--framework-version` to `bear new`; release binaries receive their matching

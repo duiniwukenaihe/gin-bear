@@ -98,7 +98,9 @@ type Bear struct {
 	routeTree                 *RouteTree // 路由树，用于存储路由级别的 Fairing
 	routeRegistry             []RouteMetadata
 	registration              *routeRegistrationContext
-	grpcServices              []GRPCService
+	grpcServiceRegistrars     []GRPCServiceRegistrar
+	grpcUnaryInterceptors     []grpc.UnaryServerInterceptor
+	grpcStreamInterceptors    []grpc.StreamServerInterceptor
 	mounts                    []MountMetadata
 	modules                   []Module
 	runtime                   *Runtime
@@ -244,6 +246,13 @@ func IgniteE(args ...any) (*Bear, error) {
 	runtime.Container.Set(b)
 	runtime.Container.Set(config)
 	runtime.Container.Set(newJWTUtilFromAuthConfig(config.Auth))
+	var automaticAuth *AuthFairing
+	if config.Auth != nil && config.Auth.Enabled {
+		automaticAuth = NewAuthFairing()
+		if err := b.AttachE(automaticAuth); err != nil {
+			return nil, fmt.Errorf("enable framework authentication: %w", err)
+		}
+	}
 	for _, warning := range config.compatibilityWarnings() {
 		runtime.Logger.Warn(warning)
 	}
@@ -255,6 +264,9 @@ func IgniteE(args ...any) (*Bear, error) {
 	b.Use(RequestIDMiddleware())
 	b.Use(runtimePerformanceMiddleware(runtime))
 	b.Use(runtimeRecoveryMiddleware(runtime))
+	if automaticAuth != nil {
+		b.Use(authFairingMiddleware(automaticAuth))
+	}
 	b.Use(b.pluginDispatcher.Dispatch())
 	for _, middleware := range ginMiddlewares {
 		b.Use(middleware)
@@ -391,25 +403,22 @@ func (b *Bear) Serve(ctx context.Context) error {
 	b.markServed()
 	config := b.runtime.Config
 	logger := b.runtime.Logger
-	server := b.buildHTTPServer(config)
+	httpServer := b.buildHTTPServer(config)
+	grpcServer, err := b.buildGRPCRuntime()
+	if err != nil {
+		return b.cleanupLaunchFailure(config, fmt.Errorf("gRPC preflight failed: %w", err))
+	}
 
-	httpListener, err := net.Listen("tcp", server.Addr)
+	httpListener, err := net.Listen("tcp", httpServer.Addr)
 	if err != nil {
 		return b.cleanupLaunchFailure(config, fmt.Errorf("failed to listen for HTTP: %w", err))
 	}
 
 	var grpcListener net.Listener
-	var grpcServer *grpc.Server
-	if config.GRPC != nil && config.GRPC.Enabled {
-		grpcAddr := fmt.Sprintf(":%d", config.GRPC.Port)
-		grpcListener, err = net.Listen("tcp", grpcAddr)
+	if grpcServer != nil {
+		grpcListener, err = net.Listen("tcp", grpcListenAddress(config.GRPC))
 		if err != nil {
 			return b.cleanupLaunchFailure(config, fmt.Errorf("failed to listen for gRPC: %w", err), httpListener)
-		}
-		grpcServer = grpc.NewServer()
-		for _, service := range b.grpcServices {
-			logger.Info("Registering gRPC service", "name", service.Name())
-			service.Register(grpcServer)
 		}
 	}
 
@@ -424,7 +433,7 @@ func (b *Bear) Serve(ctx context.Context) error {
 	serveResults := make(chan serveResult, serverCount)
 	go func() {
 		logger.Info("WhiteBear is emerging from ice", "addr", httpListener.Addr().String(), "name", config.Server.Name)
-		err := server.Serve(httpListener)
+		err := httpServer.Serve(httpListener)
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
@@ -439,6 +448,7 @@ func (b *Bear) Serve(ctx context.Context) error {
 			}
 			serveResults <- serveResult{name: "gRPC", err: err}
 		}()
+		grpcServer.setServing()
 	}
 
 	var launchErrors []error
@@ -448,32 +458,26 @@ func (b *Bear) Serve(ctx context.Context) error {
 		received++
 		if result.err != nil {
 			launchErrors = append(launchErrors, fmt.Errorf("%s serve failed: %w", result.name, result.err))
+		} else {
+			launchErrors = append(launchErrors, fmt.Errorf("%s server stopped unexpectedly", result.name))
 		}
 	case <-ctx.Done():
 		logger.Info("Context cancelled, shutting down...")
 	}
 
-	shutdownBudget := shutdownTimeout(config)
-	if err := runShutdownPhase(shutdownBudget, func(ctx context.Context) error {
-		b.runtime.beginHijackedShutdown()
-		serverErr := shutdownHTTPServer(ctx, server)
-		connectionsErr := b.runtime.closeHijackedConnections()
-		return errors.Join(serverErr, connectionsErr)
-	}); err != nil {
-		launchErrors = append(launchErrors, err)
-	}
 	if grpcServer != nil {
-		if err := runShutdownPhase(shutdownBudget, func(ctx context.Context) error {
-			return shutdownGRPCServer(ctx, grpcServer)
-		}); err != nil {
-			launchErrors = append(launchErrors, err)
-		}
+		grpcServer.setNotServing()
 	}
-	if err := runShutdownPhase(shutdownBudget, b.runtime.Lifecycle.Stop); err != nil {
+	shutdownStarted := time.Now()
+	shutdownDeadline := shutdownStarted.Add(shutdownTimeout(config))
+	drainDeadline := shutdownStarted.Add(shutdownTimeout(config) * 3 / 4)
+	if err := b.drainServers(drainDeadline, httpServer, grpcServer); err != nil {
 		launchErrors = append(launchErrors, err)
 	}
-
-	if err := runShutdownPhase(shutdownBudget, func(ctx context.Context) error {
+	if err := runShutdownUntil(shutdownDeadline, b.runtime.Lifecycle.Stop); err != nil {
+		launchErrors = append(launchErrors, fmt.Errorf("lifecycle shutdown: %w", err))
+	}
+	if err := runShutdownUntil(shutdownDeadline, func(ctx context.Context) error {
 		var waitErrors []error
 		for received < serverCount {
 			select {
@@ -493,6 +497,39 @@ func (b *Bear) Serve(ctx context.Context) error {
 
 	logger.Info("WhiteBear returning to ice")
 	return errors.Join(launchErrors...)
+}
+
+func (b *Bear) drainServers(deadline time.Time, httpServer *http.Server, grpcServer *grpcRuntimeServer) error {
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	b.runtime.beginHijackedShutdown()
+	workerCount := 1
+	if grpcServer != nil {
+		workerCount++
+	}
+	results := make(chan error, workerCount)
+	go func() {
+		results <- errors.Join(shutdownHTTPServer(ctx, httpServer), b.runtime.closeHijackedConnections())
+	}()
+	if grpcServer != nil {
+		go func() { results <- shutdownGRPCServer(ctx, grpcServer) }()
+	}
+	var shutdownErrors []error
+	for range workerCount {
+		if err := <-results; err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
+	return errors.Join(shutdownErrors...)
+}
+
+func runShutdownUntil(deadline time.Time, phase func(context.Context) error) error {
+	if !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	return runShutdownWorker(ctx, func() error { return phase(ctx) })
 }
 
 func isOnlyContextError(err, contextErr error) bool {
@@ -733,7 +770,7 @@ func validateProductionSecurity(config *SysConfig) error {
 	if err := validateProductionTrustedProxies(config); err != nil {
 		return err
 	}
-	if config.Auth != nil {
+	if config.Auth != nil && config.Auth.Enabled {
 		if isWeakProductionJWTSecret(config.Auth.JWTSecret) {
 			return fmt.Errorf("weak jwt secret is not allowed in production")
 		}
@@ -988,6 +1025,9 @@ func (b *Bear) Attach(f ...Fairing) *Bear {
 		}
 		return b
 	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	f = b.uniqueAuthFairingsLocked(f)
 	b.fairingHandler.AddFairing(f...)
 	for _, f1 := range f {
 		b.runtime.Container.Set(f1)
@@ -1000,21 +1040,47 @@ func (b *Bear) AttachE(fairings ...Fairing) error {
 	if b == nil || b.runtime == nil {
 		return errors.New("bear runtime is unavailable")
 	}
-	values := make([]any, len(fairings))
 	for index, fairing := range fairings {
 		if fairing == nil || isNilBean(fairing) {
 			return fmt.Errorf("fairing item %d (%T) must not be nil", index, fairing)
 		}
-		values[index] = fairing
 	}
 	b.eRegistrationMu.Lock()
 	defer b.eRegistrationMu.Unlock()
+	fairings = b.uniqueAuthFairingsLocked(fairings)
+	if len(fairings) == 0 {
+		return nil
+	}
+	values := make([]any, len(fairings))
+	for index, fairing := range fairings {
+		values[index] = fairing
+	}
 	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
 		return fmt.Errorf("register fairings: %w", err)
 	}
 	b.fairingHandler.AddFairing(fairings...)
 	b.strictRegistrationVersion++
 	return nil
+}
+
+// uniqueAuthFairingsLocked requires eRegistrationMu. Fairing slices are also
+// read while deciding whether an AuthFairing has already been registered.
+func (b *Bear) uniqueAuthFairingsLocked(fairings []Fairing) []Fairing {
+	if len(fairings) == 0 {
+		return nil
+	}
+	hasAuth := openAPIHasAuthFairing(openAPIGlobalFairings(b))
+	result := make([]Fairing, 0, len(fairings))
+	for _, fairing := range fairings {
+		if _, auth := fairing.(*AuthFairing); auth {
+			if hasAuth {
+				continue
+			}
+			hasAuth = true
+		}
+		result = append(result, fairing)
+	}
+	return result
 }
 
 // LoadPlugin 动态加载 .so 插件 (阶段 85)
@@ -1586,6 +1652,9 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 				return err
 			}
 		}
+		if err := b.validateProductionAuthPolicy(); err != nil {
+			return err
+		}
 		b.runtime.Logger.Info("Executing component initializers...")
 		if err := b.runtime.Lifecycle.Start(ctx); err != nil {
 			lifecycleStartFailed = true
@@ -1600,6 +1669,9 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 		if v.Kind() == reflect.Ptr && v.Elem().Kind() == reflect.Struct {
 			b.runtime.Container.Apply(bean)
 		}
+	}
+	if err := b.validateProductionAuthPolicy(); err != nil {
+		return err
 	}
 
 	b.runtime.Logger.Info("Executing component initializers...")
@@ -1618,6 +1690,9 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 			group := b.Engine.Group(m.Group)
 			b.buildController(group, m.Group, class)
 		}
+	}
+	if err := b.validateProductionAuthPolicy(); err != nil {
+		return err
 	}
 
 	return nil

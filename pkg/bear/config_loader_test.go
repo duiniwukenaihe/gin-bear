@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -93,7 +94,7 @@ func TestLoadConfigPreservesProductionEnvironmentFilename(t *testing.T) {
 		}
 	})
 	directory := t.TempDir()
-	if err := os.WriteFile(filepath.Join(directory, "application-production.yaml"), []byte("server:\n  name: production-file\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "application-production.yaml"), []byte("server:\n  name: production-file\nconfig:\n  framework.strict: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chdir(directory); err != nil {
@@ -140,12 +141,13 @@ func TestUppercaseProductionEnvironmentUsesRawOverlayAndProductionSafeguards(t *
 		t.Fatal("uppercase production environment did not activate production safeguards")
 	}
 	weak := NewSysConfig()
+	weak.Auth.Enabled = true
 	weak.Auth.JWTSecret = "bear-secret"
 	if err := validateProductionSecurity(weak); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
 		t.Fatalf("expected uppercase production secret validation error, got %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(directory, "application-PRODUCTION.yaml"), []byte("server:\n  name: uppercase-production-file\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "application-PRODUCTION.yaml"), []byte("server:\n  name: uppercase-production-file\nconfig:\n  framework.strict: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("JWT_SECRET", randomProductionJWTKey(t))
@@ -215,6 +217,185 @@ func TestFrameworkRuntimeContractDefaults(t *testing.T) {
 	cfg := NewSysConfig()
 	if cfg.FrameworkStrict() || cfg.ResponseMode() != "raw" {
 		t.Fatalf("defaults = strict:%v mode:%q", cfg.FrameworkStrict(), cfg.ResponseMode())
+	}
+}
+
+func TestOpenAPISigningCompatibilityFieldsHaveNoCredentialDefaults(t *testing.T) {
+	config := NewSysConfig()
+	if config.OpenAPI == nil {
+		t.Fatal("OpenAPI config is nil")
+	}
+	if len(config.OpenAPI.Apps) != 0 {
+		t.Fatalf("OpenAPI app defaults = %#v, want empty", config.OpenAPI.Apps)
+	}
+}
+
+func TestAuthEnabledInstallsGlobalAuthFairing(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Auth.Enabled = true
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+	app.GET("/private", func(ctx *gin.Context) { ctx.Status(http.StatusNoContent) })
+
+	recorder := httptest.NewRecorder()
+	app.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/private", nil))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestAuthDisabledDoesNotInstallGlobalAuthFairing(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Auth.Enabled = false
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+	app.GET("/public", func(ctx *gin.Context) { ctx.Status(http.StatusNoContent) })
+
+	recorder := httptest.NewRecorder()
+	app.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/public", nil))
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
+func TestStrictAuthTokenManagerAllowsMissingOptionalRedis(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.SetFrameworkStrict(true)
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+	manager := NewAuthTokenManager()
+	if err := app.BeansE(manager); err != nil {
+		t.Fatalf("BeansE() error = %v", err)
+	}
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll() error = %v", err)
+	}
+	if manager.JWTUtil == nil {
+		t.Fatal("strict injection did not resolve JWTUtil")
+	}
+	if manager.Redis != nil {
+		t.Fatalf("strict injection Redis = %#v, want nil optional dependency", manager.Redis)
+	}
+}
+
+func TestAuthEnabledAndManualAttachDoNotDuplicateAuthFairing(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Auth.Enabled = true
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+	if err := app.AttachE(NewAuthFairing()); err != nil {
+		t.Fatalf("AttachE() error = %v", err)
+	}
+
+	count := 0
+	for _, fairing := range openAPIGlobalFairings(app) {
+		if _, ok := fairing.(*AuthFairing); ok {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("global AuthFairing count = %d, want 1", count)
+	}
+}
+
+func TestConcurrentAttachEIdempotentlyRegistersOneAuthFairing(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.SetFrameworkStrict(true)
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+
+	const workers = 32
+	start := make(chan struct{})
+	errorsByWorker := make(chan error, workers)
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			errorsByWorker <- app.AttachE(NewAuthFairing())
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errorsByWorker)
+	for err := range errorsByWorker {
+		if err != nil {
+			t.Fatalf("concurrent AttachE(AuthFairing) error = %v", err)
+		}
+	}
+
+	count := 0
+	for _, fairing := range openAPIGlobalFairings(app) {
+		if _, ok := fairing.(*AuthFairing); ok {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("global AuthFairing count = %d, want 1", count)
+	}
+}
+
+func TestProductionManualAuthFairingStillRejectsWeakSecret(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Server.Mode = gin.ReleaseMode
+	config.SetFrameworkStrict(true)
+	config.Auth.Enabled = false
+	config.Auth.JWTSecret = "bear-secret"
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() before manual auth error = %v", err)
+	}
+	if err := app.AttachE(NewAuthFairing()); err != nil {
+		t.Fatalf("AttachE() error = %v", err)
+	}
+	if err := app.ApplyAll(context.Background()); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
+		t.Fatalf("ApplyAll() error = %v, want weak jwt secret rejection", err)
+	}
+}
+
+func TestProductionCompatibilityManualAuthFairingStillRejectsWeakSecret(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Server.Mode = gin.ReleaseMode
+	config.SetAllowCompatibilityInProduction(true)
+	config.Auth.Enabled = false
+	config.Auth.JWTSecret = "bear-secret"
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() before manual auth error = %v", err)
+	}
+	app.Attach(NewAuthFairing())
+	if err := app.ApplyAll(context.Background()); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
+		t.Fatalf("ApplyAll() error = %v, want weak jwt secret rejection", err)
+	}
+}
+
+func TestProductionWithoutFrameworkAuthDoesNotRequireJWTSecret(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Server.Mode = gin.ReleaseMode
+	config.SetFrameworkStrict(true)
+	config.Auth.Enabled = false
+	config.Auth.JWTSecret = ""
+	if _, err := IgniteE(config); err != nil {
+		t.Fatalf("IgniteE() without framework auth error = %v", err)
 	}
 }
 
@@ -677,7 +858,7 @@ func TestJWTClockSkewValidationRunsAtIgnite(t *testing.T) {
 
 func TestLoadConfigRunsProductionSecretValidation(t *testing.T) {
 	t.Setenv("BEAR_ENV", "prod")
-	path := writeConfig(t, "application.yaml", "auth:\n  jwt_secret: bear-secret\n")
+	path := writeConfig(t, "application.yaml", "auth:\n  enabled: true\n  jwt_secret: bear-secret\nconfig:\n  framework.strict: true\n")
 
 	_, err := LoadConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
@@ -687,7 +868,7 @@ func TestLoadConfigRunsProductionSecretValidation(t *testing.T) {
 
 func TestLoadConfigRejectsWhitespaceProductionSecret(t *testing.T) {
 	t.Setenv("BEAR_ENV", "prod")
-	path := writeConfig(t, "application.yaml", "auth:\n  jwt_secret: '                                '\n")
+	path := writeConfig(t, "application.yaml", "auth:\n  enabled: true\n  jwt_secret: '                                '\nconfig:\n  framework.strict: true\n")
 
 	_, err := LoadConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
@@ -713,6 +894,8 @@ func TestSysConfigValidateRejectsKnownProductionJWTSecrets(t *testing.T) {
 		placeholder := placeholder
 		t.Run(placeholder, func(t *testing.T) {
 			cfg := NewSysConfig()
+			cfg.SetFrameworkStrict(true)
+			cfg.Auth.Enabled = true
 			cfg.Auth.JWTSecret = placeholder
 
 			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "weak jwt secret") {
@@ -737,6 +920,8 @@ func TestSysConfigValidateAccepts32ByteJWTSecretWithBoundaryWhitespace(t *testin
 	}
 
 	cfg := NewSysConfig()
+	cfg.SetFrameworkStrict(true)
+	cfg.Auth.Enabled = true
 	cfg.Auth.JWTSecret = secret
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("SysConfig.Validate rejected 32-byte JWT secret with boundary whitespace: %v", err)

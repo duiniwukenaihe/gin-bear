@@ -583,6 +583,7 @@ func TestCoreRemainingIgniteFailureRestoresGinGlobals(t *testing.T) {
 	gin.DefaultErrorWriter = previousErrorWriter
 	config := NewSysConfig()
 	config.Server.Mode = gin.ReleaseMode
+	config.SetFrameworkStrict(true)
 	config.Server.TrustedProxies = []string{"not a proxy"}
 
 	if _, err := IgniteE(config); err == nil {

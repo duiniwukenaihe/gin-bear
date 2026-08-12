@@ -29,12 +29,19 @@ func revokeToken(ctx context.Context, manager *bear.AuthTokenManager, token stri
 	return nil
 }
 
-func newApp() *bear.Bear {
+func buildApp() (*bear.Bear, error) {
 	config := bear.NewSysConfig()
 	config.DB.Enabled = false
+	config.SetFrameworkStrict(true)
 	manager := bear.NewAuthTokenManager()
-	app := bear.Ignite(config).Beans(manager)
-	app.POST("/logout", func(ctx *gin.Context) {
+	app, err := bear.IgniteE(config)
+	if err != nil {
+		return nil, fmt.Errorf("initialize application: %w", err)
+	}
+	if err := app.BeansE(manager); err != nil {
+		return nil, fmt.Errorf("register token manager: %w", err)
+	}
+	if _, err := app.POSTE("/logout", func(ctx *gin.Context) {
 		var request logoutRequest
 		if err := ctx.ShouldBindJSON(&request); err != nil {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": "token is required"})
@@ -49,17 +56,19 @@ func newApp() *bear.Bear {
 			return
 		}
 		ctx.Status(http.StatusNoContent)
-	})
-	return app
+	}); err != nil {
+		return nil, fmt.Errorf("register logout route: %w", err)
+	}
+	return app, nil
 }
 
 func run(ctx context.Context) error {
-	app := newApp()
-	if err := app.ApplyAll(ctx); err != nil {
-		return fmt.Errorf("initialize application: %w", err)
+	app, err := buildApp()
+	if err != nil {
+		return err
 	}
-	if err := app.Launch(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("launch application: %w", err)
+	if err := app.Serve(ctx); err != nil {
+		return fmt.Errorf("serve application: %w", err)
 	}
 	return nil
 }

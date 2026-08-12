@@ -15,6 +15,92 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+func TestGeneratedProjectUsesStrictRuntimeContract(t *testing.T) {
+	project := generateStrictRuntimeProject(t)
+
+	type generatedConfig struct {
+		Config struct {
+			Strict                         bool  `yaml:"strict"`
+			FrameworkStrict                bool  `yaml:"framework.strict"`
+			AllowCompatibilityInProduction *bool `yaml:"framework.allow_compatibility_in_production"`
+		} `yaml:"config"`
+		Auth struct {
+			Enabled *bool `yaml:"enabled"`
+		} `yaml:"auth"`
+		GRPC *struct {
+			Enabled *bool `yaml:"enabled"`
+		} `yaml:"grpc"`
+	}
+
+	readConfig := func(name string) (generatedConfig, string) {
+		t.Helper()
+		path := filepath.Join(project, name)
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config generatedConfig
+		if err := yaml.Unmarshal(contents, &config); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		return config, string(contents)
+	}
+
+	development, _ := readConfig("application.yaml")
+	production, productionSource := readConfig("application-prod.yaml.example")
+	for name, config := range map[string]generatedConfig{
+		"application.yaml":              development,
+		"application-prod.yaml.example": production,
+	} {
+		if !config.Config.Strict || !config.Config.FrameworkStrict {
+			t.Errorf("%s must enable strict config loading and strict framework runtime", name)
+		}
+		if config.Auth.Enabled == nil || *config.Auth.Enabled {
+			t.Errorf("%s auth.enabled must be explicitly false", name)
+		}
+	}
+	if development.GRPC == nil || development.GRPC.Enabled == nil || *development.GRPC.Enabled {
+		t.Error("application.yaml grpc.enabled must be explicitly false")
+	}
+	if production.Config.AllowCompatibilityInProduction == nil || *production.Config.AllowCompatibilityInProduction {
+		t.Error("application-prod.yaml.example must explicitly prohibit production compatibility mode")
+	}
+	if production.GRPC != nil {
+		t.Error("application-prod.yaml.example gRPC guidance must remain fully commented out")
+	}
+	for _, want := range []string{
+		"# grpc:",
+		"#   enabled: false",
+		"#   host: \"127.0.0.1\"",
+		"#   transport_security: \"plaintext\"",
+		"#   tls_cert_file: \"\"",
+		"#   tls_key_file: \"\"",
+		"#   client_ca_file: \"\"",
+		"same-host Nginx or Envoy",
+		"transport_security: \"tls\"",
+		"transport_security: \"mtls\"",
+	} {
+		if !strings.Contains(productionSource, want) {
+			t.Errorf("application-prod.yaml.example missing commented gRPC guidance %q", want)
+		}
+	}
+
+	appSource, err := os.ReadFile(filepath.Join(project, "internal", "app", "app.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"bear.IgniteE(", ".EnableHealthE(", ".Serve(ctx)"} {
+		if !strings.Contains(string(appSource), want) {
+			t.Errorf("generated app.go missing error-returning startup call %q", want)
+		}
+	}
+	for _, forbidden := range []string{"bear.Ignite(", ".EnableHealth()", ".Launch("} {
+		if strings.Contains(string(appSource), forbidden) {
+			t.Errorf("generated app.go uses compatibility startup call %q", forbidden)
+		}
+	}
+}
+
 func TestGeneratedStrictRuntimeTemplateConfiguration(t *testing.T) {
 	project := generateStrictRuntimeProject(t)
 	t.Setenv("BEAR_ENV", "dev")
