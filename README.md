@@ -1,20 +1,36 @@
 # Gin-Bear
 
-Gin-Bear is a Go web framework built on Gin with application lifecycle,
-configuration, authentication, health, metrics, tracing, and OpenAPI support.
+Gin-Bear is a Gin-based application scaffold and framework, evolved from the
+controller, IoC, Fairing, and responder model of
+[goft-gin](https://github.com/shenyisyn/goft-gin). It adds production-oriented
+lifecycle, configuration, authentication, health, metrics, tracing, and
+OpenAPI support.
 
-## Install The CLI
+## Add The Framework
 
-Install the current release from its canonical package path:
+Add the current release to a Go application:
+
+```bash
+go get github.com/duiniwukenaihe/gin-bear@v0.9.3
+```
+
+Application code imports the runtime from
+`github.com/duiniwukenaihe/gin-bear/pkg/bear`. `v0.9.3` is the current release;
+GitHub publishes the immutable source tag and the Go toolchain resolves it as a
+module dependency.
+
+## Generate A Project (Optional)
+
+`cmd/bear` is an optional project generator, not the framework runtime. Use it
+when starting a new service from the maintained application structure:
 
 ```bash
 go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3
 bear new my-service
 ```
 
-`v0.9.3` is the current release. GitHub publishes source archives for each
-immutable release tag; the Go toolchain installs the CLI directly from the
-module version.
+The generated project's `go.mod` pins the same `gin-bear` framework version.
+Existing applications do not need to install the generator.
 
 When running an unversioned development build of the CLI, select the framework
 dependency explicitly so generated code cannot silently target another version:

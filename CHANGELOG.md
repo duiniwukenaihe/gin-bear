@@ -21,10 +21,11 @@ All notable changes to gin-bear are documented in this file.
 
 - Releases follow the framework-style Go module model: an immutable semantic
   version tag, generated release notes, and GitHub-generated source archives.
-  Platform-specific CLI archives and GoReleaser are no longer part of the
-  release surface; install the CLI with `go install`.
-- The CLI reads its module version from Go build information, so installing a
-  tagged CLI such as
+  Applications consume the framework with `go get` or a `go.mod` requirement;
+  platform-specific archives and GoReleaser are not part of the release
+  surface.
+- The optional project generator reads its module version from Go build
+  information, so installing a tagged generator such as
   `go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3` generates
   projects pinned to that same version without custom linker flags.
 - CI failures now retain concise command diagnostics, and releases explicitly

@@ -31,8 +31,15 @@
 10. Confirm `main` CI passes, then create an annotated,
     immutable semantic-version tag on the exact reviewed `main` commit.
 11. After the tag workflow completes, verify the GitHub Release, its generated
-    notes, and GitHub-generated source archives. Confirm the module and CLI are
-    available through the Go toolchain:
+    notes, and GitHub-generated source archives. Confirm an application can
+    resolve the framework module through the Go toolchain:
+
+   ```bash
+   go list -m github.com/duiniwukenaihe/gin-bear@v0.9.3
+   ```
+
+    When validating the optional project generator, install it separately and
+    confirm the generated `go.mod` requires the same framework version:
 
    ```bash
    GOBIN=$(mktemp -d) go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3
@@ -45,10 +52,11 @@ and in the `main` CI workflow; the tag workflow does not repeat them. The
 release job grants `contents: write` only for publishing. The pushed release
 tag must be annotated and target the exact reviewed `main` commit. After
 publishing, the workflow requests the matching version from `proxy.golang.org`
-so the Go Module is indexed. A CLI
-installed with `go install ...@version` reads that module version from Go build
-information and uses it as the generated project's framework dependency;
-local development builds still require `--framework-version` explicitly.
+so the Go Module is indexed. The generator is an optional scaffold entry point;
+when installed with `go install ...@version`, it reads the version from Go build
+information and uses it as the generated project's framework dependency.
+Applications depend directly on the framework module. Local development builds
+of the generator still require `--framework-version` explicitly.
 
 The full `verify-rc` command remains available for an explicit pre-tag audit.
 A local release operator with an isolated trusted `GNUPGHOME` can run:

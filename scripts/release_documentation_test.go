@@ -184,13 +184,16 @@ func TestV09DevelopmentBranchPolicyHasNoV010Residue(t *testing.T) {
 	}
 }
 
-func TestReadmeUsesTestedExamplesAndCanonicalCLInstallPath(t *testing.T) {
+func TestReadmeUsesTestedExamplesAndCanonicalFrameworkPath(t *testing.T) {
 	text := readDocumentationFile(t, "../README.md")
 	for _, phrase := range []string{
 		"examples/basic/main.go",
 		"examples/auth/main.go",
 		"examples/migration/main.go",
+		"go get github.com/duiniwukenaihe/gin-bear@v0.9.3",
+		"Generate A Project (Optional)",
 		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3",
+		"Existing applications do not need to install the generator",
 		"go test ./...",
 	} {
 		if !strings.Contains(text, phrase) {
@@ -204,7 +207,8 @@ func TestReleaseDocumentationNamesPublishedVersion(t *testing.T) {
 	security := readDocumentationFile(t, "../SECURITY.md")
 	normalizedReadme := strings.ToLower(strings.Join(strings.Fields(readme), " "))
 	for _, phrase := range []string{
-		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3",
+		"go get github.com/duiniwukenaihe/gin-bear@v0.9.3",
+		"application scaffold and framework",
 		"current release",
 	} {
 		if !strings.Contains(normalizedReadme, strings.ToLower(phrase)) {
@@ -300,7 +304,9 @@ func TestRunbookUsesPinnedVerificationAndSourceOnlyRelease(t *testing.T) {
 		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify",
 		"SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc",
 		"GitHub-generated source archives",
+		"go list -m github.com/duiniwukenaihe/gin-bear@v0.9.3",
 		"go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3",
+		"optional scaffold entry point",
 	} {
 		if !strings.Contains(runbook, phrase) {
 			t.Fatalf("runbook missing %q", phrase)
