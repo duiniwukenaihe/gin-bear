@@ -6,6 +6,7 @@
 handler pkg/bear/bear.go
 handler pkg/bear/fairing.go
 handler pkg/bear/handler.go
+handler pkg/bear/handler_tracker.go
 handler pkg/bear/responder.go
 binding pkg/bear/binding.go
 errors pkg/bear/error.go

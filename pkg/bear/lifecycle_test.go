@@ -63,6 +63,16 @@ type blockingGRPCServer struct {
 	once    sync.Once
 }
 
+type nonReturningStopGRPCServer struct {
+	stopCalled chan struct{}
+}
+
+func (*nonReturningStopGRPCServer) GracefulStop() { select {} }
+func (s *nonReturningStopGRPCServer) Stop() {
+	close(s.stopCalled)
+	select {}
+}
+
 func (s *blockingGRPCServer) GracefulStop() { <-s.stopped }
 
 func (s *blockingGRPCServer) Stop() {
@@ -189,6 +199,28 @@ func TestGRPCShutdownFallsBackToStopAtDeadline(t *testing.T) {
 	}
 	select {
 	case <-server.stopped:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("fallback Stop was not called")
+	}
+}
+
+func TestGRPCShutdownReturnsAtDeadlineWhenStopDoesNotReturn(t *testing.T) {
+	server := &nonReturningStopGRPCServer{stopCalled: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() { result <- shutdownGRPCServer(ctx, server) }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("shutdownGRPCServer() error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("shutdownGRPCServer() remained blocked in Stop")
+	}
+	select {
+	case <-server.stopCalled:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("fallback Stop was not called")
 	}

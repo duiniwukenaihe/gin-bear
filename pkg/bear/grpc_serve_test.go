@@ -19,22 +19,25 @@ import (
 )
 
 const (
-	grpcServeServiceName     = "bear.serve.test.v1.BlockingService"
-	grpcServeUnaryFullMethod = "/" + grpcServeServiceName + "/Unary"
+	grpcServeServiceName      = "bear.serve.test.v1.BlockingService"
+	grpcServeUnaryFullMethod  = "/" + grpcServeServiceName + "/Unary"
+	grpcServeStreamFullMethod = "/" + grpcServeServiceName + "/Stream"
 )
 
 type grpcServeBlockingService interface {
 	Unary(context.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error)
+	Stream(*wrapperspb.StringValue, grpc.ServerStream) error
 }
 
 type grpcServeService struct {
-	name        string
-	registerErr error
-	entered     chan struct{}
-	finished    chan struct{}
-	release     <-chan struct{}
-	enterOnce   sync.Once
-	finishOnce  sync.Once
+	name         string
+	registerErr  error
+	entered      chan struct{}
+	finished     chan struct{}
+	release      <-chan struct{}
+	ignoreCancel bool
+	enterOnce    sync.Once
+	finishOnce   sync.Once
 }
 
 func (s *grpcServeService) Name() string {
@@ -60,13 +63,38 @@ func (s *grpcServeService) Unary(ctx context.Context, request *wrapperspb.String
 		defer s.finishOnce.Do(func() { close(s.finished) })
 	}
 	if s.release != nil {
-		select {
-		case <-s.release:
-		case <-ctx.Done():
-			return nil, status.FromContextError(ctx.Err()).Err()
+		if s.ignoreCancel {
+			<-s.release
+		} else {
+			select {
+			case <-s.release:
+			case <-ctx.Done():
+				return nil, status.FromContextError(ctx.Err()).Err()
+			}
 		}
 	}
 	return wrapperspb.String("reply:" + request.GetValue()), nil
+}
+
+func (s *grpcServeService) Stream(request *wrapperspb.StringValue, stream grpc.ServerStream) error {
+	if s.entered != nil {
+		s.enterOnce.Do(func() { close(s.entered) })
+	}
+	if s.finished != nil {
+		defer s.finishOnce.Do(func() { close(s.finished) })
+	}
+	if s.release != nil {
+		if s.ignoreCancel {
+			<-s.release
+		} else {
+			select {
+			case <-s.release:
+			case <-stream.Context().Done():
+				return status.FromContextError(stream.Context().Err()).Err()
+			}
+		}
+	}
+	return stream.SendMsg(wrapperspb.String("reply:" + request.GetValue()))
 }
 
 var grpcServeServiceDesc = grpc.ServiceDesc{
@@ -76,6 +104,13 @@ var grpcServeServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Unary",
 			Handler:    grpcServeUnaryHandler,
+		},
+	},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Stream",
+			Handler:       grpcServeStreamHandler,
+			ServerStreams: true,
 		},
 	},
 }
@@ -98,6 +133,14 @@ func grpcServeUnaryHandler(
 		return service.(grpcServeBlockingService).Unary(ctx, request.(*wrapperspb.StringValue))
 	}
 	return interceptor(ctx, request, info, handler)
+}
+
+func grpcServeStreamHandler(service any, stream grpc.ServerStream) error {
+	request := new(wrapperspb.StringValue)
+	if err := stream.RecvMsg(request); err != nil {
+		return err
+	}
+	return service.(grpcServeBlockingService).Stream(request, stream)
 }
 
 type grpcServeLifecycleProbe struct {
@@ -312,7 +355,99 @@ func TestServeUsesSingleShutdownBudget(t *testing.T) {
 	}
 }
 
+func TestServeDoesNotCloseLifecycleResourcesWhileGRPCHandlerIgnoresCancellation(t *testing.T) {
+	const shutdownBudget = 400 * time.Millisecond
+	release := make(chan struct{})
+	service := grpcServeNewBlockingService(release)
+	service.ignoreCancel = true
+	probe := grpcServeNewLifecycleProbe("grpc-serve-non-cooperative", false)
+	running := grpcServeStart(t, service, probe, shutdownBudget)
+
+	rpcDone := grpcServeInvokeUnary(running.conn)
+	grpcServeWait(t, service.entered, "non-cooperative unary RPC did not enter")
+	shutdownStarted := time.Now()
+	running.cancel()
+	grpcServeExpectHealth(t, running.healthWatch, healthpb.HealthCheckResponse_NOT_SERVING)
+	running.cancelHealthWatch()
+
+	result := grpcServeWaitRPC(t, rpcDone, shutdownBudget)
+	if result.err == nil {
+		t.Fatal("non-cooperative unary unexpectedly completed without an error")
+	}
+	serveErr := grpcServeWaitServe(t, running.done, shutdownBudget+250*time.Millisecond)
+	if serveErr == nil || !strings.Contains(serveErr.Error(), "active gRPC handlers") {
+		t.Fatalf("Serve() error = %v, want active gRPC handler shutdown error", serveErr)
+	}
+	grpcServeAssertOpen(t, service.finished, "non-cooperative handler unexpectedly finished")
+	grpcServeAssertOpen(t, probe.stopping, "Lifecycle resources closed while a gRPC handler was still active")
+	if elapsed := time.Since(shutdownStarted); elapsed > shutdownBudget+250*time.Millisecond {
+		t.Fatalf("shutdown took %s, want at most %s", elapsed, shutdownBudget+250*time.Millisecond)
+	}
+	deferredShutdownStarted := time.Now()
+	shutdownErr := running.app.Shutdown(context.Background())
+	if shutdownErr == nil || !strings.Contains(shutdownErr.Error(), "active gRPC handlers") {
+		t.Fatalf("deferred Shutdown() error = %v, want active gRPC handler error", shutdownErr)
+	}
+	if elapsed := time.Since(deferredShutdownStarted); elapsed > 100*time.Millisecond {
+		t.Fatalf("deferred Shutdown() took %s, want a fast failure after handler timeout", elapsed)
+	}
+	grpcServeAssertOpen(t, probe.stopping, "Deferred Shutdown closed resources while a gRPC handler was still active")
+
+	close(release)
+	grpcServeWait(t, service.finished, "non-cooperative handler did not finish after release")
+	if err := running.app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() after handler release error = %v", err)
+	}
+	grpcServeWait(t, probe.stopping, "Lifecycle resources did not close after handler release")
+}
+
+func TestServeDoesNotCloseLifecycleResourcesWhileGRPCStreamIgnoresCancellation(t *testing.T) {
+	const shutdownBudget = 400 * time.Millisecond
+	release := make(chan struct{})
+	service := grpcServeNewBlockingService(release)
+	service.ignoreCancel = true
+	probe := grpcServeNewLifecycleProbe("grpc-serve-non-cooperative-stream", false)
+	running := grpcServeStart(t, service, probe, shutdownBudget)
+
+	streamDone := grpcServeInvokeStream(running.conn)
+	grpcServeWait(t, service.entered, "non-cooperative stream RPC did not enter")
+	shutdownStarted := time.Now()
+	running.cancel()
+	grpcServeExpectHealth(t, running.healthWatch, healthpb.HealthCheckResponse_NOT_SERVING)
+	running.cancelHealthWatch()
+
+	if err := grpcServeWaitStream(t, streamDone, shutdownBudget); err == nil {
+		t.Fatal("non-cooperative stream unexpectedly completed without an error")
+	}
+	serveErr := grpcServeWaitServe(t, running.done, shutdownBudget+250*time.Millisecond)
+	if serveErr == nil || !strings.Contains(serveErr.Error(), "active gRPC handlers") {
+		t.Fatalf("Serve() error = %v, want active gRPC handler shutdown error", serveErr)
+	}
+	grpcServeAssertOpen(t, service.finished, "non-cooperative stream handler unexpectedly finished")
+	grpcServeAssertOpen(t, probe.stopping, "Lifecycle resources closed while a gRPC stream handler was still active")
+	if elapsed := time.Since(shutdownStarted); elapsed > shutdownBudget+250*time.Millisecond {
+		t.Fatalf("shutdown took %s, want at most %s", elapsed, shutdownBudget+250*time.Millisecond)
+	}
+	deferredShutdownStarted := time.Now()
+	shutdownErr := running.app.Shutdown(context.Background())
+	if shutdownErr == nil || !strings.Contains(shutdownErr.Error(), "active gRPC handlers") {
+		t.Fatalf("deferred Shutdown() error = %v, want active gRPC handler error", shutdownErr)
+	}
+	if elapsed := time.Since(deferredShutdownStarted); elapsed > 100*time.Millisecond {
+		t.Fatalf("deferred Shutdown() took %s, want a fast failure after handler timeout", elapsed)
+	}
+	grpcServeAssertOpen(t, probe.stopping, "Deferred Shutdown closed resources while a gRPC stream handler was still active")
+
+	close(release)
+	grpcServeWait(t, service.finished, "non-cooperative stream handler did not finish after release")
+	if err := running.app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() after stream handler release error = %v", err)
+	}
+	grpcServeWait(t, probe.stopping, "Lifecycle resources did not close after stream handler release")
+}
+
 type grpcServeRunningApp struct {
+	app               *Bear
 	cancel            context.CancelFunc
 	done              <-chan error
 	completed         <-chan struct{}
@@ -374,6 +509,7 @@ func grpcServeStart(
 	_ = httpConn.Close()
 
 	running := &grpcServeRunningApp{
+		app:               app,
 		cancel:            cancel,
 		done:              done,
 		completed:         completed,
@@ -409,6 +545,32 @@ func grpcServeInvokeUnary(conn *grpc.ClientConn) <-chan grpcServeRPCResult {
 			response,
 		)
 		done <- grpcServeRPCResult{response: response, err: err}
+	}()
+	return done
+}
+
+func grpcServeInvokeStream(conn *grpc.ClientConn) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		stream, err := conn.NewStream(
+			context.Background(),
+			&grpc.StreamDesc{ServerStreams: true},
+			grpcServeStreamFullMethod,
+		)
+		if err != nil {
+			done <- err
+			return
+		}
+		if err := stream.SendMsg(wrapperspb.String("request")); err != nil {
+			done <- err
+			return
+		}
+		if err := stream.CloseSend(); err != nil {
+			done <- err
+			return
+		}
+		response := new(wrapperspb.StringValue)
+		done <- stream.RecvMsg(response)
 	}()
 	return done
 }
@@ -562,6 +724,17 @@ func grpcServeWaitRPC(t *testing.T, done <-chan grpcServeRPCResult, timeout time
 	case <-time.After(timeout):
 		t.Fatal("timed out waiting for unary RPC")
 		return grpcServeRPCResult{}
+	}
+}
+
+func grpcServeWaitStream(t *testing.T, done <-chan error, timeout time.Duration) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for stream RPC")
+		return nil
 	}
 }
 

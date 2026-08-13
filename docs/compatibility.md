@@ -129,6 +129,22 @@ in both compatibility and strict modes without removing the v0 public API:
 - JWT validation no longer requires Redis to exist. Revocation without Redis
   returns `ErrTokenRevocationUnavailable` instead of dereferencing a nil
   client. Request authentication propagates its context to Redis checks.
+- `redis.tls` is additive. Leaving `redis.tls.enabled` unset or false preserves
+  the v0 plaintext client behavior; remote deployments should enable TLS, while
+  loopback Redis or a trusted loopback proxy/sidecar may retain plaintext. A
+  required remote Redis dependency is rejected without TLS in production, and
+  an invalid TLS configuration is not downgraded to plaintext.
+- Redis clients initialized by Bear take production and tracing policy from
+  their owning Runtime. They no longer inspect the process-wide compatibility
+  facade, so multiple Bear instances cannot change each other's Redis tracing.
+- Standalone `OpenRedisAdapterContext` and `NewRedisAdapter` accept plaintext
+  only through a loopback address; remote connections must configure TLS.
+- Attach global Fairings before `ApplyAll`. Compatibility `Module.Build` runs
+  after lifecycle startup, so an attempted `Attach` there now fails startup
+  instead of mutating a validated authentication policy.
+- Plugin dispatch remains startup-only and now runs as Gin fallback handling.
+  Global middleware always runs before plugin handlers, and ambiguous dynamic
+  route shapes fail registration with `ErrPluginRouteConflict`.
 - Casbin authorization uses only the `CasbinEnforcer` injected from the current
   Bear container. There is no process-global fallback, and internal enforcement
   errors return a generic client 500.
@@ -139,6 +155,14 @@ in both compatibility and strict modes without removing the v0 public API:
 - Fairings stop after Abort or a committed response, URI bindings remain
   authoritative over query/form/JSON values, and response handling cannot
   append a second JSON value after commitment.
+- `Bear.GET`/`POST` and the other Bear route helpers execute global Fairings.
+  Native routes registered through groups returned by `Bear.Group`/`GroupE`
+  inherit the same non-authentication Fairing guard. Native Gin handlers own
+  their response bytes, but entered Fairings still receive one cleanup-oriented
+  `OnResponse(nil)` callback after the handler returns.
+  Direct registration through the embedded `app.Engine` is an explicit raw-Gin
+  escape hatch and does not participate in Bear's non-authentication Fairing
+  contract; prefer Bear route helpers for policy-protected routes.
 - `/metrics` was removed from the default `auth.public_paths`. Add it back
   explicitly only when another access-control boundary protects it.
 - The production example now requires PostgreSQL `sslmode: verify-full`, leaves

@@ -1,6 +1,8 @@
 package bear
 
 import (
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -39,11 +41,15 @@ type FairingHandler struct {
 	responseFairings []Fairing
 }
 
-const strictFairingStateKey = "bear.strict_fairing_state"
+const (
+	strictFairingStateKey       = "bear.strict_fairing_state"
+	fairingResponseCompletedKey = "bear.fairing_response_completed"
+)
 
 type strictFairingState struct {
 	globalStarted bool
 	entered       []Fairing
+	responseRun   bool
 }
 
 func NewFairingHandler() *FairingHandler {
@@ -75,7 +81,7 @@ func (f *FairingHandler) OnRequest(ctx *gin.Context) error {
 func (f *FairingHandler) OnResponse(result interface{}) interface{} {
 	response := result
 	for i := 0; i < len(f.responseFairings); i++ {
-		if transformed, err := f.responseFairings[i].OnResponse(response); err == nil {
+		if transformed, err := callResponseFairing(f.responseFairings[i], response); err == nil {
 			response = transformed
 		}
 	}
@@ -85,14 +91,18 @@ func (f *FairingHandler) OnResponse(result interface{}) interface{} {
 // OnResponseE runs response Fairings and returns the first transformation error.
 func (f *FairingHandler) OnResponseE(result any) (any, error) {
 	response := result
+	var firstErr error
 	for _, fairing := range f.responseFairings {
-		transformed, err := fairing.OnResponse(response)
+		transformed, err := callResponseFairing(fairing, response)
 		if err != nil {
-			return nil, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		response = transformed
 	}
-	return response, nil
+	return response, firstErr
 }
 
 // OnRequestWithRoute 执行全局 OnRequest，然后执行路由级别的 OnRequest
@@ -162,13 +172,32 @@ func runEnteredResponseFairings(state *strictFairingState, result any) (any, err
 	if state == nil {
 		return result, nil
 	}
+	if state.responseRun {
+		return result, nil
+	}
+	state.responseRun = true
 	response := result
+	var firstErr error
 	for i := len(state.entered) - 1; i >= 0; i-- {
-		transformed, err := state.entered[i].OnResponse(response)
+		transformed, err := callResponseFairing(state.entered[i], response)
 		if err != nil {
-			return nil, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		response = transformed
 	}
-	return response, nil
+	return response, firstErr
+}
+
+func callResponseFairing(fairing Fairing, result any) (response any, err error) {
+	response = result
+	defer func() {
+		if recover() != nil {
+			response = result
+			err = fmt.Errorf("fairing response panic [%T]", fairing)
+		}
+	}()
+	return fairing.OnResponse(result)
 }

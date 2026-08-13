@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,7 +26,8 @@ func TestGeneratedProjectUsesStrictRuntimeContract(t *testing.T) {
 			AllowCompatibilityInProduction *bool `yaml:"framework.allow_compatibility_in_production"`
 		} `yaml:"config"`
 		Auth struct {
-			Enabled *bool `yaml:"enabled"`
+			Enabled     *bool    `yaml:"enabled"`
+			PublicPaths []string `yaml:"public_paths"`
 		} `yaml:"auth"`
 		GRPC *struct {
 			Enabled *bool `yaml:"enabled"`
@@ -57,6 +59,12 @@ func TestGeneratedProjectUsesStrictRuntimeContract(t *testing.T) {
 		}
 		if config.Auth.Enabled == nil || *config.Auth.Enabled {
 			t.Errorf("%s auth.enabled must be explicitly false", name)
+		}
+		if slices.Contains(config.Auth.PublicPaths, "/metrics") {
+			t.Errorf("%s must not expose /metrics as an authentication public path", name)
+		}
+		if slices.Contains(config.Auth.PublicPaths, "/version") {
+			t.Errorf("%s must not expose /version build metadata as an authentication public path", name)
 		}
 	}
 	if development.GRPC == nil || development.GRPC.Enabled == nil || *development.GRPC.Enabled {
@@ -175,9 +183,9 @@ func TestGeneratedStrictRuntimeTemplateStartup(t *testing.T) {
 	wantCalls := []string{
 		"bear.IgniteE",
 		"application.Shutdown",
+		"application.EnableTracingE",
 		"application.EnableDatabaseE",
 		"application.EnableRedisE",
-		"application.EnableTracingE",
 		"application.EnableMetricsE",
 		"application.EnableHealthE",
 		"application.AddModuleE",

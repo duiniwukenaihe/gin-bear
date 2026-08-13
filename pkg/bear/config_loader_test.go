@@ -938,9 +938,12 @@ func TestSysConfigValidateAccepts32ByteJWTSecretWithBoundaryWhitespace(t *testin
 	}
 }
 
-func TestDefaultAuthPathsDoNotExposeMetrics(t *testing.T) {
+func TestDefaultAuthPathsDoNotExposeDiagnostics(t *testing.T) {
 	if slices.Contains(NewSysConfig().Auth.GetPublicPaths(), "/metrics") {
 		t.Fatal("default auth public paths expose /metrics")
+	}
+	if slices.Contains(NewSysConfig().Auth.GetPublicPaths(), "/version") {
+		t.Fatal("default auth public paths expose /version build metadata")
 	}
 }
 
@@ -965,6 +968,9 @@ func TestProductionExampleUsesHardenedDefaults(t *testing.T) {
 	}
 	if slices.Contains(cfg.Auth.GetPublicPaths(), "/metrics") {
 		t.Fatal("production example exposes /metrics as an auth public path")
+	}
+	if slices.Contains(cfg.Auth.GetPublicPaths(), "/version") {
+		t.Fatal("production example exposes /version build metadata as an auth public path")
 	}
 	if cfg.Auth.JWTSecret != "" {
 		t.Fatalf("production example JWT placeholder = %q, want empty", cfg.Auth.JWTSecret)

@@ -168,6 +168,7 @@ func TestCriticalCoverageManifestCoversAuditedProductionFiles(t *testing.T) {
 			"pkg/bear/bear.go",
 			"pkg/bear/fairing.go",
 			"pkg/bear/handler.go",
+			"pkg/bear/handler_tracker.go",
 			"pkg/bear/responder.go",
 		},
 		"lifecycle": {

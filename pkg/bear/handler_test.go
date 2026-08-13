@@ -56,6 +56,24 @@ func (f errorFairing) OnRequest(*gin.Context) error {
 	return f.err
 }
 
+type firstRecordingFairing struct{ *recordingFairing }
+type secondRecordingFairing struct{ *recordingFairing }
+
+type panickingResponseFairing struct {
+	BaseFairing
+	events *[]string
+}
+
+func (f *panickingResponseFairing) OnRequest(*gin.Context) error {
+	*f.events = append(*f.events, "request:panic")
+	return nil
+}
+
+func (f *panickingResponseFairing) OnResponse(any) (any, error) {
+	*f.events = append(*f.events, "response:panic")
+	panic("response panic")
+}
+
 type authoritativeIDRequest struct {
 	ID int64 `uri:"id" json:"id" form:"id"`
 }
@@ -117,6 +135,232 @@ func TestFairingUnauthorizedUsesHTTP401(t *testing.T) {
 		t.Fatalf("body = %#v", body)
 	}
 	assertSingleJSONValue(t, response.Body.Bytes())
+}
+
+func TestGlobalFairingProtectsNativeGinRoutes(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "compatibility", true: "strict"}[strict], func(t *testing.T) {
+			resetGinModeForTest(t)
+			config := NewSysConfig()
+			config.SetFrameworkStrict(strict)
+			app := Ignite(config)
+			called := false
+			if strict {
+				if err := app.AttachE(&errorFairing{err: NewStatusError(http.StatusForbidden, http.StatusForbidden, "error_forbidden", nil)}); err != nil {
+					t.Fatalf("AttachE() error = %v", err)
+				}
+			} else {
+				app.Attach(&errorFairing{err: NewStatusError(http.StatusForbidden, http.StatusForbidden, "error_forbidden", nil)})
+			}
+			app.GET("/native-private", func(ctx *gin.Context) {
+				called = true
+				ctx.Status(http.StatusNoContent)
+			})
+			if err := app.ApplyAll(context.Background()); err != nil {
+				t.Fatalf("ApplyAll() error = %v", err)
+			}
+			t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+			response := performRequest(app, httptest.NewRequest(http.MethodGet, "/native-private", nil))
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("native Gin route status = %d, want %d; body=%s", response.Code, http.StatusForbidden, response.Body.String())
+			}
+			if called {
+				t.Fatal("native Gin handler ran after global Fairing denied the request")
+			}
+		})
+	}
+}
+
+func TestGlobalFairingProtectsNativeGinGroupRoutes(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "compatibility", true: "strict"}[strict], func(t *testing.T) {
+			resetGinModeForTest(t)
+			config := NewSysConfig()
+			config.SetFrameworkStrict(strict)
+			app := Ignite(config)
+			called := false
+			var events []string
+			deny := &recordingFairing{
+				name:       "deny",
+				events:     &events,
+				requestErr: NewStatusError(http.StatusForbidden, http.StatusForbidden, "error_forbidden", nil),
+			}
+			if strict {
+				if err := app.AttachE(deny); err != nil {
+					t.Fatalf("AttachE() error = %v", err)
+				}
+			} else {
+				app.Attach(deny)
+			}
+			group, err := app.GroupE("/api")
+			if err != nil {
+				t.Fatalf("GroupE() error = %v", err)
+			}
+			group.Group("/v1").GET("/native-private", func(ctx *gin.Context) {
+				called = true
+				ctx.Status(http.StatusNoContent)
+			})
+			if err := app.ApplyAll(context.Background()); err != nil {
+				t.Fatalf("ApplyAll() error = %v", err)
+			}
+			t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+			response := performRequest(app, httptest.NewRequest(http.MethodGet, "/api/v1/native-private", nil))
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("native Gin group route status = %d, want %d; body=%s", response.Code, http.StatusForbidden, response.Body.String())
+			}
+			if called {
+				t.Fatal("native Gin group handler ran after global Fairing denied the request")
+			}
+			if want := []string{"request:deny"}; !reflect.DeepEqual(events, want) {
+				t.Fatalf("Fairing events = %#v, want %#v", events, want)
+			}
+		})
+	}
+}
+
+func TestGlobalFairingProtectsMetricsRoute(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "compatibility", true: "strict"}[strict], func(t *testing.T) {
+			resetGinModeForTest(t)
+			resetMetricsForTest()
+			config := NewSysConfig()
+			config.SetFrameworkStrict(strict)
+			app := Ignite(config)
+			deny := &errorFairing{err: NewStatusError(http.StatusForbidden, http.StatusForbidden, "error_forbidden", nil)}
+			if strict {
+				if err := app.AttachE(deny); err != nil {
+					t.Fatalf("AttachE() error = %v", err)
+				}
+			} else {
+				app.Attach(deny)
+			}
+			if err := app.EnableMetricsE(); err != nil {
+				t.Fatalf("EnableMetricsE() error = %v", err)
+			}
+			if err := app.ApplyAll(context.Background()); err != nil {
+				t.Fatalf("ApplyAll() error = %v", err)
+			}
+			t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+			response := performRequest(app, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("metrics status = %d, want %d; body=%s", response.Code, http.StatusForbidden, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestNativeGinRoutesRunGlobalResponseFairingsOnce(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "compatibility", true: "strict"}[strict], func(t *testing.T) {
+			resetGinModeForTest(t)
+			config := NewSysConfig()
+			config.SetFrameworkStrict(strict)
+			app := Ignite(config)
+			var events []string
+			fairing := &recordingFairing{name: "global", events: &events}
+			if strict {
+				if err := app.AttachE(fairing); err != nil {
+					t.Fatalf("AttachE() error = %v", err)
+				}
+			} else {
+				app.Attach(fairing)
+			}
+			group, err := app.GroupE("/api")
+			if err != nil {
+				t.Fatalf("GroupE() error = %v", err)
+			}
+			group.Group("/v1").GET("/value", func(ctx *gin.Context) {
+				events = append(events, "handler")
+				ctx.String(http.StatusOK, "value")
+			})
+			if err := app.ApplyAll(context.Background()); err != nil {
+				t.Fatalf("ApplyAll() error = %v", err)
+			}
+			t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+			response := performRequest(app, httptest.NewRequest(http.MethodGet, "/api/v1/value", nil))
+			if response.Code != http.StatusOK || response.Body.String() != "value" {
+				t.Fatalf("response = %d %q", response.Code, response.Body.String())
+			}
+			want := []string{"request:global", "handler", "response:global"}
+			if !reflect.DeepEqual(events, want) {
+				t.Fatalf("Fairing events = %#v, want %#v", events, want)
+			}
+		})
+	}
+}
+
+func TestNativeGinRoutePanicStillRunsResponseFairings(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "compatibility", true: "strict"}[strict], func(t *testing.T) {
+			resetGinModeForTest(t)
+			config := NewSysConfig()
+			config.SetFrameworkStrict(strict)
+			app := Ignite(config)
+			var events []string
+			fairing := &recordingFairing{name: "global", events: &events}
+			if strict {
+				if err := app.AttachE(fairing); err != nil {
+					t.Fatalf("AttachE() error = %v", err)
+				}
+			} else {
+				app.Attach(fairing)
+			}
+			app.GET("/panic", func(*gin.Context) {
+				events = append(events, "handler")
+				panic("boom")
+			})
+
+			response := performRequest(app, httptest.NewRequest(http.MethodGet, "/panic", nil))
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("response status = %d, want %d", response.Code, http.StatusInternalServerError)
+			}
+			want := []string{"request:global", "handler", "response:global"}
+			if !reflect.DeepEqual(events, want) {
+				t.Fatalf("Fairing events = %#v, want %#v", events, want)
+			}
+		})
+	}
+}
+
+func TestEnteredFairingsUnwindWhenLaterRequestFairingFails(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "compatibility", true: "strict"}[strict], func(t *testing.T) {
+			resetGinModeForTest(t)
+			config := NewSysConfig()
+			config.SetFrameworkStrict(strict)
+			app := Ignite(config)
+			var events []string
+			first := &firstRecordingFairing{recordingFairing: &recordingFairing{name: "first", events: &events}}
+			second := &secondRecordingFairing{recordingFairing: &recordingFairing{
+				name:       "second",
+				events:     &events,
+				requestErr: NewStatusError(http.StatusForbidden, http.StatusForbidden, "error_forbidden", nil),
+			}}
+			if strict {
+				if err := app.AttachE(first, second); err != nil {
+					t.Fatalf("AttachE() error = %v", err)
+				}
+			} else {
+				app.Attach(first, second)
+			}
+			app.GET("/private", func(*gin.Context) {
+				events = append(events, "handler")
+			})
+
+			response := performRequest(app, httptest.NewRequest(http.MethodGet, "/private", nil))
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("response status = %d, want %d", response.Code, http.StatusForbidden)
+			}
+			want := []string{"request:first", "request:second", "response:first"}
+			if !reflect.DeepEqual(events, want) {
+				t.Fatalf("Fairing events = %#v, want %#v", events, want)
+			}
+		})
+	}
 }
 
 func TestFairingHandlerLegacyOnResponseContinuesAfterError(t *testing.T) {
@@ -533,7 +777,7 @@ func TestFairingRequestErrorStopsPipeline(t *testing.T) {
 	}
 }
 
-func TestFairingResponseErrorStopsPipeline(t *testing.T) {
+func TestFairingResponseErrorReturnsFailureAfterUnwindingPipeline(t *testing.T) {
 	var events []string
 	app := Ignite(NewSysConfig())
 	app.Attach(&recordingFairing{
@@ -549,7 +793,7 @@ func TestFairingResponseErrorStopsPipeline(t *testing.T) {
 	if response.Code != http.StatusConflict {
 		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
 	}
-	want := []string{"request:route", "request:global", "response:global"}
+	want := []string{"request:route", "request:global", "response:global", "response:route"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
 	}
@@ -559,7 +803,31 @@ func TestFairingResponseErrorStopsPipeline(t *testing.T) {
 	assertSingleJSONValue(t, response.Body.Bytes())
 }
 
-func TestGinHandlerFuncIsOpaqueToResponseFairings(t *testing.T) {
+func TestFairingResponsePanicReturnsFailureAfterUnwindingPipeline(t *testing.T) {
+	config := NewSysConfig()
+	config.SetFrameworkStrict(true)
+	var events []string
+	app := Ignite(config)
+	if err := app.AttachE(
+		&recordingFairing{name: "outer", events: &events},
+		&panickingResponseFairing{events: &events},
+	); err != nil {
+		t.Fatalf("AttachE() error = %v", err)
+	}
+	app.Handle(http.MethodGet, "/value", func() string { return "handler" })
+
+	response := performRequest(app, httptest.NewRequest(http.MethodGet, "/value", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	want := []string{"request:outer", "request:panic", "response:panic", "response:outer"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	assertSingleJSONValue(t, response.Body.Bytes())
+}
+
+func TestGinHandlerFuncRunsResponseFairingsWithoutRewritingBytes(t *testing.T) {
 	var events []string
 	app := Ignite(NewSysConfig())
 	app.Attach(&recordingFairing{name: "global", events: &events})
@@ -571,7 +839,7 @@ func TestGinHandlerFuncIsOpaqueToResponseFairings(t *testing.T) {
 	if response.Code != http.StatusCreated || response.Body.String() != "opaque" {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
-	want := []string{"request:route", "request:global"}
+	want := []string{"request:route", "request:global", "response:global", "response:route"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
 	}

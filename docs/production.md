@@ -115,7 +115,9 @@ the signal-aware compatibility wrapper around `Serve`. A second concurrent
 stop the active owner. Once `Serve` has initialized successfully, that Bear is
 single-use; after it exits, create a new Bear instance instead of attempting to
 restart stopped lifecycle components. A repeated call returns
-`ErrAlreadyServing` before binding a listener.
+`ErrAlreadyServing` before binding a listener. `Shutdown` also seals an instance
+before stopping its lifecycle, so a later or concurrent `Serve` cannot acquire
+ownership after resources have begun closing.
 
 Gin mode is process-global. Once a strict Bear establishes the process mode,
 any later strict or compatibility instance requesting a different mode fails
@@ -173,12 +175,24 @@ auth:
 global HTTP `AuthFairing`; `false` means the framework makes no claim that
 routes are authenticated. JWT fields may still be present for application use.
 When framework authentication is enabled, or an `AuthFairing` is attached
-manually, set the actual secret with `BEAR_AUTH_JWT_SECRET`; production startup
-rejects weak or empty values. `JWT_SECRET` remains a lower-priority compatibility
-fallback. Configure matching
+manually, production startup validates the effective `JWTUtil` used by that
+Fairing and rejects weak, empty, or conflicting strategies. Set the configured
+policy with `BEAR_AUTH_JWT_SECRET`; `JWT_SECRET` remains a lower-priority
+compatibility fallback. Configure matching
 `Issuer`, `Audience`, and `ClockSkew` fields on `JWTUtil.Config` when creating
 the JWT utility. Generated tokens include configured issuer and audience
 claims, and parsing requires them when configured.
+
+Global non-authentication Fairings, including `CasbinFairing` and
+`PermissionFairing`, protect both compiled `Handle` routes and native
+`GET`/`POST`/`PUT`/`DELETE`/`PATCH`/`OPTIONS`/`HEAD`/`Any` routes. Groups returned
+by `Bear.Group` and `Bear.GroupE` carry the same guard for routes registered
+through their native Gin methods. The framework-owned metrics endpoint also
+uses this guard. Authentication continues through its dedicated dynamic
+middleware, so JWT and Redis revocation checks execute once per request.
+Native Gin handlers keep ownership of their response bytes, while every
+successfully entered Fairing still receives one post-handler `OnResponse(nil)`
+callback for auditing, transaction, and resource cleanup.
 
 `auth.storage_type: jwt` performs stateless JWT validation. Set
 `auth.storage_type: redis` to require Redis-backed token revocation, then call
@@ -267,7 +281,8 @@ Use `log.level` for file-based configuration and `LOG_LEVEL=debug` locally when 
 - `/live` confirms the process is alive.
 - `/ready` confirms registered dependencies are ready.
 - `/health` remains as a backward-compatible liveness alias.
-- `/version` exposes build metadata for the running binary.
+- `/version` exposes build metadata for the running binary and is not an
+  authentication public path by default.
 
 Use `/ready` for load balancer readiness and rollout gates.
 Readiness responses expose only `ok` or `failed` per dependency; detailed
@@ -331,6 +346,17 @@ supported keys are `max_recv_message_bytes`, `max_send_message_bytes`,
 `keepalive_timeout`, `max_connection_idle`, `max_connection_age`, and
 `max_connection_age_grace`. Gin-Bear does not provide gRPC-Gateway, service
 discovery, load balancing, protobuf generation, or client SDK generation.
+
+HTTP handlers must observe `ctx.Request.Context()`, and gRPC unary and stream
+handlers must observe the RPC context. All handlers must return within the
+configured shutdown budget after cancellation. Gin-Bear rejects new handlers
+after draining begins, tracks active HTTP and gRPC handlers, and closes
+lifecycle resources only after they exit. If a handler ignores cancellation
+past the total budget, `Serve` and a deferred `Shutdown` return an
+active-handler error while retaining database, Redis, and other lifecycle
+resources. Terminate that failed instance through the process supervisor, or
+retry `Shutdown` only after the handler has exited; do not restart the same Bear
+instance in-process.
 
 ## Version Metadata
 
@@ -401,7 +427,7 @@ tracing:
   sample_rate: 1.0
 ```
 
-Call `app.EnableTracingE(ctx)` during startup and return any error. The HTTP middleware extracts W3C `traceparent` headers, creates server spans named like `GET /users/:id`, and records method, route, status, client address, generated request id, service version, and Gin errors. Raw query strings are not recorded. Supported exporters are `stdout`, `otlp`, and `none`.
+Call `app.EnableTracingE(ctx)` during startup and return any error. The HTTP middleware extracts W3C `traceparent` headers, creates server spans named like `GET /users/:id`, and records method, route, status, client address, generated request id, service version, and Gin errors. Raw query strings are not recorded. Supported exporters are `stdout`, `otlp`, and `none`. Call tracing setup before `EnableRedisE`; Redis clients bind to this Bear instance's TracerProvider, and another process-local Runtime cannot change their instrumentation.
 
 ## OpenAPI And Swagger
 
@@ -574,6 +600,38 @@ redis:
 
 Use `redis.required` for file-based configuration. `REDIS_REQUIRED=true` applies the same behavior through environment configuration. Keep Redis credentials out of YAML and set `REDIS_PASSWORD` at process startup; it overrides `redis.password`.
 
+## Redis Transport Security
+
+For a remote Redis endpoint, enable TLS and configure a deployment-owned CA
+file. TLS 1.2 is the minimum version. Set `server_name` to the Redis certificate
+DNS name when it differs from the host in `addr`. If the Redis deployment
+requires mutual TLS, provide both `cert_file` and `key_file`; never place their
+contents in YAML.
+
+```yaml
+redis:
+  addr: "redis.example.internal:6379"
+  tls:
+    enabled: true
+    server_name: "redis.example.internal"
+    ca_file: "/run/secrets/redis-ca.pem"
+    cert_file: "/run/secrets/redis-client.pem" # Optional; pair with key_file.
+    key_file: "/run/secrets/redis-client.key"  # Optional; pair with cert_file.
+```
+
+Plaintext remains compatible for a loopback IP address or a trusted local
+proxy/sidecar bound to a loopback IP that provides the transport-security
+boundary. Production configuration rejects required remote Redis endpoints
+without TLS; hostnames such as `localhost` are not treated as a stable loopback
+boundary. Redis TLS configuration errors fail
+startup through `OpenRedisAdapterContext`; the legacy `NewRedisAdapter` keeps
+its existing required-versus-optional behavior and never downgrades an invalid
+TLS configuration to plaintext. `EnableRedisE` derives production and tracing
+policy from its owning Bear Runtime. The public standalone Redis opener also
+rejects every remote plaintext endpoint because it has no owning Runtime policy;
+use TLS or a loopback proxy. This does not rely on a hidden marker in one
+particular config object or on Gin's process-global mode.
+
 ## Code Generation
 
 `bear gen api` generates CRUD packages with DTO-to-model mapping, pointer-based
@@ -686,6 +744,14 @@ Load every required plugin before `ApplyAll`. Once startup begins, `LoadPlugin` 
 safely replace lifecycle-owned resources in a live process. Publish the new
 plugin with a new application instance and use a readiness-checked rolling
 replacement to move traffic.
+
+Plugin routes are fallback routes: normal Gin routes win, all global Gin
+middleware runs first, and the plugin dispatcher handles otherwise unmatched
+requests. The dispatcher is installed as the last startup middleware, so the
+existing `Bear.NoRoute`/`gin.Engine.NoRoute` APIs cannot remove plugin routes.
+Static segments outrank parameters, parameters outrank catch-all
+segments, and routes such as `/users/:id` and `/users/:name` are rejected as an
+ambiguous `ErrPluginRouteConflict` during registration.
 
 `Launch` closes the same registration barrier even when an application skips
 `ApplyAll`. It starts the lifecycle before binding HTTP or gRPC listeners, and

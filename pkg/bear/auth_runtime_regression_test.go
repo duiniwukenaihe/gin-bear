@@ -19,6 +19,27 @@ type pluginRouteAuthModule struct {
 
 type authRuntimeFailingModule struct{}
 
+type authRuntimeCompatibilityRedisModule struct {
+	auth *AuthFairing
+}
+
+type authRuntimeCompatibilityAttachModule struct {
+	auth *AuthFairing
+}
+
+type authRuntimeBlockingCompatibilityModule struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+type nativeControllerAuthModule struct {
+	controller IClass
+}
+
+type nativeControllerAuth struct {
+	auth *AuthFairing
+}
+
 type authRuntimeProbeFairing struct {
 	BaseFairing
 	calls int
@@ -48,6 +69,44 @@ func (*authRuntimeFailingModule) Beans() []Bean { return nil }
 func (*authRuntimeFailingModule) Build(*Bear)   {}
 func (*authRuntimeFailingModule) BuildE(*Bear) error {
 	return errors.New("forced module build failure")
+}
+
+func (*authRuntimeCompatibilityRedisModule) Name() string  { return "auth-runtime-compatibility-redis" }
+func (*authRuntimeCompatibilityRedisModule) Beans() []Bean { return nil }
+func (m *authRuntimeCompatibilityRedisModule) Build(app *Bear) {
+	app.HandleWithFairing(http.MethodGet, "/compatibility-redis", func() string { return "ok" }, m.auth)
+}
+
+func (*authRuntimeCompatibilityAttachModule) Name() string {
+	return "auth-runtime-compatibility-attach"
+}
+func (*authRuntimeCompatibilityAttachModule) Beans() []Bean { return nil }
+func (m *authRuntimeCompatibilityAttachModule) Build(app *Bear) {
+	app.Attach(m.auth)
+	app.GET("/compatibility-build-attach", func(ctx *gin.Context) { ctx.Status(http.StatusNoContent) })
+}
+
+func (*authRuntimeBlockingCompatibilityModule) Name() string {
+	return "auth-runtime-blocking-compatibility"
+}
+func (*authRuntimeBlockingCompatibilityModule) Beans() []Bean { return nil }
+func (m *authRuntimeBlockingCompatibilityModule) Build(*Bear) {
+	close(m.entered)
+	<-m.release
+}
+
+func (*nativeControllerAuthModule) Name() string  { return "native-controller-auth-module" }
+func (*nativeControllerAuthModule) Beans() []Bean { return nil }
+func (m *nativeControllerAuthModule) Build(app *Bear) {
+	app.Group("/native-controller", m.controller)
+}
+
+func (*nativeControllerAuth) Name() string { return "native-controller-auth" }
+func (c *nativeControllerAuth) Interceptors() []Fairing {
+	return []Fairing{c.auth}
+}
+func (*nativeControllerAuth) Build(app *Bear) {
+	app.GET("/private", func(ctx *gin.Context) { ctx.Status(http.StatusNoContent) })
 }
 
 func TestAuthEnabledExplicitAuthFairingReplacesAutomaticPolicy(t *testing.T) {
@@ -181,6 +240,79 @@ func TestCompatibilityAttachRetainsFirstExplicitAuthFairing(t *testing.T) {
 	}
 	if response := authenticatedRequest(app, http.MethodGet, "/private", secondToken); response.Code != http.StatusUnauthorized {
 		t.Fatalf("ignored second policy status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestCompatibilityAttachAfterStartupCannotReplaceAuthenticationPolicy(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Auth.Enabled = true
+	config.Auth.JWTSecret = "startup-auth-secret-1234567890"
+	config.Auth.PublicPaths = nil
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+	app.GET("/private", func(ctx *gin.Context) { ctx.Status(http.StatusNoContent) })
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll() error = %v", err)
+	}
+	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+	lateJWT := NewJWTUtil("late-auth-secret-1234567890", 1)
+	app.Attach(&AuthFairing{JWTUtil: lateJWT})
+
+	startupJWT := NewJWTUtil(config.Auth.JWTSecret, 1)
+	startupToken, err := startupJWT.GenerateToken(1, "startup@example.com")
+	if err != nil {
+		t.Fatalf("generate startup token: %v", err)
+	}
+	if response := authenticatedRequest(app, http.MethodGet, "/private", startupToken); response.Code != http.StatusNoContent {
+		t.Fatalf("startup policy status = %d, want %d; body=%s", response.Code, http.StatusNoContent, response.Body.String())
+	}
+
+	lateToken, err := lateJWT.GenerateToken(2, "late@example.com")
+	if err != nil {
+		t.Fatalf("generate late token: %v", err)
+	}
+	if response := authenticatedRequest(app, http.MethodGet, "/private", lateToken); response.Code != http.StatusUnauthorized {
+		t.Fatalf("late policy status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestCompatibilityModuleBuildCannotAttachAuthenticationPolicyAfterLifecycleStarts(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Auth.Enabled = false
+	config.Auth.PublicPaths = nil
+	jwtUtil := NewJWTUtil("compatibility-build-secret-1234567890", 1)
+	app := Ignite(config)
+	app.AddModule(&authRuntimeCompatibilityAttachModule{auth: &AuthFairing{JWTUtil: jwtUtil}})
+	err := app.ApplyAll(context.Background())
+	if !errors.Is(err, ErrLifecycleRegistrationClosed) {
+		t.Fatalf("ApplyAll() error = %v, want ErrLifecycleRegistrationClosed", err)
+	}
+}
+
+func TestConcurrentCompatibilityAttachDuringBuildFailsStartup(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Auth.Enabled = true
+	config.Auth.JWTSecret = "startup-concurrent-secret-1234567890"
+	module := &authRuntimeBlockingCompatibilityModule{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	app := Ignite(config)
+	app.AddModule(module)
+	result := make(chan error, 1)
+	go func() { result <- app.ApplyAll(context.Background()) }()
+	<-module.entered
+	app.Attach(&AuthFairing{JWTUtil: NewJWTUtil("concurrent-late-secret-1234567890", 1)})
+	close(module.release)
+
+	if err := <-result; !errors.Is(err, ErrLifecycleRegistrationClosed) {
+		t.Fatalf("ApplyAll() error = %v, want ErrLifecycleRegistrationClosed", err)
 	}
 }
 
@@ -386,6 +518,7 @@ func TestProductionRedisAuthRequiresUsableAdapterAtStartup(t *testing.T) {
 			config.Auth.Enabled = true
 			config.Auth.StorageType = "redis"
 			config.Auth.JWTSecret = randomProductionJWTKey(t)
+			config.Redis.Addr = "127.0.0.1:6379"
 
 			app, err := IgniteE(config)
 			if err != nil {
@@ -487,6 +620,296 @@ func TestCallerMiddlewareCannotBypassAutomaticAuth(t *testing.T) {
 	app.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("caller middleware bypass status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestManualAuthFairingProtectsGinAndCompiledRoutesWhenAutomaticAuthIsDisabled(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "compatibility", true: "strict"}[strict], func(t *testing.T) {
+			resetGinModeForTest(t)
+			config := NewSysConfig()
+			config.SetFrameworkStrict(strict)
+			config.Auth.Enabled = false
+			config.Auth.PublicPaths = nil
+			app, err := IgniteE(config)
+			if err != nil {
+				t.Fatalf("IgniteE() error = %v", err)
+			}
+
+			jwtUtil := NewJWTUtil("manual-route-secret-1234567890", 1)
+			fairing := &AuthFairing{JWTUtil: jwtUtil}
+			if strict {
+				if err := app.AttachE(fairing); err != nil {
+					t.Fatalf("AttachE() error = %v", err)
+				}
+			} else {
+				app.Attach(fairing)
+			}
+
+			ginHandlerReached := false
+			app.GET("/gin-private", func(ctx *gin.Context) {
+				ginHandlerReached = true
+				ctx.Status(http.StatusNoContent)
+			})
+			if err := app.HandleE(http.MethodGet, "/compiled-private", func() StatusResponse {
+				return StatusResponse{Status: http.StatusNoContent}
+			}); err != nil {
+				t.Fatalf("HandleE() error = %v", err)
+			}
+			if err := app.ApplyAll(context.Background()); err != nil {
+				t.Fatalf("ApplyAll() error = %v", err)
+			}
+
+			for _, path := range []string{"/gin-private", "/compiled-private"} {
+				response := httptest.NewRecorder()
+				app.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+				if response.Code != http.StatusUnauthorized {
+					t.Fatalf("unauthenticated %s status = %d, want %d", path, response.Code, http.StatusUnauthorized)
+				}
+			}
+			if ginHandlerReached {
+				t.Fatal("unauthenticated Gin handler was reached")
+			}
+
+			token, err := jwtUtil.GenerateToken(17, "manual@example.com")
+			if err != nil {
+				t.Fatalf("GenerateToken() error = %v", err)
+			}
+			for _, path := range []string{"/gin-private", "/compiled-private"} {
+				response := authenticatedRequest(app, http.MethodGet, path, token)
+				if response.Code != http.StatusNoContent {
+					t.Fatalf("authenticated %s status = %d, want %d; body=%s", path, response.Code, http.StatusNoContent, response.Body.String())
+				}
+			}
+			if !ginHandlerReached {
+				t.Fatal("authenticated Gin handler was not reached")
+			}
+		})
+	}
+}
+
+func TestProductionManualAuthFairingValidatesEffectiveJWTStrategy(t *testing.T) {
+	tests := []struct {
+		name    string
+		fairing *AuthFairing
+		wantErr string
+	}{
+		{
+			name:    "weak fairing JWT overrides strong config JWT",
+			fairing: &AuthFairing{JWTUtil: NewJWTUtil("bear-secret", 1)},
+			wantErr: "weak jwt secret",
+		},
+		{
+			name: "weak token manager JWT",
+			fairing: &AuthFairing{TokenManager: &AuthTokenManager{
+				JWTUtil: NewJWTUtil("bear-secret", 1),
+			}},
+			wantErr: "weak jwt secret",
+		},
+		{
+			name: "conflicting JWT strategies",
+			fairing: &AuthFairing{
+				JWTUtil: NewJWTUtil("manual-fairing-secret-1234567890", 1),
+				TokenManager: &AuthTokenManager{
+					JWTUtil: NewJWTUtil("manual-manager-secret-1234567890", 1),
+				},
+			},
+			wantErr: "conflicting JWT",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetGinModeForTest(t)
+			config := NewSysConfig()
+			config.Server.Mode = gin.ReleaseMode
+			config.SetFrameworkStrict(true)
+			config.Auth.Enabled = false
+			config.Auth.JWTSecret = "config-secret-1234567890"
+			app, err := IgniteE(config)
+			if err != nil {
+				t.Fatalf("IgniteE() error = %v", err)
+			}
+			if err := app.AttachE(tt.fairing); err != nil {
+				t.Fatalf("AttachE() error = %v", err)
+			}
+
+			err = app.ApplyAll(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ApplyAll() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestManualRedisAuthStorageFailsClosedWithoutUsableTokenManager(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		for _, tt := range []struct {
+			name    string
+			fairing *AuthFairing
+		}{
+			{
+				name:    "missing token manager",
+				fairing: &AuthFairing{JWTUtil: NewJWTUtil("manual-redis-secret-1234567890", 1)},
+			},
+			{
+				name: "missing Redis adapter",
+				fairing: &AuthFairing{TokenManager: &AuthTokenManager{
+					JWTUtil: NewJWTUtil("manual-redis-secret-1234567890", 1),
+				}},
+			},
+		} {
+			t.Run(map[bool]string{false: "compatibility", true: "strict"}[strict]+"/"+tt.name, func(t *testing.T) {
+				resetGinModeForTest(t)
+				config := NewSysConfig()
+				config.SetFrameworkStrict(strict)
+				config.Auth.Enabled = false
+				config.Auth.StorageType = "redis"
+				app, err := IgniteE(config)
+				if err != nil {
+					t.Fatalf("IgniteE() error = %v", err)
+				}
+				if strict {
+					if err := app.AttachE(tt.fairing); err != nil {
+						t.Fatalf("AttachE() error = %v", err)
+					}
+				} else {
+					app.Attach(tt.fairing)
+				}
+
+				err = app.ApplyAll(context.Background())
+				if err == nil || !strings.Contains(err.Error(), "auth.storage_type=redis") {
+					t.Fatalf("ApplyAll() error = %v, want Redis authentication storage rejection", err)
+				}
+				if _, err := ResolveE[*RedisAdapter](app.Runtime().Container); !errors.Is(err, ErrBeanMissing) {
+					t.Fatalf("RedisAdapter resolution after failed manual auth startup = %v, want ErrBeanMissing", err)
+				}
+			})
+		}
+	}
+}
+
+func TestCompatibilityModuleRedisAuthFailsClosedAfterRouteBuild(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.Auth.Enabled = false
+	config.Auth.StorageType = "redis"
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+	app.AddModule(&authRuntimeCompatibilityRedisModule{
+		auth: &AuthFairing{JWTUtil: NewJWTUtil("compatibility-redis-secret-1234567890", 1)},
+	})
+
+	err = app.ApplyAll(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "auth.storage_type=redis") {
+		t.Fatalf("ApplyAll() error = %v, want route-built Redis authentication storage rejection", err)
+	}
+}
+
+func TestNativeGinControllerAuthParticipatesInProductionValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		storageType string
+		jwtSecret   string
+		wantErr     string
+	}{
+		{name: "weak JWT", storageType: "jwt", jwtSecret: "bear-secret", wantErr: "weak jwt secret"},
+		{name: "missing Redis revocation", storageType: "redis", jwtSecret: "native-controller-secret-1234567890", wantErr: "auth.storage_type=redis"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetGinModeForTest(t)
+			config := NewSysConfig()
+			config.Server.Mode = gin.ReleaseMode
+			config.SetFrameworkStrict(true)
+			config.Auth.Enabled = false
+			config.Auth.StorageType = tt.storageType
+			config.Redis.Addr = "127.0.0.1:6379"
+			app := Ignite(config)
+			controller := &nativeControllerAuth{auth: &AuthFairing{JWTUtil: NewJWTUtil(tt.jwtSecret, 1)}}
+			if err := app.AddModuleE(&nativeControllerAuthModule{controller: controller}); err != nil {
+				t.Fatalf("AddModuleE() error = %v", err)
+			}
+
+			err := app.ApplyAll(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ApplyAll() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestExplicitTokenManagerWithoutJWTUsesFairingJWT(t *testing.T) {
+	resetGinModeForTest(t)
+	config := NewSysConfig()
+	config.SetFrameworkStrict(true)
+	config.Auth.Enabled = false
+	config.Auth.PublicPaths = nil
+	jwtUtil := NewJWTUtil("explicit-manager-fallback-secret-1234567890", 1)
+	manager := NewAuthTokenManager()
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+	if err := app.AttachE(&AuthFairing{JWTUtil: jwtUtil, TokenManager: manager}); err != nil {
+		t.Fatalf("AttachE() error = %v", err)
+	}
+	app.GET("/private", func(ctx *gin.Context) { ctx.Status(http.StatusNoContent) })
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll() error = %v", err)
+	}
+	if manager.JWTUtil != jwtUtil {
+		t.Fatalf("TokenManager JWTUtil = %p, want fairing JWTUtil %p", manager.JWTUtil, jwtUtil)
+	}
+	token, err := jwtUtil.GenerateToken(23, "manager-fallback@example.com")
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+	if response := authenticatedRequest(app, http.MethodGet, "/private", token); response.Code != http.StatusNoContent {
+		t.Fatalf("authenticated status = %d, want %d; body=%s", response.Code, http.StatusNoContent, response.Body.String())
+	}
+}
+
+func TestManualRedisAuthCanOpenConfiguredRevocationStorage(t *testing.T) {
+	resetGinModeForTest(t)
+	server := miniredis.RunT(t)
+	config := NewSysConfig()
+	config.SetFrameworkStrict(true)
+	config.Auth.Enabled = false
+	config.Auth.StorageType = "redis"
+	config.Auth.PublicPaths = nil
+	config.Redis.Addr = server.Addr()
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatalf("IgniteE() error = %v", err)
+	}
+	if err := app.EnableRedisE(context.Background()); err != nil {
+		t.Fatalf("EnableRedisE() error = %v", err)
+	}
+
+	jwtUtil := NewJWTUtil("manual-redis-open-secret-1234567890", 1)
+	auth := &AuthFairing{JWTUtil: jwtUtil}
+	if err := app.AttachE(auth); err != nil {
+		t.Fatalf("AttachE() error = %v", err)
+	}
+	app.GET("/private", func(ctx *gin.Context) { ctx.Status(http.StatusNoContent) })
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll() error = %v", err)
+	}
+	if auth.TokenManager == nil || auth.TokenManager.Redis == nil || auth.TokenManager.Redis.Client == nil {
+		t.Fatalf("manual Redis auth policy = %#v, want usable revocation manager", auth)
+	}
+
+	token, err := jwtUtil.GenerateToken(23, "manual-redis@example.com")
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+	if err := auth.TokenManager.RevokeToken(context.Background(), token); err != nil {
+		t.Fatalf("RevokeToken() error = %v", err)
+	}
+	if response := authenticatedRequest(app, http.MethodGet, "/private", token); response.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked manual token status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
 }
 

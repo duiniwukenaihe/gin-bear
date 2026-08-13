@@ -3,6 +3,7 @@ package bear
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -609,8 +610,22 @@ func (c *SysConfig) validateSemantic() error {
 		if c.Redis.MinIdleConns > c.Redis.PoolSize {
 			return fmt.Errorf("redis.min_idle_conns must not exceed redis.pool_size")
 		}
+		requiresRedis := c.Redis.Required || (c.Auth != nil && strings.EqualFold(strings.TrimSpace(c.Auth.StorageType), "redis"))
+		if isProductionMode(c) && requiresRedis && !c.Redis.TLS.Enabled && !redisAddressIsLoopback(c.Redis.Addr) {
+			return fmt.Errorf("production remote Redis requires TLS or a loopback proxy address")
+		}
 	}
 	return nil
+}
+
+func redisAddressIsLoopback(address string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 func isWeakProductionJWTSecret(secret string) bool {
@@ -759,7 +774,7 @@ func NewSysConfig() *SysConfig {
 			StorageType:      "jwt",
 			JWTSecret:        "bear-secret",
 			TokenExpireHours: 24,
-			PublicPaths:      stringSlicePointer("/health", "/live", "/ready", "/version", "/swagger/*", "/login"),
+			PublicPaths:      stringSlicePointer("/health", "/live", "/ready", "/swagger/*", "/login"),
 		},
 		DB:     &DBConfig{Enabled: false, Type: "mysql", Host: "localhost", Port: "3306", User: "root"},
 		Redis:  &RedisConfig{Addr: "localhost:6379", Password: "", DB: 0},

@@ -92,45 +92,55 @@ var (
 // Bear 是核心框架引擎
 type Bear struct {
 	*gin.Engine
-	g                         *gin.RouterGroup
-	exprData                  map[string]interface{}
-	fairingHandler            *FairingHandler
-	routeTree                 *RouteTree // 路由树，用于存储路由级别的 Fairing
-	routeRegistry             []RouteMetadata
-	registration              *routeRegistrationContext
-	grpcServiceRegistrars     []GRPCServiceRegistrar
-	grpcUnaryInterceptors     []grpc.UnaryServerInterceptor
-	grpcStreamInterceptors    []grpc.StreamServerInterceptor
-	mounts                    []MountMetadata
-	modules                   []Module
-	runtime                   *Runtime
-	eRegistrationMu           sync.Mutex
-	strictRegistrationVersion uint64
-	strictBuiltModules        int
-	strictBuiltMounts         int
-	strictBuildComplete       bool
-	strictPluginModules       map[int]struct{}
-	strictInjectionMu         sync.Mutex
-	strictInjectionAttempts   map[any]*strictInjectionAttempt
-	strictInjectionApplied    map[any]struct{}
-	strictInjectionSession    bool
-	strictInjectionTargets    []any
-	applyMu                   sync.Mutex
-	applyState                applyState
-	applyErr                  error
-	applyAttempt              *applyAttempt
-	servingMu                 sync.Mutex
-	serving                   bool
-	served                    bool
-	pluginBarrier             *pluginRegistrationBarrier
-	pluginDispatcher          *PluginDispatcher
-	pluginManager             *PluginManager
-	pluginMode                bool // 标记当前是否处于插件加载模式
-	automaticAuthFairing      *AuthFairing
-	activeAuthFairing         atomic.Pointer[AuthFairing]
-	metricsRegistered         atomic.Bool
-	tracingRegistered         atomic.Bool
-	webSocketRoutes           atomic.Int64
+	g                            *gin.RouterGroup
+	exprData                     map[string]interface{}
+	fairingHandler               *FairingHandler
+	routeTree                    *RouteTree // 路由树，用于存储路由级别的 Fairing
+	routeRegistry                []RouteMetadata
+	registration                 *routeRegistrationContext
+	grpcServiceRegistrars        []GRPCServiceRegistrar
+	grpcUnaryInterceptors        []grpc.UnaryServerInterceptor
+	grpcStreamInterceptors       []grpc.StreamServerInterceptor
+	mounts                       []MountMetadata
+	modules                      []Module
+	runtime                      *Runtime
+	eRegistrationMu              sync.Mutex
+	strictRegistrationVersion    uint64
+	strictBuiltModules           int
+	strictBuiltMounts            int
+	strictBuildComplete          bool
+	strictPluginModules          map[int]struct{}
+	strictInjectionMu            sync.Mutex
+	strictInjectionAttempts      map[any]*strictInjectionAttempt
+	strictInjectionApplied       map[any]struct{}
+	strictInjectionSession       bool
+	strictInjectionTargets       []any
+	compatibilityRegistrationErr error
+	applyMu                      sync.Mutex
+	applyState                   applyState
+	applyErr                     error
+	applyAttempt                 *applyAttempt
+	servingMu                    sync.Mutex
+	serving                      bool
+	served                       bool
+	shutdownRequested            bool
+	serveCancel                  context.CancelFunc
+	serveDone                    chan struct{}
+	serveErr                     error
+	pluginBarrier                *pluginRegistrationBarrier
+	pluginDispatcher             *PluginDispatcher
+	pluginDispatcherInstalled    atomic.Bool
+	pluginManager                *PluginManager
+	pluginMode                   bool // 标记当前是否处于插件加载模式
+	automaticAuthFairing         *AuthFairing
+	activeAuthFairing            atomic.Pointer[AuthFairing]
+	controllerAuthFairings       []*AuthFairing
+	httpHandlers                 *activeHandlerTracker
+	activeGRPCServer             atomic.Pointer[grpcRuntimeServer]
+	handlersUnsafe               atomic.Bool
+	metricsRegistered            atomic.Bool
+	tracingRegistered            atomic.Bool
+	webSocketRoutes              atomic.Int64
 }
 
 type applyState uint8
@@ -233,6 +243,7 @@ func IgniteE(args ...any) (*Bear, error) {
 	}
 
 	runtime := newRuntime(config)
+	httpHandlers := newActiveHandlerTracker()
 	b := &Bear{
 		Engine:           engine,
 		exprData:         map[string]interface{}{},
@@ -241,6 +252,7 @@ func IgniteE(args ...any) (*Bear, error) {
 		pluginBarrier:    newPluginRegistrationBarrier(),
 		pluginDispatcher: newPluginDispatcher(runtime.Logger),
 		runtime:          runtime,
+		httpHandlers:     httpHandlers,
 	}
 	b.pluginManager = NewPluginManager(b)
 
@@ -263,6 +275,7 @@ func IgniteE(args ...any) (*Bear, error) {
 	}
 
 	// 注入底座中间件
+	b.Use(httpHandlers.middleware())
 	b.Use(runtimeOwnershipMiddleware(runtime))
 	b.Use(securityHeadersMiddleware())
 	b.Use(requestBodyLimitMiddleware(effectiveRequestBodyLimit(config)))
@@ -272,14 +285,10 @@ func IgniteE(args ...any) (*Bear, error) {
 	if config.CORS != nil && config.CORS.Enabled {
 		b.Use(CORSMiddleware())
 	}
-	if automaticAuth != nil {
-		b.Use(authFairingMiddleware(b.activeAuthFairing.Load))
-	}
-	b.Use(b.pluginDispatcher.Dispatch())
+	b.Use(authFairingMiddleware(b.activeAuthFairing.Load))
 	for _, middleware := range ginMiddlewares {
 		b.Use(middleware)
 	}
-
 	publishDefaultRuntime(runtime)
 	runtime.Logger.Info("WhiteBear core awakened", "server", config.Server.Name)
 	return b, nil
@@ -376,7 +385,7 @@ func (b *Bear) EnableMetricsE() error {
 	if config != nil && config.Metrics != nil && config.Metrics.Path != "" {
 		path = config.Metrics.Path
 	}
-	b.activeGroup().GET(path, gin.WrapH(b.runtime.Metrics.Handler()))
+	b.activeGroup().GET(path, b.nativeGinFairingGuard(), gin.WrapH(b.runtime.Metrics.Handler()))
 	b.metricsRegistered.Store(true)
 	b.strictRegistrationVersion++
 	return nil
@@ -394,14 +403,16 @@ func (b *Bear) Launch(ctx context.Context) error {
 }
 
 // Serve runs the application without installing process signal handlers.
-func (b *Bear) Serve(ctx context.Context) error {
+func (b *Bear) Serve(ctx context.Context) (resultErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !b.acquireServing() {
+	serveCtx, ok := b.acquireServing(ctx)
+	if !ok {
 		return ErrAlreadyServing
 	}
-	defer b.releaseServing()
+	ctx = serveCtx
+	defer func() { b.releaseServing(resultErr) }()
 	if err := b.ApplyAll(ctx); err != nil {
 		if ctx.Err() != nil && isOnlyContextError(err, ctx.Err()) {
 			return nil
@@ -416,6 +427,7 @@ func (b *Bear) Serve(ctx context.Context) error {
 	if err != nil {
 		return b.cleanupLaunchFailure(config, fmt.Errorf("gRPC preflight failed: %w", err))
 	}
+	b.handlersUnsafe.Store(false)
 
 	httpListener, err := net.Listen("tcp", httpServer.Addr)
 	if err != nil {
@@ -432,6 +444,9 @@ func (b *Bear) Serve(ctx context.Context) error {
 			grpcServer.Stop()
 			return b.cleanupLaunchFailure(config, fmt.Errorf("failed to listen for gRPC: %w", err), httpListener)
 		}
+	}
+	if grpcServer != nil {
+		b.activeGRPCServer.Store(grpcServer)
 	}
 
 	type serveResult struct {
@@ -479,15 +494,29 @@ func (b *Bear) Serve(ctx context.Context) error {
 
 	if grpcServer != nil {
 		grpcServer.setNotServing()
+		grpcServer.stopAcceptingHandlers()
 	}
+	b.httpHandlers.stopAccepting()
 	shutdownStarted := time.Now()
 	shutdownDeadline := shutdownStarted.Add(shutdownTimeout(config))
 	drainDeadline := shutdownStarted.Add(shutdownTimeout(config) * 3 / 4)
 	if err := b.drainServers(drainDeadline, httpServer, grpcServer); err != nil {
 		launchErrors = append(launchErrors, err)
 	}
-	if err := runShutdownUntil(shutdownDeadline, b.runtime.Lifecycle.Stop); err != nil {
-		launchErrors = append(launchErrors, fmt.Errorf("lifecycle shutdown: %w", err))
+	handlersStopped := true
+	handlerCtx, cancelHandlers := context.WithDeadline(context.Background(), shutdownDeadline)
+	if err := b.waitActiveHandlers(handlerCtx, grpcServer); err != nil {
+		handlersStopped = false
+		b.handlersUnsafe.Store(true)
+		launchErrors = append(launchErrors, err)
+	}
+	cancelHandlers()
+	if handlersStopped {
+		if err := runShutdownUntil(shutdownDeadline, b.runtime.Lifecycle.Stop); err != nil {
+			launchErrors = append(launchErrors, fmt.Errorf("lifecycle shutdown: %w", err))
+		}
+		b.activeGRPCServer.Store(nil)
+		b.handlersUnsafe.Store(false)
 	}
 	if err := runShutdownUntil(shutdownDeadline, func(ctx context.Context) error {
 		var waitErrors []error
@@ -568,17 +597,21 @@ func isOnlyContextError(err, contextErr error) bool {
 	return errors.Is(err, contextErr)
 }
 
-func (b *Bear) acquireServing() bool {
+func (b *Bear) acquireServing(parent context.Context) (context.Context, bool) {
 	if b == nil {
-		return false
+		return nil, false
 	}
 	b.servingMu.Lock()
 	defer b.servingMu.Unlock()
-	if b.serving || b.served {
-		return false
+	if b.serving || b.served || b.shutdownRequested {
+		return nil, false
 	}
+	ctx, cancel := context.WithCancel(parent)
 	b.serving = true
-	return true
+	b.serveCancel = cancel
+	b.serveDone = make(chan struct{})
+	b.serveErr = nil
+	return ctx, true
 }
 
 func (b *Bear) markServed() {
@@ -590,12 +623,20 @@ func (b *Bear) markServed() {
 	b.servingMu.Unlock()
 }
 
-func (b *Bear) releaseServing() {
+func (b *Bear) releaseServing(err error) {
 	if b == nil {
 		return
 	}
 	b.servingMu.Lock()
+	if b.serveCancel != nil {
+		b.serveCancel()
+		b.serveCancel = nil
+	}
 	b.serving = false
+	b.serveErr = err
+	if b.serveDone != nil {
+		close(b.serveDone)
+	}
 	b.servingMu.Unlock()
 }
 
@@ -621,8 +662,93 @@ func (b *Bear) Shutdown(ctx context.Context) error {
 		ctx, cancel = context.WithTimeout(ctx, shutdownTimeout(b.runtime.Config))
 		defer cancel()
 	}
+	b.servingMu.Lock()
+	b.shutdownRequested = true
+	if b.serving {
+		cancelServe := b.serveCancel
+		serveDone := b.serveDone
+		b.httpHandlers.stopAccepting()
+		if grpcServer := b.activeGRPCServer.Load(); grpcServer != nil {
+			grpcServer.stopAcceptingHandlers()
+		}
+		if cancelServe != nil {
+			cancelServe()
+		}
+		b.servingMu.Unlock()
+		select {
+		case <-serveDone:
+			b.servingMu.Lock()
+			err := b.serveErr
+			b.servingMu.Unlock()
+			return err
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for Serve shutdown: %w", ctx.Err())
+		}
+	}
+	b.servingMu.Unlock()
+	grpcServer := b.activeGRPCServer.Load()
+	b.httpHandlers.stopAccepting()
+	if grpcServer != nil {
+		grpcServer.stopAcceptingHandlers()
+	}
+	if b.handlersUnsafe.Load() && b.activeHandlerCount(grpcServer) > 0 {
+		syncDeadline := time.Now().Add(25 * time.Millisecond)
+		if deadline, ok := ctx.Deadline(); ok && deadline.Before(syncDeadline) {
+			syncDeadline = deadline
+		}
+		syncCtx, cancel := context.WithDeadline(context.Background(), syncDeadline)
+		err := b.waitActiveHandlers(syncCtx, grpcServer)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("active handlers remain after forced shutdown; lifecycle resources are retained: %w", err)
+		}
+	}
+	if err := b.waitActiveHandlers(ctx, grpcServer); err != nil {
+		return fmt.Errorf("waiting for active handlers before lifecycle shutdown: %w", err)
+	}
+	b.activeGRPCServer.Store(nil)
+	b.handlersUnsafe.Store(false)
 	b.runtime.beginHijackedShutdown()
 	return errors.Join(b.runtime.closeHijackedConnections(), b.runtime.Lifecycle.Stop(ctx))
+}
+
+func (b *Bear) waitActiveHandlers(ctx context.Context, grpcServer *grpcRuntimeServer) error {
+	type waitResult struct {
+		name string
+		err  error
+	}
+	waiters := []struct {
+		name string
+		wait func(context.Context) error
+	}{
+		{name: "HTTP", wait: b.httpHandlers.wait},
+	}
+	if grpcServer != nil {
+		waiters = append(waiters, struct {
+			name string
+			wait func(context.Context) error
+		}{name: "gRPC", wait: grpcServer.waitHandlers})
+	}
+	results := make(chan waitResult, len(waiters))
+	for _, waiter := range waiters {
+		go func() { results <- waitResult{name: waiter.name, err: waiter.wait(ctx)} }()
+	}
+	var waitErrors []error
+	for range waiters {
+		result := <-results
+		if result.err != nil {
+			waitErrors = append(waitErrors, fmt.Errorf("waiting for active %s handlers: %w", result.name, result.err))
+		}
+	}
+	return errors.Join(waitErrors...)
+}
+
+func (b *Bear) activeHandlerCount(grpcServer *grpcRuntimeServer) int {
+	count := b.httpHandlers.count()
+	if grpcServer != nil {
+		count += grpcServer.activeHandlers()
+	}
+	return count
 }
 
 func runShutdownPhase(timeout time.Duration, phase func(context.Context) error) error {
@@ -664,8 +790,9 @@ func shutdownGRPCServer(ctx context.Context, server grpcShutdownServer) error {
 		return nil
 	case <-ctx.Done():
 		// grpc.Server.Stop synchronously closes transports and cancels active RPC
-		// contexts before application resources begin shutting down.
-		server.Stop()
+		// contexts. Some non-cooperative streams can keep transport cleanup from
+		// returning, so the handler tracker remains the resource-safety gate.
+		go server.Stop()
 		return fmt.Errorf("gRPC graceful shutdown: %w", ctx.Err())
 	}
 }
@@ -998,7 +1125,7 @@ func (b *Bear) EnableRedisE(ctx context.Context) error {
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, readinessTimeout(config))
 	defer cancel()
-	adapter, err := OpenRedisAdapterContext(checkCtx, config.Redis)
+	adapter, err := openRedisAdapterContext(checkCtx, config.Redis, redisRuntimeOptionsFromRuntime(b.runtime))
 	if err != nil {
 		return err
 	}
@@ -1016,7 +1143,7 @@ func redisRequiredByConfig(config *SysConfig) bool {
 	if config.Redis.Required {
 		return true
 	}
-	return config.Auth != nil && config.Auth.Enabled && strings.EqualFold(strings.TrimSpace(config.Auth.StorageType), "redis")
+	return config.Auth != nil && strings.EqualFold(strings.TrimSpace(config.Auth.StorageType), "redis")
 }
 
 // EnableGzip 启用 Gzip 响应压缩 (阶段 84)
@@ -1101,6 +1228,11 @@ func (b *Bear) Attach(f ...Fairing) *Bear {
 	}
 	b.eRegistrationMu.Lock()
 	defer b.eRegistrationMu.Unlock()
+	if b.runtime.Lifecycle.registrationClosed() {
+		b.compatibilityRegistrationErr = errors.Join(b.compatibilityRegistrationErr, ErrLifecycleRegistrationClosed)
+		b.runtime.Logger.Warn("Fairing registration rejected after application startup began")
+		return b
+	}
 	registration := b.planFairingRegistrationLocked(f)
 	if registration.err != nil {
 		b.runtime.Logger.Warn("Duplicate AuthFairing ignored; keeping the first explicit authentication policy")
@@ -1303,6 +1435,7 @@ func (b *Bear) HandleWSE(relativePath string, handler WebSocketHandler) error {
 	}
 
 	b.activeGroup().GET(relativePath, func(ctx *gin.Context) {
+		defer b.finishNativeGinResponseFairings(ctx, nil)
 		// 2. 触发 Fairing OnRequest (支持鉴权、限流等)
 		if err := b.runWebSocketRequestFairings(ctx); err != nil {
 			WriteError(ctx, err)
@@ -1441,6 +1574,9 @@ func (b *Bear) HandleWithFairingE(httpMethod, relativePath string, handler inter
 		return err
 	}
 
+	if err := b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler, fairings); err != nil {
+		return err
+	}
 	for _, f := range fairings {
 		if b.frameworkStrict() {
 			b.strictInjectionTargets = append(b.strictInjectionTargets, f)
@@ -1449,7 +1585,6 @@ func (b *Bear) HandleWithFairingE(httpMethod, relativePath string, handler inter
 		}
 	}
 	b.routeTree.addRoute(httpMethod, relativePath, fairings)
-	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler, fairings)
 	b.strictRegistrationVersion++
 	return nil
 }
@@ -1464,12 +1599,14 @@ func (b *Bear) registerHandler(httpMethod, relativePath string, handler interfac
 	if err != nil {
 		return err
 	}
-	b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler, routeFairings)
+	if err := b.registerCompiledHandler(httpMethod, relativePath, handler, wrappedHandler, routeFairings); err != nil {
+		return err
+	}
 	b.strictRegistrationVersion++
 	return nil
 }
 
-func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler interface{}, wrapped gin.HandlerFunc, routeFairings []Fairing) {
+func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler interface{}, wrapped gin.HandlerFunc, routeFairings []Fairing) error {
 	group := b.activeGroup()
 	registration := b.registration
 	groupName := ""
@@ -1487,15 +1624,27 @@ func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler 
 		HandlerType: reflect.TypeOf(handler),
 		HandlerName: runtimeFuncName(handler),
 	}
-	b.routeRegistry = append(b.routeRegistry, route)
 	effectiveFairings := append([]Fairing(nil), controllerFairings...)
 	effectiveFairings = append(effectiveFairings, routeFairings...)
-	b.setOpenAPIRouteMetadata(route, joinRoutePath(group.BasePath(), relativePath), controller, effectiveFairings...)
+	fullPath := joinRoutePath(group.BasePath(), relativePath)
 	if b.pluginMode {
-		b.pluginDispatcher.Register(httpMethod, relativePath, wrapped)
-		return
+		pluginHandler := wrapped
+		if len(controllerFairings) > 0 {
+			var err error
+			pluginHandler, err = b.compilePipeline(handler, effectiveFairings)
+			if err != nil {
+				return fmt.Errorf("compile plugin controller pipeline: %w", err)
+			}
+		}
+		if err := b.pluginDispatcher.RegisterE(httpMethod, fullPath, pluginHandler); err != nil {
+			return err
+		}
+	} else {
+		group.Handle(httpMethod, relativePath, wrapped)
 	}
-	group.Handle(httpMethod, relativePath, wrapped)
+	b.routeRegistry = append(b.routeRegistry, route)
+	b.setOpenAPIRouteMetadata(route, fullPath, controller, effectiveFairings...)
+	return nil
 }
 
 func joinRoutePath(basePath, relativePath string) string {
@@ -1508,6 +1657,7 @@ func joinRoutePath(basePath, relativePath string) string {
 func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gin.HandlerFunc, error) {
 	if opaque, ok := opaqueGinHandler(handler); ok {
 		return func(ctx *gin.Context) {
+			defer b.finishNativeGinResponseFairings(ctx, routeFairings)
 			if err := b.runPipelineRequestFairings(ctx, routeFairings); err != nil {
 				WriteError(ctx, err)
 				return
@@ -1524,6 +1674,7 @@ func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gi
 		return nil, err
 	}
 	return func(ctx *gin.Context) {
+		defer b.finishNativeGinResponseFairings(ctx, routeFairings)
 		if err := b.runPipelineRequestFairings(ctx, routeFairings); err != nil {
 			WriteError(ctx, err)
 			return
@@ -1531,7 +1682,6 @@ func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gi
 		if requestFairingTerminal(ctx) {
 			return
 		}
-
 		result, err := compiled(ctx)
 		if err != nil {
 			WriteError(ctx, err)
@@ -1551,13 +1701,14 @@ func (b *Bear) compilePipeline(handler interface{}, routeFairings []Fairing) (gi
 }
 
 func (b *Bear) runRequestFairings(ctx *gin.Context, routeFairings []Fairing) error {
-	if err := runRequestFairings(ctx, routeFairings); err != nil {
+	state := strictFairingStateFor(ctx)
+	if err := runEnteredRequestFairings(ctx, state, routeFairings); err != nil {
 		return err
 	}
 	if requestFairingTerminal(ctx) {
 		return nil
 	}
-	return b.fairingHandler.OnRequest(ctx)
+	return runEnteredRequestFairings(ctx, state, b.globalRequestFairings())
 }
 
 func (b *Bear) frameworkStrict() bool {
@@ -1596,7 +1747,21 @@ func (b *Bear) runStrictGlobalFairings(ctx *gin.Context, state *strictFairingSta
 		return nil
 	}
 	state.globalStarted = true
-	return runEnteredRequestFairings(ctx, state, b.fairingHandler.requestFairings)
+	return runEnteredRequestFairings(ctx, state, b.globalRequestFairings())
+}
+
+func (b *Bear) globalRequestFairings() []Fairing {
+	if b == nil || b.fairingHandler == nil {
+		return nil
+	}
+	fairings := make([]Fairing, 0, len(b.fairingHandler.requestFairings))
+	for _, fairing := range b.fairingHandler.requestFairings {
+		if _, isAuth := fairing.(*AuthFairing); isAuth {
+			continue
+		}
+		fairings = append(fairings, fairing)
+	}
+	return fairings
 }
 
 func (b *Bear) runPipelineRequestFairings(ctx *gin.Context, routeFairings []Fairing) error {
@@ -1617,37 +1782,48 @@ func (b *Bear) runPipelineRequestFairings(ctx *gin.Context, routeFairings []Fair
 }
 
 func (b *Bear) runPipelineResponseFairings(ctx *gin.Context, result any, routeFairings []Fairing) (any, error) {
-	if !b.frameworkStrict() {
-		response, err := b.fairingHandler.OnResponseE(result)
-		if err != nil {
-			return nil, err
-		}
-		return runResponseFairings(routeFairings, response)
+	if fairingResponseCompleted(ctx) {
+		return result, nil
 	}
+	markFairingResponseCompleted(ctx)
 	if ctx == nil {
 		return result, nil
 	}
 	return runEnteredResponseFairings(strictFairingStateFor(ctx), result)
 }
 
+func (b *Bear) runNativeGinResponseFairings(ctx *gin.Context, routeFairings []Fairing) error {
+	_, err := b.runPipelineResponseFairings(ctx, nil, routeFairings)
+	return err
+}
+
+func (b *Bear) finishNativeGinResponseFairings(ctx *gin.Context, routeFairings []Fairing) {
+	if err := b.runNativeGinResponseFairings(ctx, routeFairings); err != nil {
+		WriteError(ctx, err)
+	}
+}
+
+func fairingResponseCompleted(ctx *gin.Context) bool {
+	if ctx == nil {
+		return true
+	}
+	completed, _ := ctx.Get(fairingResponseCompletedKey)
+	done, _ := completed.(bool)
+	return done
+}
+
+func markFairingResponseCompleted(ctx *gin.Context) {
+	if ctx != nil {
+		ctx.Set(fairingResponseCompletedKey, true)
+	}
+}
+
 func (b *Bear) runWebSocketRequestFairings(ctx *gin.Context) error {
 	if !b.frameworkStrict() {
-		return b.fairingHandler.OnRequest(ctx)
+		return runEnteredRequestFairings(ctx, strictFairingStateFor(ctx), b.fairingHandler.requestFairings)
 	}
 	state := strictFairingStateFor(ctx)
 	return b.runStrictGlobalFairings(ctx, state)
-}
-
-func runResponseFairings(fairings []Fairing, result any) (any, error) {
-	response := result
-	for _, fairing := range fairings {
-		transformed, err := fairing.OnResponse(response)
-		if err != nil {
-			return nil, err
-		}
-		response = transformed
-	}
-	return response, nil
 }
 
 func (b *Bear) activeGroup() *gin.RouterGroup {
@@ -1786,6 +1962,7 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 		if err := b.validateProductionAuthPolicy(); err != nil {
 			return err
 		}
+		b.installPluginDispatcher()
 		b.runtime.Logger.Info("Executing component initializers...")
 		if err := b.runtime.Lifecycle.Start(ctx); err != nil {
 			lifecycleStartFailed = true
@@ -1828,30 +2005,78 @@ func (b *Bear) applyAll(ctx context.Context) (resultErr error) {
 			b.buildController(group, m.Group, class)
 		}
 	}
+	if err := b.compatibilityRegistrationError(); err != nil {
+		return fmt.Errorf("compatibility build registration failed: %w", err)
+	}
+	if err := b.configureAuthRuntimeDependencies(); err != nil {
+		return err
+	}
+	if err := b.validateAuthRuntimeDependencies(); err != nil {
+		return err
+	}
 	if err := b.validateProductionAuthPolicy(); err != nil {
 		return err
 	}
+	b.installPluginDispatcher()
 
 	return nil
+}
+
+func (b *Bear) installPluginDispatcher() {
+	if b == nil || b.Engine == nil || b.pluginDispatcher == nil {
+		return
+	}
+	if b.pluginDispatcherInstalled.CompareAndSwap(false, true) {
+		b.Engine.Use(b.pluginDispatcher.dispatchFallback())
+	}
+}
+
+func (b *Bear) compatibilityRegistrationError() error {
+	if b == nil {
+		return nil
+	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	return b.compatibilityRegistrationErr
 }
 
 func (b *Bear) configureAuthRuntimeDependencies() error {
 	if b == nil || b.runtime == nil {
 		return nil
 	}
-	auth := b.activeAuthFairing.Load()
-	if auth == nil || auth.TokenManager == nil || auth.TokenManager.Redis != nil {
-		return nil
+	config := b.runtime.Config
+	requireRevocation := config != nil && config.Auth != nil && strings.EqualFold(strings.TrimSpace(config.Auth.StorageType), "redis")
+	for _, auth := range b.authFairings() {
+		if auth.TokenManager != nil && auth.TokenManager.JWTUtil == nil {
+			if auth.JWTUtil != nil {
+				auth.TokenManager.JWTUtil = auth.JWTUtil
+			} else if jwtUtil, err := ResolveE[*JWTUtil](b.runtime.Container); err == nil {
+				auth.TokenManager.JWTUtil = jwtUtil
+			} else {
+				return fmt.Errorf("configure authentication JWT strategy: %w", err)
+			}
+		}
+		if requireRevocation && auth.TokenManager == nil {
+			jwtUtil, err := auth.effectiveJWTUtil()
+			if err != nil {
+				return fmt.Errorf("configure Redis authentication policy: %w", err)
+			}
+			auth.TokenManager = &AuthTokenManager{JWTUtil: jwtUtil}
+		}
+		if auth.TokenManager == nil || auth.TokenManager.Redis != nil {
+			continue
+		}
+		redis, err := ResolveE[*RedisAdapter](b.runtime.Container)
+		if err == nil {
+			auth.TokenManager.Redis = redis
+			continue
+		}
+		if errors.Is(err, ErrBeanMissing) {
+			continue
+		}
+		return fmt.Errorf("resolve optional Redis authentication storage: %w", err)
 	}
-	redis, err := ResolveE[*RedisAdapter](b.runtime.Container)
-	if err == nil {
-		auth.TokenManager.Redis = redis
-		return nil
-	}
-	if errors.Is(err, ErrBeanMissing) {
-		return nil
-	}
-	return fmt.Errorf("resolve optional Redis authentication storage: %w", err)
+	return nil
 }
 
 func (b *Bear) validateAuthRuntimeDependencies() error {
@@ -1859,12 +2084,13 @@ func (b *Bear) validateAuthRuntimeDependencies() error {
 		return nil
 	}
 	config := b.runtime.Config
-	if config == nil || config.Auth == nil || !config.Auth.Enabled || !strings.EqualFold(strings.TrimSpace(config.Auth.StorageType), "redis") {
+	if config == nil || config.Auth == nil || !strings.EqualFold(strings.TrimSpace(config.Auth.StorageType), "redis") {
 		return nil
 	}
-	auth := b.activeAuthFairing.Load()
-	if auth == nil || auth.TokenManager == nil || auth.TokenManager.Redis == nil || auth.TokenManager.Redis.Client == nil {
-		return errors.New("auth.storage_type=redis requires a usable RedisAdapter bean")
+	for _, auth := range b.authFairings() {
+		if auth.TokenManager == nil || auth.TokenManager.Redis == nil || auth.TokenManager.Redis.Client == nil {
+			return errors.New("auth.storage_type=redis requires every AuthFairing to use a usable TokenManager and RedisAdapter bean")
+		}
 	}
 	return nil
 }
@@ -2190,7 +2416,7 @@ func (b *Bear) GroupE(relativePath string, classes ...IClass) (*gin.RouterGroup,
 		return nil, err
 	}
 	parent := b.activeGroup()
-	group := parent.Group(relativePath)
+	group := parent.Group(relativePath, b.nativeGinFairingGuard())
 	b.strictRegistrationVersion++
 	unlock()
 
@@ -2234,6 +2460,9 @@ func (b *Bear) buildControllerE(group *gin.RouterGroup, groupName string, class 
 	if inter, ok := class.(IInterceptors); ok {
 		ownFairings = append([]Fairing(nil), inter.Interceptors()...)
 		for _, fairing := range ownFairings {
+			if auth, ok := fairing.(*AuthFairing); ok && auth != nil {
+				b.registerControllerAuthFairing(auth)
+			}
 			if b.frameworkStrict() {
 				if err := b.applyStrictObject(fairing); err != nil {
 					return fmt.Errorf("inject controller fairing %T: %w", fairing, err)
@@ -2259,6 +2488,7 @@ func (b *Bear) buildControllerE(group *gin.RouterGroup, groupName string, class 
 
 	if b.frameworkStrict() {
 		group.Use(func(ctx *gin.Context) {
+			defer b.finishNativeGinResponseFairings(ctx, nil)
 			state := strictFairingStateFor(ctx)
 			if err := b.runStrictGlobalFairings(ctx, state); err != nil {
 				WriteError(ctx, err)
@@ -2282,11 +2512,12 @@ func (b *Bear) buildControllerE(group *gin.RouterGroup, groupName string, class 
 		for _, fairing := range ownFairings {
 			current := fairing
 			group.Use(func(ctx *gin.Context) {
+				defer b.finishNativeGinResponseFairings(ctx, nil)
 				if requestFairingTerminal(ctx) {
 					ctx.Abort()
 					return
 				}
-				if err := current.OnRequest(ctx); err != nil {
+				if err := runEnteredRequestFairings(ctx, strictFairingStateFor(ctx), []Fairing{current}); err != nil {
 					WriteError(ctx, err)
 					return
 				}
@@ -2310,6 +2541,15 @@ func (b *Bear) buildControllerE(group *gin.RouterGroup, groupName string, class 
 	return nil
 }
 
+func (b *Bear) registerControllerAuthFairing(auth *AuthFairing) {
+	for _, registered := range b.controllerAuthFairings {
+		if registered == auth {
+			return
+		}
+	}
+	b.controllerAuthFairings = append(b.controllerAuthFairings, auth)
+}
+
 // POST 注册 POST 路由 (自动感知当前的挂载点)
 func (b *Bear) POST(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
 	routes, err := b.POSTE(relativePath, handlers...)
@@ -2320,7 +2560,7 @@ func (b *Bear) POST(relativePath string, handlers ...gin.HandlerFunc) gin.IRoute
 }
 
 func (b *Bear) POSTE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
-	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().POST(relativePath, handlers...) })
+	return b.registerGinRoutesE(handlers, func(guarded []gin.HandlerFunc) gin.IRoutes { return b.activeGroup().POST(relativePath, guarded...) })
 }
 
 // GET 注册 GET 路由 (自动感知当前的挂载点)
@@ -2333,7 +2573,7 @@ func (b *Bear) GET(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes
 }
 
 func (b *Bear) GETE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
-	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().GET(relativePath, handlers...) })
+	return b.registerGinRoutesE(handlers, func(guarded []gin.HandlerFunc) gin.IRoutes { return b.activeGroup().GET(relativePath, guarded...) })
 }
 
 // PUT 注册 PUT 路由 (自动感知当前的挂载点)
@@ -2346,7 +2586,7 @@ func (b *Bear) PUT(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes
 }
 
 func (b *Bear) PUTE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
-	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().PUT(relativePath, handlers...) })
+	return b.registerGinRoutesE(handlers, func(guarded []gin.HandlerFunc) gin.IRoutes { return b.activeGroup().PUT(relativePath, guarded...) })
 }
 
 // DELETE 注册 DELETE 路由 (自动感知当前的挂载点)
@@ -2359,7 +2599,7 @@ func (b *Bear) DELETE(relativePath string, handlers ...gin.HandlerFunc) gin.IRou
 }
 
 func (b *Bear) DELETEE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
-	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().DELETE(relativePath, handlers...) })
+	return b.registerGinRoutesE(handlers, func(guarded []gin.HandlerFunc) gin.IRoutes { return b.activeGroup().DELETE(relativePath, guarded...) })
 }
 
 // PATCH 注册 PATCH 路由 (自动感知当前的挂载点)
@@ -2372,7 +2612,7 @@ func (b *Bear) PATCH(relativePath string, handlers ...gin.HandlerFunc) gin.IRout
 }
 
 func (b *Bear) PATCHE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
-	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().PATCH(relativePath, handlers...) })
+	return b.registerGinRoutesE(handlers, func(guarded []gin.HandlerFunc) gin.IRoutes { return b.activeGroup().PATCH(relativePath, guarded...) })
 }
 
 // OPTIONS 注册 OPTIONS 路由 (自动感知当前的挂载点)
@@ -2385,7 +2625,7 @@ func (b *Bear) OPTIONS(relativePath string, handlers ...gin.HandlerFunc) gin.IRo
 }
 
 func (b *Bear) OPTIONSE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
-	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().OPTIONS(relativePath, handlers...) })
+	return b.registerGinRoutesE(handlers, func(guarded []gin.HandlerFunc) gin.IRoutes { return b.activeGroup().OPTIONS(relativePath, guarded...) })
 }
 
 // HEAD 注册 HEAD 路由 (自动感知当前的挂载点)
@@ -2398,7 +2638,7 @@ func (b *Bear) HEAD(relativePath string, handlers ...gin.HandlerFunc) gin.IRoute
 }
 
 func (b *Bear) HEADE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
-	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().HEAD(relativePath, handlers...) })
+	return b.registerGinRoutesE(handlers, func(guarded []gin.HandlerFunc) gin.IRoutes { return b.activeGroup().HEAD(relativePath, guarded...) })
 }
 
 // Any 注册 Any 路由 (自动感知当前的挂载点)
@@ -2411,16 +2651,35 @@ func (b *Bear) Any(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes
 }
 
 func (b *Bear) AnyE(relativePath string, handlers ...gin.HandlerFunc) (gin.IRoutes, error) {
-	return b.registerGinRoutesE(func() gin.IRoutes { return b.activeGroup().Any(relativePath, handlers...) })
+	return b.registerGinRoutesE(handlers, func(guarded []gin.HandlerFunc) gin.IRoutes { return b.activeGroup().Any(relativePath, guarded...) })
 }
 
-func (b *Bear) registerGinRoutesE(register func() gin.IRoutes) (gin.IRoutes, error) {
+func (b *Bear) registerGinRoutesE(handlers []gin.HandlerFunc, register func([]gin.HandlerFunc) gin.IRoutes) (gin.IRoutes, error) {
 	unlock, err := b.beginGinRegistration()
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	routes := register()
+	guarded := make([]gin.HandlerFunc, 0, len(handlers)+1)
+	guarded = append(guarded, b.nativeGinFairingGuard())
+	guarded = append(guarded, handlers...)
+	routes := register(guarded)
 	b.strictRegistrationVersion++
 	return routes, nil
+}
+
+func (b *Bear) nativeGinFairingGuard() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		defer b.finishNativeGinResponseFairings(ctx, nil)
+		err := b.runPipelineRequestFairings(ctx, nil)
+		if err != nil {
+			WriteError(ctx, err)
+			return
+		}
+		if requestFairingTerminal(ctx) {
+			ctx.Abort()
+			return
+		}
+		ctx.Next()
+	}
 }

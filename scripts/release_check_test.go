@@ -368,11 +368,39 @@ func TestAllCICheckoutAndSetupGoActionsUseReleasePins(t *testing.T) {
 	}
 }
 
+func TestReleaseWorkflowActionsUseImmutablePins(t *testing.T) {
+	workflow := readTestFile(t, "../.github/workflows/release.yml")
+	for _, pinned := range []string{
+		"actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1",
+		"actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0",
+	} {
+		if !strings.Contains(workflow, pinned) {
+			t.Fatalf("release workflow missing immutable action pin %q:\n%s", pinned, workflow)
+		}
+	}
+	for _, mutable := range []string{"actions/checkout@v", "actions/setup-go@v"} {
+		if strings.Contains(workflow, mutable) {
+			t.Fatalf("release workflow retains mutable action reference %q", mutable)
+		}
+	}
+}
+
 func TestReleaseVersionComesFromPushedTag(t *testing.T) {
 	workflow := readTestFile(t, "../.github/workflows/release.yml")
-	for _, forbidden := range []string{"RC_EXPECTED_VERSION", "RC_RELEASE_TAG", "make verify-rc", "staticcheck", "govulncheck", "apidiff"} {
+	for _, forbidden := range []string{"RC_EXPECTED_VERSION", "RC_RELEASE_TAG", "make verify-rc"} {
 		if strings.Contains(workflow, forbidden) {
-			t.Fatalf("release workflow must publish tag artifacts without quality gate %q:\n%s", forbidden, workflow)
+			t.Fatalf("release workflow must derive its version from the pushed tag without %q:\n%s", forbidden, workflow)
+		}
+	}
+	for _, required := range []string{
+		"needs: verify",
+		"run: make verify",
+		"staticcheck@v0.7.0",
+		"govulncheck@v1.6.0",
+		"apidiff@v0.0.0-20260709172345-9ea1abe57597",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("release workflow missing quality gate %q:\n%s", required, workflow)
 		}
 	}
 	if !strings.Contains(workflow, `gh release create "$GITHUB_REF_NAME"`) {

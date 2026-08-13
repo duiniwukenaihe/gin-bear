@@ -19,12 +19,29 @@ import (
 // deployment instead of mutating their lifecycle in place.
 var ErrPluginHotReloadUnsupported = errors.New("plugin hot reload unsupported after application startup begins; use rolling replacement")
 
+// ErrPluginRouteConflict reports dynamic routes that match the same request
+// shape but use different parameter names.
+var ErrPluginRouteConflict = errors.New("plugin route conflicts with an existing dynamic route")
+
 // PluginDispatcher 负责动态路由分发
 type PluginDispatcher struct {
-	// handlers[method][path] = HandlerFunc
-	handlers map[string]map[string]gin.HandlerFunc
+	// handlers are grouped by HTTP method. Each method keeps registration order
+	// so equally-specific parameter routes have deterministic precedence.
+	handlers map[string]*pluginMethodRoutes
 	mu       sync.RWMutex
 	logger   *slog.Logger
+}
+
+type pluginMethodRoutes struct {
+	routes map[string]pluginRoute
+	shapes map[string]string
+	order  []string
+}
+
+type pluginRoute struct {
+	handler  gin.HandlerFunc
+	segments []string
+	dynamic  bool
 }
 
 func NewPluginDispatcher() *PluginDispatcher {
@@ -33,53 +50,211 @@ func NewPluginDispatcher() *PluginDispatcher {
 
 func newPluginDispatcher(logger *slog.Logger) *PluginDispatcher {
 	return &PluginDispatcher{
-		handlers: make(map[string]map[string]gin.HandlerFunc),
+		handlers: make(map[string]*pluginMethodRoutes),
 		logger:   logger,
 	}
 }
 
 func (p *PluginDispatcher) Register(method, path string, handler gin.HandlerFunc) {
+	if err := p.RegisterE(method, path, handler); err != nil {
+		logger := p.logger
+		if logger == nil {
+			logger = legacyLogger()
+		}
+		logger.Error("Dynamic route registration rejected", "method", method, "path", path, "error", err)
+	}
+}
+
+// RegisterE registers a dynamic route or rejects ambiguous route shapes.
+func (p *PluginDispatcher) RegisterE(method, path string, handler gin.HandlerFunc) error {
+	if p == nil {
+		return errors.New("plugin dispatcher is unavailable")
+	}
+	if handler == nil {
+		return errors.New("plugin route handler must not be nil")
+	}
+	method = strings.ToUpper(strings.TrimSpace(method))
+	path = normalizePluginPath(path)
+	shape := pluginRouteShape(path)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.handlers[method]; !ok {
-		p.handlers[method] = make(map[string]gin.HandlerFunc)
+	routes, ok := p.handlers[method]
+	if !ok {
+		routes = &pluginMethodRoutes{
+			routes: make(map[string]pluginRoute),
+			shapes: make(map[string]string),
+		}
+		p.handlers[method] = routes
 	}
-	p.handlers[method][path] = handler
+	if registeredPath, exists := routes.shapes[shape]; exists && registeredPath != path {
+		return fmt.Errorf("%w: %s %s conflicts with %s", ErrPluginRouteConflict, method, path, registeredPath)
+	}
+	route := newPluginRoute(path, handler)
+	if _, exists := routes.routes[path]; !exists {
+		routes.order = append(routes.order, path)
+	}
+	routes.routes[path] = route
+	routes.shapes[shape] = path
 	logger := p.logger
 	if logger == nil {
 		logger = legacyLogger()
 	}
 	logger.Info("Dynamic route registered", "method", method, "path", path)
+	return nil
 }
 
 func (p *PluginDispatcher) Unregister(method, path string) {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	path = normalizePluginPath(path)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if m, ok := p.handlers[method]; ok {
-		delete(m, path)
+	if routes, ok := p.handlers[method]; ok {
+		if _, exists := routes.routes[path]; exists {
+			delete(routes.shapes, pluginRouteShape(path))
+		}
+		delete(routes.routes, path)
 	}
 }
 
 func (p *PluginDispatcher) Dispatch() gin.HandlerFunc {
+	return p.dispatch(false)
+}
+
+func (p *PluginDispatcher) dispatchFallback() gin.HandlerFunc {
+	return p.dispatch(true)
+}
+
+func (p *PluginDispatcher) dispatch(fallbackOnly bool) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		if fallbackOnly && ctx.FullPath() != "" {
+			ctx.Next()
+			return
+		}
 		p.mu.RLock()
 		method := ctx.Request.Method
-		path := ctx.FullPath()
-		if path == "" {
-			path = ctx.Request.URL.Path
-		}
-
-		if m, ok := p.handlers[method]; ok {
-			if handler, exists := m[path]; exists {
-				p.mu.RUnlock()
-				handler(ctx)
-				ctx.Abort()
-				return
-			}
-		}
+		handler, params := p.match(method, ctx.Request.URL.Path)
 		p.mu.RUnlock()
+		if handler != nil {
+			ctx.Params = params
+			handler(ctx)
+			ctx.Abort()
+			return
+		}
 		ctx.Next()
 	}
+}
+
+func newPluginRoute(path string, handler gin.HandlerFunc) pluginRoute {
+	segments := splitPluginPath(path)
+	route := pluginRoute{handler: handler, segments: segments}
+	for _, segment := range segments {
+		if len(segment) > 1 && (segment[0] == ':' || segment[0] == '*') {
+			route.dynamic = true
+			break
+		}
+	}
+	return route
+}
+
+func (p *PluginDispatcher) match(method, path string) (gin.HandlerFunc, gin.Params) {
+	routes, ok := p.handlers[method]
+	if !ok {
+		return nil, nil
+	}
+	if route, ok := routes.routes[path]; ok && !route.dynamic {
+		return route.handler, nil
+	}
+	pathSegments := splitPluginPath(path)
+	bestSpecificity := []int(nil)
+	var bestHandler gin.HandlerFunc
+	var bestParams gin.Params
+	for _, registeredPath := range routes.order {
+		route, ok := routes.routes[registeredPath]
+		if !ok || !route.dynamic {
+			continue
+		}
+		if params, ok := route.match(pathSegments); ok {
+			specificity := route.specificity()
+			if bestHandler == nil || pluginRouteMoreSpecific(specificity, bestSpecificity) {
+				bestSpecificity = specificity
+				bestHandler = route.handler
+				bestParams = params
+			}
+		}
+	}
+	return bestHandler, bestParams
+}
+
+func (r pluginRoute) specificity() []int {
+	specificity := make([]int, len(r.segments))
+	for index, segment := range r.segments {
+		switch {
+		case len(segment) > 1 && segment[0] == '*':
+			specificity[index] = 0
+		case len(segment) > 1 && segment[0] == ':':
+			specificity[index] = 1
+		default:
+			specificity[index] = 2
+		}
+	}
+	return specificity
+}
+
+func pluginRouteMoreSpecific(candidate, current []int) bool {
+	for index := 0; index < len(candidate) && index < len(current); index++ {
+		if candidate[index] != current[index] {
+			return candidate[index] > current[index]
+		}
+	}
+	return len(candidate) > len(current)
+}
+
+func (r pluginRoute) match(pathSegments []string) (gin.Params, bool) {
+	params := make(gin.Params, 0)
+	for index, segment := range r.segments {
+		if len(segment) > 1 && segment[0] == '*' {
+			if index != len(r.segments)-1 || index >= len(pathSegments) {
+				return nil, false
+			}
+			return append(params, gin.Param{Key: segment[1:], Value: "/" + strings.Join(pathSegments[index:], "/")}), true
+		}
+		if index >= len(pathSegments) {
+			return nil, false
+		}
+		if len(segment) > 1 && segment[0] == ':' {
+			if pathSegments[index] == "" {
+				return nil, false
+			}
+			params = append(params, gin.Param{Key: segment[1:], Value: pathSegments[index]})
+			continue
+		}
+		if segment != pathSegments[index] {
+			return nil, false
+		}
+	}
+	return params, len(pathSegments) == len(r.segments)
+}
+
+func splitPluginPath(path string) []string {
+	return strings.Split(strings.TrimPrefix(path, "/"), "/")
+}
+
+func normalizePluginPath(path string) string {
+	path = "/" + strings.Trim(strings.TrimSpace(path), "/")
+	if path == "/" {
+		return path
+	}
+	return strings.TrimSuffix(path, "/")
+}
+
+func pluginRouteShape(path string) string {
+	segments := splitPluginPath(path)
+	for index, segment := range segments {
+		if len(segment) > 1 && (segment[0] == ':' || segment[0] == '*') {
+			segments[index] = segment[:1]
+		}
+	}
+	return strings.Join(segments, "/")
 }
 
 // PluginManager 管理 .so 插件的加载与生命周期

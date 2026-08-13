@@ -23,6 +23,27 @@ type grpcRuntimeServer struct {
 	*grpc.Server
 	health       *health.Server
 	serviceNames []string
+	handlers     *activeHandlerTracker
+}
+
+func (t *activeHandlerTracker) unaryInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if !t.begin() {
+			return nil, status.Error(codes.Unavailable, "server is shutting down")
+		}
+		defer t.end()
+		return handler(ctx, request)
+	}
+}
+
+func (t *activeHandlerTracker) streamInterceptor() grpc.StreamServerInterceptor {
+	return func(service any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if !t.begin() {
+			return status.Error(codes.Unavailable, "server is shutting down")
+		}
+		defer t.end()
+		return handler(service, stream)
+	}
 }
 
 func (b *Bear) buildGRPCRuntime() (*grpcRuntimeServer, error) {
@@ -46,6 +67,7 @@ func (b *Bear) buildGRPCRuntime() (*grpcRuntimeServer, error) {
 	}
 
 	grpcConfig := config.GRPC
+	handlerTracker := newActiveHandlerTracker()
 	minTime, _ := time.ParseDuration(grpcConfig.KeepaliveMinTime)
 	keepaliveTime, _ := time.ParseDuration(grpcConfig.KeepaliveTime)
 	keepaliveTimeout, _ := time.ParseDuration(grpcConfig.KeepaliveTimeout)
@@ -65,11 +87,11 @@ func (b *Bear) buildGRPCRuntime() (*grpcRuntimeServer, error) {
 			MaxConnectionAgeGrace: maxAgeGrace,
 		}),
 		grpc.ChainUnaryInterceptor(append(
-			[]grpc.UnaryServerInterceptor{grpcUnaryRecoveryInterceptor(b.runtime.Logger), grpcUnaryObservabilityInterceptor(b.runtime.Logger)},
+			[]grpc.UnaryServerInterceptor{handlerTracker.unaryInterceptor(), grpcUnaryRecoveryInterceptor(b.runtime.Logger), grpcUnaryObservabilityInterceptor(b.runtime.Logger)},
 			unaryInterceptors...,
 		)...),
 		grpc.ChainStreamInterceptor(append(
-			[]grpc.StreamServerInterceptor{grpcStreamRecoveryInterceptor(b.runtime.Logger), grpcStreamObservabilityInterceptor(b.runtime.Logger)},
+			[]grpc.StreamServerInterceptor{handlerTracker.streamInterceptor(), grpcStreamRecoveryInterceptor(b.runtime.Logger), grpcStreamObservabilityInterceptor(b.runtime.Logger)},
 			streamInterceptors...,
 		)...),
 	}
@@ -90,7 +112,7 @@ func (b *Bear) buildGRPCRuntime() (*grpcRuntimeServer, error) {
 	}
 	sort.Strings(serviceNames)
 
-	runtimeServer := &grpcRuntimeServer{Server: server, serviceNames: serviceNames}
+	runtimeServer := &grpcRuntimeServer{Server: server, serviceNames: serviceNames, handlers: handlerTracker}
 	if grpcConfig.HealthEnabled {
 		healthServer := health.NewServer()
 		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
@@ -104,6 +126,26 @@ func (b *Bear) buildGRPCRuntime() (*grpcRuntimeServer, error) {
 		reflection.Register(server)
 	}
 	return runtimeServer, nil
+}
+
+func (s *grpcRuntimeServer) waitHandlers(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	return s.handlers.wait(ctx)
+}
+
+func (s *grpcRuntimeServer) activeHandlers() int {
+	if s == nil {
+		return 0
+	}
+	return s.handlers.count()
+}
+
+func (s *grpcRuntimeServer) stopAcceptingHandlers() {
+	if s != nil {
+		s.handlers.stopAccepting()
+	}
 }
 
 func (s *grpcRuntimeServer) setServing() {

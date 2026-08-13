@@ -9,7 +9,39 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned verification tools
+        run: |
+          mkdir -p "${RUNNER_TEMP}/bin"
+          CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597
+
+      - name: Verify release tag
+        env:
+          STATICCHECK_BIN: ${{ runner.temp }}/bin/staticcheck
+          STATICCHECK_EXPECTED_SHA256: 968c4cdeff3a18eef976ecdbcd83dbea35ca3c12c58b87c9f4684e1ea6adfc75
+          GOVULNCHECK_BIN: ${{ runner.temp }}/bin/govulncheck
+          GOVULNCHECK_EXPECTED_SHA256: 15ad0c7081d061d06f83a39b1783318d90659f3404d83a75bcdda51eda3ef75f
+          APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff
+          APIDIFF_EXPECTED_SHA256: 84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f
+          RC_ALLOW_NETWORK: "1"
+          RELEASE_CHECK_METADATA: ${{ runner.temp }}/release-check-metadata.txt
+        run: make verify
+
   release:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write

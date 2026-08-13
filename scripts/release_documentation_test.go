@@ -257,10 +257,13 @@ func TestReleaseUsesGoModuleAndGitHubSourceAssetsOnly(t *testing.T) {
 		t.Fatalf("source-only framework release must not retain GoReleaser configuration: %v", err)
 	}
 	workflow := strings.ToLower(readDocumentationFile(t, "../.github/workflows/release.yml"))
-	for _, unwanted := range []string{"goreleaser", "archive", "checksum", "go build", "setup-go"} {
+	for _, unwanted := range []string{"goreleaser", "archive", "checksum", "upload-artifact"} {
 		if strings.Contains(workflow, unwanted) {
-			t.Fatalf("source-only release workflow must not contain %q", unwanted)
+			t.Fatalf("source-only release workflow must not publish platform artifact %q", unwanted)
 		}
+	}
+	if !strings.Contains(workflow, "run: make verify") {
+		t.Fatal("source-only release workflow must verify the tagged source before publishing")
 	}
 }
 
@@ -285,8 +288,7 @@ func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 	}
 	for _, unwanted := range []string{
 		"docker", "container", "registry", "attestations: write", "id-token: write",
-		"make verify-rc", "staticcheck", "govulncheck", "apidiff", "upload-artifact", "rc-verification",
-		"checkout@", "setup-go@", "goreleaser",
+		"make verify-rc", "upload-artifact", "rc-verification", "goreleaser",
 		"windows-latest",
 	} {
 		if strings.Contains(strings.ToLower(workflow), unwanted) {
@@ -295,6 +297,11 @@ func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 	}
 	if strings.Contains(workflow, "API_BASELINE_REBUILD") {
 		t.Fatal("release workflow must not require API baseline reconstruction")
+	}
+	for _, required := range []string{"needs: verify", "run: make verify", "staticcheck@v0.7.0", "govulncheck@v1.6.0", "apidiff@v0.0.0-20260709172345-9ea1abe57597"} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("release workflow missing source quality gate %q", required)
+		}
 	}
 }
 

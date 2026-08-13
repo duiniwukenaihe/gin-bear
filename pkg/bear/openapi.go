@@ -268,35 +268,82 @@ func openAPIHasAuthFairing(fairings []Fairing) bool {
 }
 
 func (b *Bear) hasAuthFairing() bool {
-	if openAPIHasAuthFairing(openAPIGlobalFairings(b)) {
-		return true
+	return len(b.authFairings()) != 0
+}
+
+func (b *Bear) authFairings() []*AuthFairing {
+	if b == nil {
+		return nil
 	}
-	if b == nil || b.exprData == nil {
-		return false
+	seen := make(map[*AuthFairing]struct{})
+	fairings := make([]*AuthFairing, 0)
+	appendAuthFairings := func(candidates []Fairing) {
+		for _, fairing := range candidates {
+			auth, ok := fairing.(*AuthFairing)
+			if !ok || auth == nil {
+				continue
+			}
+			if _, exists := seen[auth]; exists {
+				continue
+			}
+			seen[auth] = struct{}{}
+			fairings = append(fairings, auth)
+		}
+	}
+	appendAuthFairings(openAPIGlobalFairings(b))
+	for _, auth := range b.controllerAuthFairings {
+		if auth == nil {
+			continue
+		}
+		if _, exists := seen[auth]; exists {
+			continue
+		}
+		seen[auth] = struct{}{}
+		fairings = append(fairings, auth)
+	}
+	if b.exprData == nil {
+		return fairings
 	}
 	store, _ := b.exprData[openAPIRouteMetadataStoreKey].(*openAPIRouteMetadataStore)
 	if store == nil {
-		return false
+		return fairings
 	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	for _, metadata := range store.routes {
-		if openAPIHasAuthFairing(metadata.fairings) {
-			return true
-		}
+		appendAuthFairings(metadata.fairings)
 	}
-	return false
+	return fairings
 }
 
 func (b *Bear) validateProductionAuthPolicy() error {
 	if b == nil || b.runtime == nil || !isProductionMode(b.runtime.Config) || !b.hasAuthFairing() {
 		return nil
 	}
-	config := b.runtime.Config
-	if config == nil || config.Auth == nil || isWeakProductionJWTSecret(config.Auth.JWTSecret) {
-		return fmt.Errorf("weak jwt secret is not allowed in production when AuthFairing is registered")
+	for _, auth := range b.authFairings() {
+		jwtUtil, err := auth.effectiveJWTUtil()
+		if err != nil {
+			return fmt.Errorf("invalid AuthFairing JWT strategy in production: %w", err)
+		}
+		if jwtUtil == nil || jwtUtil.Config == nil || isWeakProductionJWTSecret(jwtUtil.Config.Secret) {
+			return fmt.Errorf("weak jwt secret is not allowed in production when AuthFairing is registered")
+		}
 	}
 	return nil
+}
+
+func (f *AuthFairing) effectiveJWTUtil() (*JWTUtil, error) {
+	if f == nil {
+		return nil, fmt.Errorf("AuthFairing is unavailable")
+	}
+	if f.TokenManager == nil {
+		return f.JWTUtil, nil
+	}
+	managerJWT := f.TokenManager.JWTUtil
+	if f.JWTUtil != nil && managerJWT != nil && !reflect.DeepEqual(f.JWTUtil.Config, managerJWT.Config) {
+		return nil, fmt.Errorf("conflicting JWT strategies")
+	}
+	return managerJWT, nil
 }
 
 func openAPIControllerInfo(metadata openAPIRouteMetadata, route RouteMetadata, openAPIPath string) (OpenAPIInfo, bool) {

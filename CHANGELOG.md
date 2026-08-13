@@ -12,6 +12,7 @@ All notable changes to gin-bear are documented in this file.
   recovery, logging, and coordinated shutdown.
 - Context-bounded database and Redis startup APIs, including lifecycle-owned
   Redis initialization for required authentication revocation storage.
+- Redis TLS 1.2+, custom CA, and optional mutual-TLS client certificate support.
 
 ### Changed
 
@@ -26,6 +27,33 @@ All notable changes to gin-bear are documented in this file.
   plugin route policies, runs browser preflight safely, and enforces declared
   Redis revocation storage in production. The legacy `file` storage value is a
   warned alias for stateless `jwt` validation.
+- Manual and automatic authentication share one outer middleware, validate the
+  effective JWT policy, and fail closed when Redis revocation is declared but
+  unavailable. Plugin routes use full grouped paths and pass through caller
+  middleware before fallback dispatch; ambiguous dynamic route shapes fail
+  registration instead of selecting a handler by registration order.
+- Global non-authentication Fairings guard native `GET`/`POST` and related Gin
+  routes, including routes added through `Bear.Group`/`GroupE`, as well as
+  compiled handlers and the framework metrics endpoint, closing
+  authorization-policy bypasses. Plugin fallback dispatch no longer depends on
+  Gin `NoRoute`, so existing custom 404 handlers cannot remove plugin routes.
+- Framework defaults and generated applications no longer place `/metrics` or
+  `/version` in authentication public paths; operators must expose diagnostics
+  explicitly behind an intended access-control or network boundary.
+- Native Gin, grouped, metrics, opaque-handler, and WebSocket paths now unwind
+  entered Fairings exactly once after request handling without rewriting
+  response bytes owned by Gin handlers.
+- Tag-triggered GitHub releases now run the complete pinned `make verify`
+  quality gate against the tagged commit before publishing the release.
+- HTTP and gRPC shutdown track active handlers, reject handlers that arrive
+  after draining begins, and retain lifecycle resources when a non-cooperative
+  handler outlives the total shutdown budget.
+- Shutdown irreversibly seals the Bear instance before lifecycle resources
+  close, compatibility Fairings cannot replace authentication after startup,
+  and Redis production/tracing decisions are scoped to the owning Runtime.
+  Redis tracing binds the owning TracerProvider, standalone remote Redis
+  connections require TLS, and compatibility Build-time Fairing mutation fails
+  startup after lifecycle registration closes.
 - Development generators require an explicit local replacement and cannot mix
   unreleased HEAD templates with a published framework tag.
 

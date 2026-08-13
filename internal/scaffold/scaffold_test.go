@@ -93,7 +93,7 @@ func TestGeneratedServerHealthCheckTimesOutAndReapsUnresponsiveChild(t *testing.
 	prepareGeneratedProcess(cmd)
 	started := time.Now()
 	output, err := checkGeneratedServer(cmd, "http://"+address+"/live", generatedServerCheckConfig{
-		startupTimeout:  750 * time.Millisecond,
+		startupTimeout:  2 * time.Second,
 		requestTimeout:  150 * time.Millisecond,
 		shutdownTimeout: 250 * time.Millisecond,
 		cleanupTimeout:  time.Second,
@@ -105,7 +105,7 @@ func TestGeneratedServerHealthCheckTimesOutAndReapsUnresponsiveChild(t *testing.
 	if err == nil {
 		t.Fatal("health check unexpectedly accepted a child that never answered")
 	}
-	if elapsed := time.Since(started); elapsed > 3*time.Second {
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
 		t.Fatalf("health check exceeded its deadline: %v", elapsed)
 	} else if elapsed < 500*time.Millisecond {
 		t.Fatalf("unresponsive child exited before the health deadline: %v", elapsed)

@@ -14,6 +14,15 @@ grpc:
 database:
   enabled: false
 
+redis:
+  # Keep false for local plaintext Redis. Enable TLS for remote Redis.
+  tls:
+    enabled: false
+    server_name: ""
+    ca_file: ""
+    cert_file: ""
+    key_file: ""
+
 tracing:
   enabled: false
   service_name: {{yamlScalar .Name}}
@@ -28,8 +37,6 @@ auth:
     - "/health"
     - "/live"
     - "/ready"
-    - "/version"
-    - "/metrics"
 
 metrics:
   enabled: true

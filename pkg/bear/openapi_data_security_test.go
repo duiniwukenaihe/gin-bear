@@ -149,6 +149,13 @@ type recursiveOpenAPINode struct {
 
 func recursiveOpenAPIHandler() *recursiveOpenAPINode { return nil }
 
+func TestNilBearHasNoAuthenticationFairings(t *testing.T) {
+	var app *Bear
+	if fairings := app.authFairings(); len(fairings) != 0 {
+		t.Fatalf("nil Bear auth fairings = %v, want none", fairings)
+	}
+}
+
 func TestRouteMetadataRetainsLegacyFiveFieldShape(t *testing.T) {
 	_ = RouteMetadata{http.MethodGet, "/shape", "api", reflect.TypeOf(func() string { return "ok" }), "shapeHandler"}
 	routeType := reflect.TypeOf(RouteMetadata{})

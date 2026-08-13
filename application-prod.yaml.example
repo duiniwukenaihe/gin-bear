@@ -65,6 +65,14 @@ redis:
   read_timeout_seconds: 3
   write_timeout_seconds: 3
   required: false
+  # Keep false only for loopback Redis or a trusted local proxy/sidecar.
+  # Remote Redis deployments should enable TLS and use deployment-owned files.
+  tls:
+    enabled: false
+    server_name: ""
+    ca_file: ""
+    cert_file: ""
+    key_file: ""
 
 tracing:
   enabled: false
@@ -93,7 +101,6 @@ auth:
     - "/health"
     - "/live"
     - "/ready"
-    - "/version"
     - "/swagger/*"
 
 middleware:

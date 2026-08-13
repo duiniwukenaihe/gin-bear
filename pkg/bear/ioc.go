@@ -73,7 +73,7 @@ func init() {
 			return
 		}
 		hasExplicitJWTUtil := target.JWTUtil != nil
-		if target.JWTUtil == nil {
+		if target.JWTUtil == nil && target.TokenManager == nil {
 			target.JWTUtil = Resolve[*JWTUtil](factory)
 		}
 		if target.TokenManager == nil && !hasExplicitJWTUtil {
@@ -126,7 +126,7 @@ func init() {
 		if err != nil {
 			return fmt.Errorf("resolve JWT utility: %w", err)
 		}
-		if target.JWTUtil == nil {
+		if target.JWTUtil == nil && target.TokenManager == nil {
 			target.JWTUtil = jwtUtil
 		}
 		if target.TokenManager == nil && !hasExplicitJWTUtil {

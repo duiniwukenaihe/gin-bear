@@ -142,6 +142,26 @@ func TestSecondServeReturnsAlreadyServingWithoutStoppingOwner(t *testing.T) {
 	}
 }
 
+func TestServeIsRejectedAfterShutdownCompletesBeforeServe(t *testing.T) {
+	config := NewSysConfig()
+	config.Server.Port = int32(availableTCPPort(t))
+	component := &countedLifecycleComponent{name: "shutdown-before-serve"}
+	app := Ignite(config).Beans(component)
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatalf("ApplyAll() error = %v", err)
+	}
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+
+	if err := app.Serve(context.Background()); !errors.Is(err, ErrAlreadyServing) {
+		t.Fatalf("Serve() after Shutdown() error = %v, want ErrAlreadyServing", err)
+	}
+	if got := component.starts.Load(); got != 1 {
+		t.Fatalf("component starts = %d, want 1", got)
+	}
+}
+
 func TestSecondLaunchDoesNotStopFirstServingOwner(t *testing.T) {
 	config := NewSysConfig()
 	config.Server.Port = int32(availableTCPPort(t))
