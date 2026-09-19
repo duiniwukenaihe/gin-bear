@@ -82,6 +82,13 @@ var signalNotifyContext = signal.NotifyContext
 var ginRuntimeMu sync.Mutex
 var strictGinRuntimeMode string
 
+// strictGinRuntimeOwners tracks the lifecycles of strict runtimes that reserved
+// strictGinRuntimeMode. Gin's mode is process-global, so a live strict runtime
+// must keep another runtime from switching it underneath it. Owners are pruned
+// once their lifecycle has stopped, so a runtime whose owner is already gone no
+// longer rejects a different mode.
+var strictGinRuntimeOwners []*Lifecycle
+
 var (
 	// ErrAlreadyServing reports a second Serve or Launch call for one Bear.
 	ErrAlreadyServing = errors.New("bear is already serving")
@@ -243,12 +250,14 @@ func IgniteE(args ...any) (*Bear, error) {
 	if err := validateProductionSecurity(config); err != nil {
 		return nil, err
 	}
-	engine, err := newGinEngine(config)
+	// The runtime is constructed before the engine so the engine can register
+	// this runtime's lifecycle as the owner of the process-wide Gin mode.
+	runtime := newRuntime(config)
+	engine, err := newGinEngine(config, runtime.Lifecycle)
 	if err != nil {
 		return nil, err
 	}
 
-	runtime := newRuntime(config)
 	httpHandlers := newActiveHandlerTracker()
 	b := &Bear{
 		Engine:           engine,
@@ -860,7 +869,7 @@ func shutdownTimeout(config *SysConfig) time.Duration {
 	return parseDurationOrDefault(config.Server.ShutdownTimeout, 5*time.Second)
 }
 
-func newGinEngine(config *SysConfig) (engine *gin.Engine, err error) {
+func newGinEngine(config *SysConfig, owner *Lifecycle) (engine *gin.Engine, err error) {
 	ginRuntimeMu.Lock()
 	defer ginRuntimeMu.Unlock()
 	defer func() {
@@ -868,6 +877,7 @@ func newGinEngine(config *SysConfig) (engine *gin.Engine, err error) {
 			err = fmt.Errorf("construct gin engine: %v", recovered)
 		}
 	}()
+	pruneStrictGinRuntimeOwnersLocked()
 	mode := configuredGinMode(config)
 	if strictGinRuntimeMode != "" && strictGinRuntimeMode != mode {
 		return nil, fmt.Errorf("%w: active=%s requested=%s", ErrGinRuntimeConflict, strictGinRuntimeMode, mode)
@@ -893,11 +903,33 @@ func newGinEngine(config *SysConfig) (engine *gin.Engine, err error) {
 			return nil, fmt.Errorf("invalid trusted proxies: %w", err)
 		}
 	}
-	if config != nil && config.FrameworkStrict() && strictGinRuntimeMode == "" {
-		strictGinRuntimeMode = mode
+	if config != nil && config.FrameworkStrict() {
+		// Reserve the process-wide Gin mode for as long as this runtime lives.
+		if strictGinRuntimeMode == "" {
+			strictGinRuntimeMode = mode
+		}
+		if owner != nil {
+			strictGinRuntimeOwners = append(strictGinRuntimeOwners, owner)
+		}
 	}
 	committed = true
 	return engine, nil
+}
+
+// pruneStrictGinRuntimeOwnersLocked drops owners whose lifecycle has stopped and
+// clears the reserved mode once no live strict runtime holds it. It requires
+// ginRuntimeMu.
+func pruneStrictGinRuntimeOwnersLocked() {
+	live := make([]*Lifecycle, 0, len(strictGinRuntimeOwners))
+	for _, owner := range strictGinRuntimeOwners {
+		if owner != nil && !owner.stopped() {
+			live = append(live, owner)
+		}
+	}
+	strictGinRuntimeOwners = live
+	if len(live) == 0 {
+		strictGinRuntimeMode = ""
+	}
 }
 
 func configuredGinMode(config *SysConfig) string {

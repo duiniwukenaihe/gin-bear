@@ -54,11 +54,13 @@ func resetGinModeForTest(t *testing.T) {
 	t.Helper()
 	ginRuntimeMu.Lock()
 	strictGinRuntimeMode = ""
+	strictGinRuntimeOwners = nil
 	gin.SetMode(gin.DebugMode)
 	ginRuntimeMu.Unlock()
 	t.Cleanup(func() {
 		ginRuntimeMu.Lock()
 		strictGinRuntimeMode = ""
+		strictGinRuntimeOwners = nil
 		gin.SetMode(gin.DebugMode)
 		ginRuntimeMu.Unlock()
 	})

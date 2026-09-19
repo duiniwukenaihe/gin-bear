@@ -91,6 +91,12 @@ All notable changes to gin-bear are documented in this file.
   watched directory. `RunOnce` honours its directory argument, and
   `LoadConfigForCLI` reads the target directory's configuration without
   mutating the process working directory.
+- The process-wide Gin mode reservation was a latch: once any strict runtime had
+  reserved a mode it was never released, so a strict runtime created after the
+  previous one had shut down was still rejected with `ErrGinRuntimeConflict`.
+  The reservation is now owned by the reserving runtime's lifecycle and dropped
+  once that lifecycle has stopped, while a conflicting mode is still rejected
+  for as long as any strict runtime remains live.
 ## [v0.9.3] - 2026-08-12
 
 ### Fixed
