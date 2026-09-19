@@ -424,8 +424,8 @@ func (p *PluginManager) registerModuleInRegistration(mod Module) error {
 		if err := p.bear.injectStrictContainerBeans(); err != nil {
 			return fmt.Errorf("inject strict plugin module beans %T: %w", mod, err)
 		}
-		p.bear.pluginMode = true
-		defer func() { p.bear.pluginMode = false }()
+		restorePluginMode := p.bear.enterPluginMode()
+		defer restorePluginMode()
 		if err := p.bear.buildModuleStrict(mod); err != nil {
 			return err
 		}
@@ -445,8 +445,8 @@ func (p *PluginManager) registerModuleInRegistration(mod Module) error {
 
 	// 2. 构建模块路由
 	// 我们需要将 Bear 切换到“插件模式”，使其路由注册到 PluginDispatcher
-	p.bear.pluginMode = true
-	defer func() { p.bear.pluginMode = false }()
+	restorePluginMode := p.bear.enterPluginMode()
+	defer restorePluginMode()
 	mod.Build(p.bear)
 	return nil
 }

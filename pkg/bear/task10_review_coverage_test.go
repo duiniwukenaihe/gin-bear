@@ -267,9 +267,9 @@ func TestTask10ReviewExercisesModulesGroupsAndEveryHTTPRouteHelper(t *testing.T)
 	app.Any("/any", handler)
 	app.Group("/nested")
 
-	app.pluginMode = true
+	app.pluginMode.Store(true)
 	app.Handle(http.MethodGet, "/plugin-route", func() string { return "plugin" })
-	app.pluginMode = false
+	app.pluginMode.Store(false)
 	if err := app.ReloadPlugin("disabled.so"); err == nil {
 		t.Fatal("disabled plugin reload unexpectedly succeeded")
 	}

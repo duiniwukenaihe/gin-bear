@@ -13,25 +13,33 @@ import (
 	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
 )
 
+// newWatcherCommand 构造被监听器重启的进程。声明为变量，便于测试注入廉价命令，
+// 避免单元测试真的执行 go run。
+var newWatcherCommand = func() *exec.Cmd {
+	return exec.Command("go", "run", "cmd/main.go")
+}
+
+// newFileWatcher 构造文件系统监听器，同样可被测试替换。
+var newFileWatcher = fsnotify.NewWatcher
+
 // LoadConfigForCLI 尝试加载配置，用于 CLI 决策
 func LoadConfigForCLI(dir string) *bear.SysConfig {
-	// 切换到目标目录并尝试加载
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	// 仅尝试加载文件，不触发初始化逻辑
+	// 只读取目标目录下的配置文件，不切换进程工作目录：os.Chdir 是进程级全局状态，
+	// 并发调用、或调用期间其他依赖相对路径的代码都会受到干扰。
 	config := bear.NewSysConfig()
-	yamlFile := "application.yaml"
+	yamlFile := filepath.Join(dir, "application.yaml")
 	if _, err := os.Stat(yamlFile); err == nil {
-		bear.ParseConfig(yamlFile, config)
+		if err := bear.ParseConfig(yamlFile, config); err != nil {
+			log.Printf("Failed to parse %s: %v", yamlFile, err)
+		}
 	}
 	return config
 }
 
 // RunOnce 仅运行一次，不监听
 func RunOnce(dir string) {
-	cmd := exec.Command("go", "run", "cmd/main.go")
+	cmd := newWatcherCommand()
+	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -40,10 +48,9 @@ func RunOnce(dir string) {
 }
 
 type Watcher struct {
-	Dir     string
-	cmd     *exec.Cmd
-	mu      sync.Mutex
-	lastRun time.Time
+	Dir string
+	cmd *exec.Cmd
+	mu  sync.Mutex
 }
 
 func NewWatcher(dir string) *Watcher {
@@ -51,14 +58,19 @@ func NewWatcher(dir string) *Watcher {
 }
 
 func (w *Watcher) Start() {
-	watcher, err := fsnotify.NewWatcher()
+	watcher, err := newFileWatcher()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer watcher.Close()
 
-	done := make(chan bool)
+	// done 在事件循环退出时关闭，使 Start 能返回并释放监听器。
+	// 监听流若意外关闭，事件循环随之结束，Start 不再永久阻塞。
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
+		// lastRun 只被本协程访问，因此无需加锁，也不再是 Watcher 的共享字段。
+		var lastRun time.Time
 		for {
 			select {
 			case event, ok := <-watcher.Events:
@@ -69,10 +81,10 @@ func (w *Watcher) Start() {
 					ext := filepath.Ext(event.Name)
 					if ext == ".go" || ext == ".yaml" || ext == ".yml" {
 						// 防抖处理：500ms 内只重启一次
-						if time.Since(w.lastRun) > 500*time.Millisecond {
+						if time.Since(lastRun) > 500*time.Millisecond {
 							log.Printf("File changed: %s, restarting...", event.Name)
 							w.Restart()
-							w.lastRun = time.Now()
+							lastRun = time.Now()
 						}
 					}
 				}
@@ -86,18 +98,32 @@ func (w *Watcher) Start() {
 	}()
 
 	// 监听子目录
-	filepath.Walk(w.Dir, func(path string, info os.FileInfo, err error) error {
-		if info != nil && info.IsDir() {
-			if strings := path; !contains(strings, ".git") && !contains(strings, "vendor") {
-				return watcher.Add(path)
-			}
+	walkErr := filepath.Walk(w.Dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || !info.IsDir() {
+			return nil
+		}
+		if isSkippedWatchDir(path) {
+			// 跳过 .git / vendor 整棵子树：既不监听，也不再向下遍历。
+			return filepath.SkipDir
+		}
+		if err := watcher.Add(path); err != nil {
+			// 单个目录监听失败不应中断整棵目录树的监听。
+			log.Printf("Failed to watch %s: %v", path, err)
 		}
 		return nil
 	})
+	if walkErr != nil {
+		log.Printf("Failed to walk %s: %v", w.Dir, walkErr)
+	}
 
 	// 初始启动
 	w.Restart()
 	<-done
+}
+
+func isSkippedWatchDir(path string) bool {
+	base := filepath.Base(path)
+	return base == ".git" || base == "vendor"
 }
 
 func (w *Watcher) Restart() {
@@ -112,18 +138,15 @@ func (w *Watcher) Restart() {
 	}
 
 	// 2. 重新编译并启动 (这里简化处理，假设 main.go 在 cmd/main.go)
-	// 在实际应用中，用户可能需要指定 entry point
-	go func() {
-		cmd := exec.Command("go", "run", "cmd/main.go")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		w.cmd = cmd
-		if err := cmd.Start(); err != nil {
-			log.Printf("Failed to start process: %v", err)
-		}
-	}()
-}
-
-func contains(path string, sub string) bool {
-	return filepath.Base(path) == sub
+	// cmd.Start 只等待 fork/exec 完成，编译发生在子进程内部，因此持锁时间很短。
+	// cmd.Dir 必须显式指定：重启的进程要在被监听的目录下运行，而不是依赖进程 CWD。
+	cmd := newWatcherCommand()
+	cmd.Dir = w.Dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	w.cmd = cmd
+	if err := cmd.Start(); err != nil {
+		log.Printf("Failed to start process: %v", err)
+		w.cmd = nil
+	}
 }

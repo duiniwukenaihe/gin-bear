@@ -76,6 +76,21 @@ All notable changes to gin-bear are documented in this file.
   `inject`-tagged field cannot be resolved instead of leaving the field at its
   zero value silently. An unexported field that must be injected panics with an
   error value rather than a string.
+- Plugin module registration marked its route-registration window with a plain
+  `Bear` field that was written while holding only the plugin barrier and read
+  while holding the route registration lock, so a concurrent registration race
+  was possible. The flag is now atomic and restores its previous value instead
+  of clearing unconditionally, so back-to-back plugin registrations no longer
+  clobber each other's mode.
+- The generated-project watcher published its restarted `*exec.Cmd` from an
+  unguarded goroutine while another restart read it under the watcher mutex,
+  and `Start` waited on a channel nothing could close, so a closed watch stream
+  left the caller blocked forever. Restarts now assign the command under the
+  mutex, `Start` returns when the watch stream ends, `.git` and `vendor`
+  subtrees are skipped instead of walked, and restarted processes run in the
+  watched directory. `RunOnce` honours its directory argument, and
+  `LoadConfigForCLI` reads the target directory's configuration without
+  mutating the process working directory.
 ## [v0.9.3] - 2026-08-12
 
 ### Fixed

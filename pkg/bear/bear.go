@@ -132,16 +132,21 @@ type Bear struct {
 	pluginDispatcher             *PluginDispatcher
 	pluginDispatcherInstalled    atomic.Bool
 	pluginManager                *PluginManager
-	pluginMode                   bool // 标记当前是否处于插件加载模式
-	automaticAuthFairing         *AuthFairing
-	activeAuthFairing            atomic.Pointer[AuthFairing]
-	controllerAuthFairings       []*AuthFairing
-	httpHandlers                 *activeHandlerTracker
-	activeGRPCServer             atomic.Pointer[grpcRuntimeServer]
-	handlersUnsafe               atomic.Bool
-	metricsRegistered            atomic.Bool
-	tracingRegistered            atomic.Bool
-	webSocketRoutes              atomic.Int64
+	// pluginMode marks that route registration is currently serving a plugin
+	// module build, so handlers go to pluginDispatcher instead of the Gin
+	// engine. It is atomic because the write happens while holding only
+	// pluginBarrier's internal lock, whereas registerCompiledHandler reads it
+	// while holding eRegistrationMu; a plain bool would be a data race.
+	pluginMode             atomic.Bool
+	automaticAuthFairing   *AuthFairing
+	activeAuthFairing      atomic.Pointer[AuthFairing]
+	controllerAuthFairings []*AuthFairing
+	httpHandlers           *activeHandlerTracker
+	activeGRPCServer       atomic.Pointer[grpcRuntimeServer]
+	handlersUnsafe         atomic.Bool
+	metricsRegistered      atomic.Bool
+	tracingRegistered      atomic.Bool
+	webSocketRoutes        atomic.Int64
 }
 
 type applyState uint8
@@ -1700,7 +1705,7 @@ func (b *Bear) registerCompiledHandler(httpMethod, relativePath string, handler 
 	effectiveFairings := append([]Fairing(nil), controllerFairings...)
 	effectiveFairings = append(effectiveFairings, routeFairings...)
 	fullPath := joinRoutePath(group.BasePath(), relativePath)
-	if b.pluginMode {
+	if b.inPluginMode() {
 		pluginHandler := wrapped
 		if len(controllerFairings) > 0 {
 			var err error
@@ -1786,6 +1791,22 @@ func (b *Bear) runRequestFairings(ctx *gin.Context, routeFairings []Fairing) err
 
 func (b *Bear) frameworkStrict() bool {
 	return b != nil && b.runtime != nil && b.runtime.Config != nil && b.runtime.Config.FrameworkStrict()
+}
+
+// enterPluginMode marks the enclosing plugin module build as the route
+// registration target and returns a function that restores the previous state.
+// Restoring instead of unconditionally clearing keeps nested or back-to-back
+// plugin registrations from clobbering each other's mode.
+func (b *Bear) enterPluginMode() func() {
+	if b == nil {
+		return func() {}
+	}
+	previous := b.pluginMode.Swap(true)
+	return func() { b.pluginMode.Store(previous) }
+}
+
+func (b *Bear) inPluginMode() bool {
+	return b != nil && b.pluginMode.Load()
 }
 
 func (b *Bear) beginGinRegistration() (func(), error) {
