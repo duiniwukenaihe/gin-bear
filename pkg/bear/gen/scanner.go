@@ -1,12 +1,13 @@
 package gen
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -68,11 +69,19 @@ func (s *Scanner) Scan() ([]InjectInfo, error) {
 					continue
 				}
 
-				tag := strings.Trim(field.Tag.Value, "`")
-				if strings.Contains(tag, "inject") {
-					typeName := fmt.Sprintf("%s", field.Type)
-					// 处理简单的类型名提取，如果是指针等复杂类型可能需要更复杂的逻辑
-					// 这里先简化处理
+				// Match the tag key exactly, the way the runtime does in
+				// pkg/bear/ioc.go, which decides with field.Tag.Lookup("inject").
+				// A substring test also matches `json:"inject_total"` and
+				// `gorm:"column:inject_id"`, and the generated injector then
+				// overwrote those fields with a resolved bean the runtime never
+				// asked for.
+				if _, inject := reflect.StructTag(strings.Trim(field.Tag.Value, "`")).Lookup("inject"); inject {
+					// ExprString renders any type expression as Go source, so the
+					// generated injector can paste it into bear.Resolve[T]. Formatting
+					// the ast.Expr with %s instead yields fmt's debug form for every
+					// composite type: "*Service" became
+					// "&{%!s(token.Pos=90) Service}".
+					typeName := types.ExprString(field.Type)
 					for _, name := range field.Names {
 						info.Fields = append(info.Fields, FieldInfo{
 							FieldName: name.Name,
