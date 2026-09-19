@@ -14,9 +14,41 @@ All notable changes to gin-bear are documented in this file.
   Redis initialization for required authentication revocation storage.
 - Redis TLS 1.2+, custom CA, and optional mutual-TLS client certificate support.
 - Per-runtime HTTP totals through `Runtime.Requests` and `Runtime.Errors`.
+- `bear gen api` writes the reviewed SQL migrations for the table it generates,
+  using the `migrations/001_create_<table>.up.sql` and `.down.sql` layout
+  documented in `docs/production.md`. The dialect follows `database.type`, and an
+  existing file is never overwritten, so a migration that has already been
+  applied keeps its version. New scaffolds ship a `cmd/migrate` one-off tool that
+  applies or rolls those files back, keeping schema changes a separate deploy
+  step rather than something startup does implicitly.
 
 ### Changed
 
+- The pinned Go toolchain moved from `go1.25.12` to `go1.25.14`, and the
+  dependencies carrying reachable vulnerabilities were raised, so `govulncheck`
+  reports no vulnerabilities again: `google.golang.org/grpc` v1.82.1 → v1.83.2
+  (GO-2026-6348, GO-2026-6443), `golang.org/x/net` v0.53.0 → v0.58.0
+  (GO-2026-5026), plus the standard-library fixes shipped by the patch release
+  (GO-2026-6088, GO-2026-6089, GO-2026-6090, GO-2026-6091, GO-2026-6218,
+  GO-2026-5972). `x/crypto`, `x/mod`, `x/sync`, `x/sys`, `x/text`, the
+  OpenTelemetry modules, and the `genproto` pseudo-versions move forward as their
+  requirements. The OpenTelemetry upgrade deprecated `attribute.Value.Emit`, so
+  the one caller — the tracing redaction test — now uses
+  `attribute.Value.String`, which returns the same `stringly` value for a STRING
+  attribute; the leak assertion was re-verified by temporarily reintroducing an
+  `error.message` attribute and watching the test fail. New scaffolds write
+  `go 1.25.14`, and the documented `make verify` command uses
+  `GOTOOLCHAIN=go1.25.14`. The runbook's dated v0.9.2 audit sections keep the
+  toolchain they actually recorded.
+- `cmd/bear` no longer carries a second copy of the resource-name-to-identifier
+  helpers. Unifying the commands moved generation into `internal/cli`, which owns
+  `nameParts`/`titleName`, and the copy in `cmd/bear` was left behind: `main`
+  never called it, its own test was its only consumer, and it had already
+  diverged from the live implementation (no lower-casing, fewer separators, and
+  no empty or leading-digit fallback). The linker had already dropped both
+  functions, so `__TEXT` (40206336 bytes) and `__text` (20575664 bytes) are
+  identical in both builds; only the `__LINKEDIT` and `__DWARF` debug metadata
+  differs.
 - The package-level `TotalRequests` and `TotalErrors` counters aggregate every
   runtime in the process, which is misleading when one process hosts more than
   one Bear, and reading them requires `atomic.LoadInt64`. They remain available
@@ -63,9 +95,54 @@ All notable changes to gin-bear are documented in this file.
   startup after lifecycle registration closes.
 - Development generators require an explicit local replacement and cannot mix
   unreleased HEAD templates with a published framework tag.
+- The scaffold's database switch is documented instead of implied. A fresh
+  project still ships `database.enabled: false`: `pkg/bear/bear.go` treats
+  `GIN_MODE=release` as production, production rejects SQLite as an unsupported
+  database type, and enabling SQLite by default would therefore stop a fresh
+  `bear new` project from starting under release mode, which the baseline could
+  do. The template carries the SQLite block to uncomment and says why a real
+  deployment needs MySQL or PostgreSQL; `application-prod.yaml.example` keeps
+  PostgreSQL and adds the migration deploy-step reminder. Generated projects also
+  receive a `.gitignore` that excludes the local SQLite files, the `cmd/server`
+  and `cmd/migrate` build output, and the coverage profile, while keeping
+  `migrations/` committed.
+- The readiness, HTTP-shutdown, and gRPC-shutdown tests no longer prove
+  concurrency or fail-fast behaviour with tight wall-clock thresholds. Two 100ms
+  readiness checks finish in ~103ms but were asserted to finish inside 180ms,
+  and a deferred `Shutdown` that refuses to re-wait costs one 25ms forced-sync
+  window against a 100ms bound, so each assertion had under 80ms of slack and
+  failed whenever the scheduler stalled. Concurrency is now proven by the
+  overlap counter and the refusal by its forced-shutdown marker, and the
+  remaining clock bounds are hang guards sized to the configured budget.
 
 ### Fixed
 
+- `docs/production.md` presented `examples/migration/main.go` as the tested
+  production-loading pattern, but the package had no test file, so
+  `loadProductionConfig` was only ever compiled and never executed. The example
+  now carries a test that loads a production configuration, rejects SQLite and a
+  relaxed `config.strict`, and proves that load failures reach the caller wrapped
+  in the example's own context rather than as a panic.
+- The `pkg/bear/gen` scanner treated any struct tag containing the substring
+  "inject" as an injection directive, so `json:"inject_total"` or
+  `gorm:"column:inject_id"` produced a `bear.Resolve` line that overwrote the
+  field with a bean the runtime never asked for. It now matches the tag key
+  exactly, which is how the runtime decides in `pkg/bear/ioc.go`.
+- The exported `pkg/bear/gen` `ServiceTemplate` renders a service package that
+  does not compile, because it imports `pkg/bear` and references nothing from it.
+  The import is retained: the constant's value is part of the pinned v0.9.1
+  public API baseline, and `scripts/check-api-compat.sh` rejects a value change as
+  non-additive. The limitation is documented on the constant and pinned by its own
+  test, so removing it later is a deliberate baseline update rather than a silent
+  drift. The other exported template, `ControllerTemplate`, does render a
+  compilable package, and both are now rendered and built in a fixture module.
+- The `pkg/bear/gen` regression test promised a compilable injector but only ran
+  `format.Source`, which parses without resolving an identifier, and it generated
+  into a package other than the scanned one. That layout cannot compile: the
+  rendered file names the scanned structs unqualified, and `NewGenerator` only
+  receives a package name. The rendered file is now built for real in a fixture
+  module, the cross-package limit is pinned by its own test, and the layout
+  contract is documented on the package and in `docs/supported-features.md`.
 - Compatibility-mode `Mount`, `Beans`, and `AddModule` now publish bean
   metadata and append their registration records under the shared registration
   lock. Writing the `Bear` expression metadata without synchronization raced
@@ -111,6 +188,46 @@ All notable changes to gin-bear are documented in this file.
   replaced, and reading falls back to the newest still-live one, clearing to no
   facade once every runtime has stopped. Liveness is a lock-free flag on the
   lifecycle so the logging fast path never contends on the lifecycle mutex.
+- `bear gen api` published a resource that could not start, silently. The
+  generated repository always injects `*bear.GormAdapter`, but a disabled
+  database registers no adapter while `EnableDatabaseE` stays silent, so strict
+  startup failed with `bean missing: dependency *bear.GormAdapter` and nothing
+  pointed at the configuration. Generating into a project whose `application.yaml`
+  sets `database.enabled: false` now warns on stderr and prints the block to add.
+  Generation is not refused: an application may register `*bear.GormAdapter`
+  itself, which is what the release E2E does with an in-memory SQLite handle. The
+  scaffold keeps the database disabled by default, because enabling a SQLite
+  database would make `GIN_MODE=release` reject the scaffold's own default as an
+  unsupported production database.
+- `bear gen api` produced no schema. A generated repository queries a table that
+  nothing created, so the first request failed even once the adapter resolved.
+  Resource generation now writes `migrations/NNN_create_<table>.up.sql` and the
+  matching `.down.sql` for the configured dialect, and the scaffold ships a
+  `cmd/migrate` tool to apply them as a separate deploy step.
+- A `.bear/generate.lock` left behind by an interrupted `bear gen` permanently
+  blocked every later generation with a bare `file exists`. The lock now records
+  the owning pid and start time, and a conflicting run reports that owner plus
+  the exact command that clears the lock. A stale lock is still not reclaimed
+  automatically, because deciding that no other process is generating belongs to
+  the operator.
+- The legacy `pkg/bear/gen` code generator could not produce working output.
+  `Scanner` rendered every composite field type with `fmt`'s debug form, so a
+  `*Repository` field became `&{%!s(token.Pos=90) Repository}` and the generated
+  injector did not compile; field types are now rendered as Go source.
+  `Generator.Generate` failed on every call because its template asked for a
+  module name that was never supplied, and it now writes the framework import
+  path the package's other templates already use, formats its output, and creates
+  the destination directory the way `GenerateFromTemplate` already did.
+- Generated Windows servers did not shut down gracefully when their console
+  window was closed, the user logged off, or the machine shut down. The earlier
+  fix for an unsupported `syscall.SIGBREAK` reference also dropped
+  `syscall.SIGTERM`, which does exist on Windows: the runtime reports it for
+  `CTRL_CLOSE_EVENT`, `CTRL_LOGOFF_EVENT`, and `CTRL_SHUTDOWN_EVENT`, and the
+  framework's own `Launch` already listens for it. The generated signal set is
+  now `os.Interrupt`, which covers Control-C and Control-Break, plus
+  `syscall.SIGTERM`, and the regression test type-checks the rendered file for
+  `GOOS=windows` instead of matching its text, so an unsupported constant now
+  fails the build rather than reaching a generated project.
 
 ## [v0.9.3] - 2026-08-12
 
