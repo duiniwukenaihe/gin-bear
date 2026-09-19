@@ -104,6 +104,14 @@ All notable changes to gin-bear are documented in this file.
   The reservation is now owned by the reserving runtime's lifecycle and dropped
   once that lifecycle has stopped, while a conflicting mode is still rejected
   for as long as any strict runtime remains live.
+- The process-wide compatibility facade was a single slot that each `Ignite`
+  overwrote, so once a runtime shut down the package-level helpers (`GetByType`,
+  `GetInjector`, and the logger target reached on every log record) kept
+  resolving against a stopped runtime. Publishing now remembers the facade it
+  replaced, and reading falls back to the newest still-live one, clearing to no
+  facade once every runtime has stopped. Liveness is a lock-free flag on the
+  lifecycle so the logging fast path never contends on the lifecycle mutex.
+
 ## [v0.9.3] - 2026-08-12
 
 ### Fixed

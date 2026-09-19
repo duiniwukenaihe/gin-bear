@@ -42,7 +42,19 @@ type legacyFacade struct {
 	logger   *slog.Logger
 }
 
+// defaultFacade holds the effective process-wide compatibility facade: the
+// runtime that package-level helpers such as GetByType and Log resolve against.
 var defaultFacade atomic.Pointer[legacyFacade]
+
+var (
+	// defaultFacadeMu guards supersededFacades and the reconciliation path.
+	defaultFacadeMu sync.Mutex
+	// supersededFacades holds facades that a newer publish replaced, in publish
+	// order. The effective default is the newest entry whose runtime is still
+	// alive, so a runtime that has stopped gives way to the one it replaced
+	// instead of leaving the process pointed at a dead runtime.
+	supersededFacades []*legacyFacade
+)
 
 const runtimeContextKey = "bear_runtime"
 
@@ -178,16 +190,83 @@ func publishDefaultRuntime(runtime *Runtime) {
 	if runtime == nil {
 		return
 	}
-	defaultFacade.Store(&legacyFacade{
+	facade := &legacyFacade{
 		runtime:  runtime,
 		injector: runtime.Container,
 		logger:   runtime.Logger,
-	})
+	}
+	defaultFacadeMu.Lock()
+	pruneSupersededFacadesLocked()
+	// Only a still-live facade is worth remembering: a dead one can never be
+	// restored, and keeping it would let the stack grow without bound in a
+	// process that repeatedly ignites and shuts down runtimes.
+	if previous := defaultFacade.Load(); previous != nil && !facadeRuntimeStopped(previous) {
+		supersededFacades = append(supersededFacades, previous)
+	}
+	defaultFacade.Store(facade)
+	defaultFacadeMu.Unlock()
 	slog.SetDefault(Log)
 }
 
 func loadDefaultFacade() *legacyFacade {
-	return defaultFacade.Load()
+	facade := defaultFacade.Load()
+	if !facadeRuntimeStopped(facade) {
+		return facade
+	}
+	defaultFacadeMu.Lock()
+	defer defaultFacadeMu.Unlock()
+	return reconcileDefaultFacadeLocked()
+}
+
+// facadeRuntimeStopped reports whether the runtime that published a facade has
+// finished shutting down. Facades without an owning runtime, such as bootstrap
+// and logger-only legacy facades, are never treated as stopped.
+func facadeRuntimeStopped(facade *legacyFacade) bool {
+	if facade == nil || facade.runtime == nil || facade.runtime.Lifecycle == nil {
+		return false
+	}
+	return facade.runtime.Lifecycle.stopped()
+}
+
+// reconcileDefaultFacadeLocked falls back to the newest superseded facade whose
+// runtime is still alive. It requires defaultFacadeMu.
+func reconcileDefaultFacadeLocked() *legacyFacade {
+	pruneSupersededFacadesLocked()
+	if current := defaultFacade.Load(); !facadeRuntimeStopped(current) {
+		return current
+	}
+	for len(supersededFacades) > 0 {
+		candidate := supersededFacades[len(supersededFacades)-1]
+		supersededFacades = supersededFacades[:len(supersededFacades)-1]
+		if facadeRuntimeStopped(candidate) {
+			continue
+		}
+		defaultFacade.Store(candidate)
+		return candidate
+	}
+	defaultFacade.Store(nil)
+	return nil
+}
+
+// pruneSupersededFacadesLocked drops superseded entries whose runtime has
+// stopped. It requires defaultFacadeMu.
+func pruneSupersededFacadesLocked() {
+	live := make([]*legacyFacade, 0, len(supersededFacades))
+	for _, facade := range supersededFacades {
+		if !facadeRuntimeStopped(facade) {
+			live = append(live, facade)
+		}
+	}
+	supersededFacades = live
+}
+
+// resetDefaultFacade clears the published facade stack so callers can start from
+// a deterministic facade state.
+func resetDefaultFacade() {
+	defaultFacadeMu.Lock()
+	supersededFacades = nil
+	defaultFacade.Store(nil)
+	defaultFacadeMu.Unlock()
 }
 
 func currentDefaultRuntime() *Runtime {
