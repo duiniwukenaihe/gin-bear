@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 	"unicode"
 
 	"github.com/duiniwukenaihe/gin-bear/internal/atomicdir"
@@ -23,6 +24,9 @@ const (
 	decimalModuleVersion = "v1.4.0"
 	ginModuleVersion     = "v1.12.0"
 	gormModuleVersion    = "v1.26.0"
+	// scaffoldConfigFile is the configuration file `bear new` writes and the
+	// generated server loads by default.
+	scaffoldConfigFile = "application.yaml"
 )
 
 type resourceOptions struct {
@@ -75,6 +79,15 @@ func genCommand() *cobra.Command {
 					return err
 				}
 			}
+			// Read the database contract before generating so an unreadable
+			// configuration fails before any file is written.
+			adapterHint := ""
+			if kind == "api" {
+				adapterHint, err = generatedAPIAdapterHint(directory)
+				if err != nil {
+					return err
+				}
+			}
 			generated, err := generateResource(cmd.Context(), resourceOptions{
 				Kind:      kind,
 				Name:      args[1],
@@ -83,6 +96,10 @@ func genCommand() *cobra.Command {
 			})
 			if err != nil {
 				return err
+			}
+			// Warnings go to stderr so the machine-readable stdout stays stable.
+			if adapterHint != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", adapterHint)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Generated %s\n", generated)
 			if kind == "api" && !managedProject {
@@ -208,15 +225,29 @@ func generateResource(ctx context.Context, opts resourceOptions) (string, error)
 		return "", fmt.Errorf("publish resource package: %w", err)
 	}
 	published = true
+	var migrationFiles []string
+	rollback := func() error {
+		removeGeneratedFiles(opts.Directory, migrationFiles)
+		return os.RemoveAll(target)
+	}
+	if opts.Kind == "api" {
+		migrationFiles, err = writeGeneratedAPIMigration(opts.Directory, data)
+		if err != nil {
+			if removeErr := rollback(); removeErr != nil {
+				return "", fmt.Errorf("%w (rollback resource: %v)", err, removeErr)
+			}
+			return "", err
+		}
+	}
 	if err := pinResourceDependencies(opts.Directory, opts.Kind, fields); err != nil {
-		if removeErr := os.RemoveAll(target); removeErr != nil {
+		if removeErr := rollback(); removeErr != nil {
 			return "", fmt.Errorf("pin generated dependencies: %w (rollback resource: %v)", err, removeErr)
 		}
 		return "", fmt.Errorf("pin generated dependencies: %w", err)
 	}
 	if managed != nil {
 		if err := managed.register(data); err != nil {
-			if removeErr := os.RemoveAll(target); removeErr != nil {
+			if removeErr := rollback(); removeErr != nil {
 				return "", fmt.Errorf("register generated API: %w (rollback resource: %v)", err, removeErr)
 			}
 			return "", fmt.Errorf("register generated API: %w", err)
@@ -246,6 +277,60 @@ func scaffoldManifestExists(root string) (bool, error) {
 	return false, fmt.Errorf("inspect scaffold manifest %q: %w", path, err)
 }
 
+// generateLockPath is the project-relative path of the exclusive generation
+// lock.
+const generateLockPath = ".bear/generate.lock"
+
+// acquireGenerationLock takes the per-project generation lock and returns the
+// held file together with its absolute path.
+//
+// Two concurrent `bear gen api` runs would otherwise interleave their writes to
+// .bear/scaffold.json and internal/app/modules_gen.go, silently dropping one of
+// the registrations.
+//
+// The lock records the owning pid and start time so that a lock left behind by a
+// crashed run can be described instead of reported as a bare "file exists". A
+// stale lock is deliberately not reclaimed automatically: deciding that no other
+// process is generating in this project is the operator's call, which is also
+// how git treats a leftover index.lock. Reclaiming it here would need pid
+// liveness checks, and those differ per platform and misjudge a recycled pid.
+func acquireGenerationLock(root string) (*os.File, string, error) {
+	path := filepath.Join(root, filepath.FromSlash(generateLockPath))
+	lock, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err == nil {
+		if _, writeErr := fmt.Fprintf(lock, "pid=%d started=%s\n", os.Getpid(), time.Now().Format(time.RFC3339)); writeErr != nil {
+			// A lock with no owner record still excludes other runs, so the
+			// failure to describe the holder must not be reported as a lock.
+			_ = lock.Close()
+			_ = os.Remove(path)
+			return nil, path, fmt.Errorf("record generation lock owner %q: %w", path, writeErr)
+		}
+		return lock, path, nil
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return nil, path, fmt.Errorf("acquire generation lock %q: %w", path, err)
+	}
+	return nil, path, fmt.Errorf(`generation lock %q is already held (%s).
+Another "bear gen" may be running in this project. Wait for it to finish, or delete the lock and retry:
+    rm %q`,
+		path, describeGenerationLockHolder(path), path)
+}
+
+// describeGenerationLockHolder summarises the owner record of an existing lock.
+// It never fails: an unreadable or empty lock still has to produce a usable
+// recovery message.
+func describeGenerationLockHolder(path string) string {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "owner record unreadable"
+	}
+	fields := strings.Fields(string(contents))
+	if len(fields) == 0 {
+		return "owner record empty"
+	}
+	return strings.Join(fields, " ")
+}
+
 func prepareManagedGeneration(root, kind, packageName string) (*managedGeneration, error) {
 	if kind != "api" {
 		return nil, nil
@@ -255,10 +340,9 @@ func prepareManagedGeneration(root, kind, packageName string) (*managedGeneratio
 		return nil, err
 	}
 
-	lockPath := filepath.Join(root, ".bear", "generate.lock")
-	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	lock, lockPath, err := acquireGenerationLock(root)
 	if err != nil {
-		return nil, fmt.Errorf("acquire generation lock %q: %w", lockPath, err)
+		return nil, err
 	}
 	managed := &managedGeneration{root: root, lock: lock, lockPath: lockPath}
 	prepared := false

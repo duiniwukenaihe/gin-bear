@@ -1,0 +1,94 @@
+// Command migrate applies or rolls back the reviewed SQL migrations under
+// migrations/.
+//
+// It is a one-off admin tool. Schema changes stay out of request-serving startup
+// (see docs/production.md), so run this as a separate deploy step before
+// starting a new server version:
+//
+//	go run ./cmd/migrate
+//	go run ./cmd/migrate -direction down -steps 1
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	direction := flag.String("direction", "up", "up applies pending migrations, down rolls back the latest ones")
+	steps := flag.Int("steps", 1, "how many migrations down rolls back")
+	configPath := flag.String("config", "", "configuration file; when empty the standard application.yaml and application-<BEAR_ENV>.yaml chain is loaded")
+	migrationDir := flag.String("dir", "migrations", "directory holding the reviewed .up.sql and .down.sql files")
+	flag.Parse()
+
+	var paths []string
+	if *configPath != "" {
+		paths = []string{*configPath}
+	}
+	config, err := bear.LoadConfig(paths...)
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
+	}
+	if config.DB == nil || !config.DB.Enabled {
+		return fmt.Errorf("database is not enabled in the loaded configuration")
+	}
+	dialect, err := migrationDialect(config.DB.Type)
+	if err != nil {
+		return err
+	}
+
+	adapter, err := bear.NewGormAdapter(config.DB)
+	if err != nil {
+		return fmt.Errorf("connect database: %w", err)
+	}
+	defer func() { _ = adapter.Shutdown() }()
+	sqlDB, err := adapter.DB.DB()
+	if err != nil {
+		return fmt.Errorf("resolve database handle: %w", err)
+	}
+	// An absent directory would otherwise report a successful no-op run, so the
+	// operator learns about a wrong working directory from LoadSQLMigrations.
+	if _, err := os.Stat(*migrationDir); err != nil {
+		return fmt.Errorf("locate migrations in %s: %w", *migrationDir, err)
+	}
+	migrations, err := bear.LoadSQLMigrations(*migrationDir)
+	if err != nil {
+		return fmt.Errorf("load migrations: %w", err)
+	}
+
+	runner := bear.NewMigrationRunnerWithDialect(sqlDB, dialect)
+	ctx := context.Background()
+	switch strings.ToLower(strings.TrimSpace(*direction)) {
+	case "up":
+		return runner.Up(ctx, migrations)
+	case "down":
+		return runner.Down(ctx, migrations, *steps)
+	default:
+		return fmt.Errorf("unsupported direction %q: use up or down", *direction)
+	}
+}
+
+func migrationDialect(dbType string) (bear.MigrationDialect, error) {
+	switch strings.ToLower(strings.TrimSpace(dbType)) {
+	case "postgres", "postgresql":
+		return bear.MigrationDialectPostgreSQL, nil
+	case "mysql", "":
+		return bear.MigrationDialectMySQL, nil
+	case "sqlite", "sqlite3":
+		return bear.MigrationDialectSQLite, nil
+	default:
+		return "", fmt.Errorf("unsupported database type %q", dbType)
+	}
+}
