@@ -21,6 +21,11 @@
 // This package is compatibility-only: docs/supported-features.md retains it
 // because v0.9.1 shipped it and the v0.9.1 API baseline pins it, while new code
 // generation belongs to the `bear gen` CLI command.
+//
+// It deliberately carries no `Deprecated:` marker. The v0.9.1 baseline consumer
+// at scripts/apicompat/v091consumer calls NewGenerator, and the release gate
+// runs staticcheck over the whole module, so the SA1019 report that reference
+// would produce fails the build. See docs/compatibility.md.
 package gen
 
 import (

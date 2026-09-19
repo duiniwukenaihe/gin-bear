@@ -12,8 +12,15 @@ compile and load its configuration while it plans a migration.
 
 See [supported features](supported-features.md) for the supported,
 experimental, and compatibility-only categories. Compatibility-only APIs are
-annotated with Go `Deprecated:` comments. They are retained for source and
-configuration compatibility, not for new feature work.
+retained for source and configuration compatibility, not for new feature work,
+and are annotated with Go `Deprecated:` comments.
+
+`pkg/bear/gen` is the single exception. The v0.9.1 baseline consumer in
+`scripts/apicompat/v091consumer` calls `gen.NewGenerator`, and the release gate
+runs `staticcheck ./...` over the whole module, so the `SA1019` report that
+reference would produce fails the build. Its compatibility-only status is
+recorded in the package documentation and in
+[supported features](supported-features.md) instead.
 
 ## Compatibility-only Configuration
 
