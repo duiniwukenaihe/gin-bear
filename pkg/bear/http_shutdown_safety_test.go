@@ -88,12 +88,22 @@ func TestServeDoesNotCloseLifecycleResourcesWhileHTTPHandlerIgnoresCancellation(
 		t.Fatalf("shutdown took %s, want at most %s", elapsed, shutdownBudget+300*time.Millisecond)
 	}
 
+	// A second Shutdown must refuse to start another full wait now that the
+	// handlers are known to ignore cancellation. Pin that refusal by its
+	// structural marker -- the forced-shutdown wrapper -- because the refusal
+	// itself costs one 25ms forced-sync window, so the previous 100ms wall-clock
+	// bound left only ~75ms of slack and failed whenever the scheduler stalled.
+	// The clock bound stays as a hang guard, sized to the shutdown budget a full
+	// re-wait would have consumed.
 	deferredShutdownStarted := time.Now()
 	shutdownErr := app.Shutdown(context.Background())
 	if shutdownErr == nil || !strings.Contains(shutdownErr.Error(), "active HTTP handlers") {
 		t.Fatalf("deferred Shutdown() error = %v, want active HTTP handler error", shutdownErr)
 	}
-	if elapsed := time.Since(deferredShutdownStarted); elapsed > 100*time.Millisecond {
+	if !strings.Contains(shutdownErr.Error(), "active handlers remain after forced shutdown") {
+		t.Fatalf("deferred Shutdown() error = %v, want the forced-shutdown refusal", shutdownErr)
+	}
+	if elapsed := time.Since(deferredShutdownStarted); elapsed > shutdownBudget {
 		t.Fatalf("deferred Shutdown() took %s, want a fast failure after handler timeout", elapsed)
 	}
 	assertHTTPShutdownSignalOpen(t, probe.stopping, "Deferred Shutdown closed resources while an HTTP handler was still active")

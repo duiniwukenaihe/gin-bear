@@ -199,12 +199,14 @@ func TestMetricsNormalizeMethodsToBoundedLabels(t *testing.T) {
 }
 
 func TestReadinessRunsChecksConcurrentlyAndSanitizesErrors(t *testing.T) {
+	const readinessTimeout = 500 * time.Millisecond
+
 	resetTestInjector()
 	resetGinModeForTest(t)
 
 	cfg := NewSysConfig()
 	cfg.DB.Enabled = false
-	cfg.Health.ReadinessTimeout = "500ms"
+	cfg.Health.ReadinessTimeout = readinessTimeout.String()
 	app := Ignite(cfg)
 
 	var active int32
@@ -222,8 +224,15 @@ func TestReadinessRunsChecksConcurrentlyAndSanitizesErrors(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
 	}
-	if elapsed >= 180*time.Millisecond {
-		t.Fatalf("readiness checks appear sequential, elapsed=%s body=%s", elapsed, response.Body.String())
+	// Concurrency is proven by the overlap counter below, not by the clock. Two
+	// 100ms checks take ~100ms in parallel and ~200ms sequentially, so any bound
+	// narrow enough to separate the two sits only ~80ms above the parallel case
+	// and reports a false failure whenever the scheduler stalls. Bound the
+	// elapsed time by the configured readiness deadline instead: that still
+	// catches a check which ran past its deadline, while leaving the sequential
+	// case to the exact structural check.
+	if elapsed >= readinessTimeout {
+		t.Fatalf("readiness took %s, want less than the %s deadline, body=%s", elapsed, readinessTimeout, response.Body.String())
 	}
 	if atomic.LoadInt32(&maxActive) < 2 {
 		t.Fatalf("readiness checks did not overlap, max active = %d", maxActive)
