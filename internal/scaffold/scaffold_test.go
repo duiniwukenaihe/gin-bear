@@ -568,6 +568,27 @@ func runGo(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// runGoForTarget runs a go command with GOOS and GOARCH pinned to the target.
+// The inherited values are dropped rather than appended to, because a duplicate
+// key in the child environment resolves to the first entry.
+func runGoForTarget(t *testing.T, dir, goos, goarch string, args ...string) {
+	t.Helper()
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GOOS=") || strings.HasPrefix(entry, "GOARCH=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12", "GOOS="+goos, "GOARCH="+goarch)
+	cmd := exec.Command("go", args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("GOOS=%s GOARCH=%s go %s failed: %v\n%s", goos, goarch, strings.Join(args, " "), err, output)
+	}
+}
+
 func buildCLI(t *testing.T, packagePath, name string) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), name)

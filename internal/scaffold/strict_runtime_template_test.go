@@ -232,12 +232,70 @@ func TestGeneratedWindowsShutdownSignalsCompileWithGoRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(source), "syscall.SIGBREAK") {
-		t.Fatalf("generated Windows signals reference unsupported syscall.SIGBREAK:\n%s", source)
+	// Inspect the referenced constants through the AST rather than by substring:
+	// the file documents why syscall.SIGBREAK must not be used, and a text match
+	// cannot tell that comment apart from a real reference.
+	referenced := syscallConstantsIn(t, string(source))
+	if slices.Contains(referenced, "SIGBREAK") {
+		t.Fatalf("generated Windows signals reference unsupported syscall.SIGBREAK: %v", referenced)
 	}
-	if !strings.Contains(string(source), "[]os.Signal{os.Interrupt}") {
-		t.Fatalf("generated Windows signals do not use os.Interrupt:\n%s", source)
+	// os.Interrupt covers Control-C and Control-Break on Windows, and
+	// syscall.SIGTERM is what the runtime reports for CTRL_CLOSE_EVENT,
+	// CTRL_LOGOFF_EVENT and CTRL_SHUTDOWN_EVENT, so a generated server still
+	// reaches its graceful path when its console window is closed or the machine
+	// shuts down.
+	if !slices.Equal(referenced, []string{"SIGTERM"}) {
+		t.Fatalf("generated Windows syscall constants = %v, want [SIGTERM]", referenced)
 	}
+	if !strings.Contains(string(source), "[]os.Signal{os.Interrupt, syscall.SIGTERM}") {
+		t.Fatalf("generated Windows signals do not cover the graceful shutdown set:\n%s", source)
+	}
+	assertGeneratedFileCompilesFor(t, "windows", "amd64", string(source))
+}
+
+// syscallConstantsIn returns the sorted names of the syscall package constants
+// the source refers to.
+func syscallConstantsIn(t *testing.T, source string) []string {
+	t.Helper()
+	parsed, err := parser.ParseFile(token.NewFileSet(), "signals_windows.go", source, 0)
+	if err != nil {
+		t.Fatalf("parse generated Windows signals: %v", err)
+	}
+	var referenced []string
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if ident, ok := selector.X.(*ast.Ident); ok && ident.Name == "syscall" {
+			referenced = append(referenced, selector.Sel.Name)
+		}
+		return true
+	})
+	slices.Sort(referenced)
+	return referenced
+}
+
+// assertGeneratedFileCompilesFor type-checks a rendered template file for the
+// given target platform. A substring assertion cannot tell whether a referenced
+// constant exists for that GOOS, which is how an unsupported syscall.SIGBREAK
+// reference reached the Windows template in the first place. The rendered signal
+// files import only the standard library, so checking them in isolation is far
+// cheaper than cross-building the whole generated project.
+func assertGeneratedFileCompilesFor(t *testing.T, goos, goarch, source string) {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod":     "module generatedplatformcheck\n\ngo 1.25\n",
+		"main.go":    "package main\n\nfunc main() {}\n",
+		"signals.go": source,
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGoForTarget(t, dir, goos, goarch, "build", "./...")
 }
 
 func TestProductionExamplesUseLocalServiceEndpoints(t *testing.T) {
