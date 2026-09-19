@@ -187,7 +187,7 @@ not provide value-equality semantics.
    adopting the new configuration fields.
 7. Follow the strict migration above, including current-container Casbin
    injection and explicit response-mode client testing.
-8. Run `GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify` and deploy
+8. Run `GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify` and deploy
    through a readiness-checked rollout.
 
 ## Rollback

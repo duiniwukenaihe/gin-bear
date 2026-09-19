@@ -7,7 +7,7 @@
    security policy:
 
    ```bash
-   GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
+   GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify
    ```
 3. Before an RC or tag, run the complete audited gate with an explicit shuffle
    seed. The default is offline and therefore requires preinstalled tools, a

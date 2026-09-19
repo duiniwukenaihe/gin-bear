@@ -1002,7 +1002,7 @@ func TestAPICompatibilityGateRejectsInvalidRebuildFlag(t *testing.T) {
 	for _, value := range []string{"", "banana"} {
 		t.Run(value, func(t *testing.T) {
 			command := exec.Command("./check-api-compat.sh")
-			command.Env = releaseTestEnvironment("API_BASELINE_REBUILD="+value, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+			command.Env = releaseTestEnvironment("API_BASELINE_REBUILD="+value, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
 			output, err := command.CombinedOutput()
 			if err == nil {
 				t.Fatalf("API compatibility gate accepted invalid rebuild flag %q:\n%s", value, output)
@@ -1433,11 +1433,11 @@ if [[ "$1 $2" == "version -m" ]]; then
 	case "${3##*/}" in
 	staticcheck)
 		if [[ "${FAKE_STATICCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
-		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.14\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
 		;;
 	govulncheck)
 		if [[ "${FAKE_GOVULNCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
-		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.14\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
 		;;
 	esac
 	exit 0
@@ -1507,16 +1507,16 @@ func fakeRCRepository(t *testing.T) (string, string, string) {
 	fakeGo := `#!/usr/bin/env bash
 set -euo pipefail
 printf 'GOPROXY=%s %s\n' "${GOPROXY:-}" "$*" >> "${RC_TEST_STATE}/go-calls"
-if [[ "${1:-}" == "version" ]]; then printf '%s\n' 'go version go1.25.12 fixture'; fi
+if [[ "${1:-}" == "version" ]]; then printf '%s\n' 'go version go1.25.14 fixture'; fi
 if [[ "${1:-} ${2:-}" == "version -m" ]]; then
 	case "${3##*/}" in
 	staticcheck)
 		if [[ "${FAKE_STATICCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
-		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.14\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
 		;;
 	govulncheck)
 		if [[ "${FAKE_GOVULNCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
-		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.14\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
 		;;
 	esac
 	exit 0
@@ -1531,7 +1531,7 @@ if [[ "${1:-}" == "-version" ]]; then printf '%s\n' 'staticcheck 2026.1 (0.7.0)'
 `
 	fakeGovulncheck := `#!/usr/bin/env bash
 printf '%s\n' "$*" >> "${RC_TEST_STATE}/govulncheck-calls"
-if [[ "${1:-}" == "-version" ]]; then printf '%s\n' 'Go: go1.25.12 Scanner: govulncheck@v1.6.0'; fi
+if [[ "${1:-}" == "-version" ]]; then printf '%s\n' 'Go: go1.25.14 Scanner: govulncheck@v1.6.0'; fi
 `
 	fakeGit := `#!/usr/bin/env bash
 set -euo pipefail

@@ -392,7 +392,7 @@ func writeGeneratedTestGoMod(t *testing.T, project, module string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	goMod := "module " + module + "\n\ngo 1.25.12\n\n" +
+	goMod := "module " + module + "\n\ngo 1.25.14\n\n" +
 		"require github.com/duiniwukenaihe/gin-bear v0.0.0\n\n" +
 		"replace github.com/duiniwukenaihe/gin-bear => " + repositoryRoot + "\n"
 	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte(goMod), 0644); err != nil {

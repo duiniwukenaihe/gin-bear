@@ -151,5 +151,5 @@ loopback behind a same-host Nginx/Envoy TLS terminator. See the
 Before a release, run the complete local gate with the project Go version:
 
 ```bash
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify
 ```

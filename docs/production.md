@@ -875,7 +875,7 @@ call that already started may finish in one bounded background worker, while
 Run the project verification gate locally before cutting a release:
 
 ```bash
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify
 ```
 
 This is the pinned framework verification command used by `main` CI. The tag

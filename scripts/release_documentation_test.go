@@ -243,7 +243,7 @@ func TestChangelogSeparatesFutureWorkFromPublishedRelease(t *testing.T) {
 
 func TestProductionDocumentationUsesPinnedVerifyCommand(t *testing.T) {
 	text := readDocumentationFile(t, "../docs/production.md")
-	const command = "GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify"
+	const command = "GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify"
 	if !strings.Contains(text, command) {
 		t.Fatalf("production documentation missing %q", command)
 	}
@@ -308,7 +308,7 @@ func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 func TestRunbookUsesPinnedVerificationAndSourceOnlyRelease(t *testing.T) {
 	runbook := readDocumentationFile(t, "../docs/runbook.md")
 	for _, phrase := range []string{
-		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify",
+		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify",
 		"SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc",
 		"GitHub-generated source archives",
 		"go list -m github.com/duiniwukenaihe/gin-bear@v0.9.3",

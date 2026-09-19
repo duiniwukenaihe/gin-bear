@@ -131,7 +131,7 @@ func TestExecuteGenPublishesResourceInCurrentProject(t *testing.T) {
 func TestGenerateDecimalResourcePinsDependencyVersion(t *testing.T) {
 	project := t.TempDir()
 	goModPath := filepath.Join(project, "go.mod")
-	if err := os.WriteFile(goModPath, []byte("module example.com/invoice\n\ngo 1.25.12\n"), 0644); err != nil {
+	if err := os.WriteFile(goModPath, []byte("module example.com/invoice\n\ngo 1.25.14\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -156,7 +156,7 @@ func TestGenerateDecimalResourcePinsDependencyVersion(t *testing.T) {
 func TestGenerateDecimalResourcePreservesHigherDependencyVersion(t *testing.T) {
 	project := t.TempDir()
 	goModPath := filepath.Join(project, "go.mod")
-	original := "module example.com/invoice\n\ngo 1.25.12\n\nrequire github.com/shopspring/decimal v1.5.0\n"
+	original := "module example.com/invoice\n\ngo 1.25.14\n\nrequire github.com/shopspring/decimal v1.5.0\n"
 	if err := os.WriteFile(goModPath, []byte(original), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestGenerateDecimalResourcePreservesHigherDependencyVersion(t *testing.T) {
 
 func TestGeneratedAPIControllerUsesTypedRequestAndResponseContracts(t *testing.T) {
 	project := t.TempDir()
-	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte("module example.com/invoice\n\ngo 1.25.12\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte("module example.com/invoice\n\ngo 1.25.14\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := generateResource(context.Background(), resourceOptions{
