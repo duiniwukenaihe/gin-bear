@@ -13,8 +13,15 @@ All notable changes to gin-bear are documented in this file.
 - Context-bounded database and Redis startup APIs, including lifecycle-owned
   Redis initialization for required authentication revocation storage.
 - Redis TLS 1.2+, custom CA, and optional mutual-TLS client certificate support.
+- Per-runtime HTTP totals through `Runtime.Requests` and `Runtime.Errors`.
 
 ### Changed
+
+- The package-level `TotalRequests` and `TotalErrors` counters aggregate every
+  runtime in the process, which is misleading when one process hosts more than
+  one Bear, and reading them requires `atomic.LoadInt64`. They remain available
+  and are still updated for compatibility, but are now deprecated in favour of
+  `Runtime.Requests` and `Runtime.Errors`.
 
 - New scaffolds make `auth.enabled: false` explicit, prohibit compatibility
   runtime in production by default, keep gRPC disabled, and show only commented

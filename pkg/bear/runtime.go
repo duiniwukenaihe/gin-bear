@@ -32,6 +32,8 @@ type Runtime struct {
 	hijacked             map[io.Closer]struct{}
 	hijackedClosing      bool
 	webSocketConnections atomic.Int64
+	requests             atomic.Int64
+	errors               atomic.Int64
 }
 
 type legacyFacade struct {
@@ -64,6 +66,26 @@ func newRuntime(config *SysConfig) *Runtime {
 		runtime.Metrics = newHTTPMetricsRegistry(defaultDurationBuckets)
 	}
 	return runtime
+}
+
+// Requests reports how many HTTP requests this runtime has handled. Unlike the
+// package-level TotalRequests counter, it counts only this runtime's traffic and
+// is safe to read from any goroutine.
+func (r *Runtime) Requests() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.requests.Load()
+}
+
+// Errors reports how many HTTP responses with status >= 400 this runtime has
+// produced. Unlike the package-level TotalErrors counter, it counts only this
+// runtime's traffic and is safe to read from any goroutine.
+func (r *Runtime) Errors() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.errors.Load()
 }
 
 func (r *Runtime) trackHijackedConnection(connection io.Closer) bool {
@@ -210,12 +232,14 @@ func runtimePerformanceMiddleware(runtime *Runtime) gin.HandlerFunc {
 	}
 
 	return func(ctx *gin.Context) {
+		runtime.requests.Add(1)
 		atomic.AddInt64(&TotalRequests, 1)
 		start := time.Now()
 		ctx.Next()
 		latency := time.Since(start)
 		status := ctx.Writer.Status()
 		if status >= 400 {
+			runtime.errors.Add(1)
 			atomic.AddInt64(&TotalErrors, 1)
 		}
 		if runtime.Metrics != nil {
