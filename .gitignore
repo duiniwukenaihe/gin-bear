@@ -14,5 +14,9 @@
 .claude/
 .agents/
 
+# AI 助手工作区（仅本地，不入库）
+.workbuddy-ai/
+AGENTS.md
+
 # Local
 server.log
