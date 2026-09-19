@@ -114,6 +114,23 @@ All notable changes to gin-bear are documented in this file.
   failed whenever the scheduler stalled. Concurrency is now proven by the
   overlap counter and the refusal by its forced-shutdown marker, and the
   remaining clock bounds are hang guards sized to the configured budget.
+- `docs/compatibility.md` claimed that every compatibility-only API carries a Go
+  `Deprecated:` comment, which its own list contradicted: `pkg/bear/gen` is
+  compatibility-only and carries none. It is the only exception, and the marker
+  cannot be added — the v0.9.1 baseline consumer calls `gen.NewGenerator`, and the
+  gate runs `staticcheck` over the whole module, so the resulting `SA1019` report
+  would fail the build. The contract now records the exception, and the package
+  documentation explains why the marker is deliberately absent.
+- The scaffold critical coverage group sat exactly on its 80% threshold. The
+  precise figure was 132/165, so `100 * covered` equalled `80 * total`: any single
+  covered statement moving out of coverage, or any single new uncovered statement,
+  would have failed the release gate. `internal/scaffold` now tests the
+  `--framework-replace` validation that guards `bear new` (the version and
+  replacement pairing, the absolute-path and control-character checks, and the
+  directory, `go.mod`, and framework-module checks) and the manifest failure
+  stages that distinguish a missing manifest from a corrupt one, taking the group
+  to 145/165 with real headroom. Three of the group's remaining uncovered
+  statements are unreachable by construction and are kept as defensive code.
 
 ### Fixed
 
