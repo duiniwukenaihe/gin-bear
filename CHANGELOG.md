@@ -65,6 +65,17 @@ All notable changes to gin-bear are documented in this file.
   with the request-time OpenAPI path that reads it through `authFairings`, and
   `GenerateOpenAPI` now reads a stable route-metadata snapshot instead of the
   live registry.
+- Generated injectors registered through `RegisterRuntimeStaticInjector` now
+  resolve by package-qualified key before falling back to the historical bare
+  struct name, and the framework registers its own legacy injectors under both
+  keys. Two same-named types from different packages could previously shadow
+  each other, and a generated injector for a user type sharing a framework type
+  name overwrote the framework entry, whose unchecked type assertion then
+  panicked on the framework type.
+- Compatibility-mode dependency injection now logs a warning when an
+  `inject`-tagged field cannot be resolved instead of leaving the field at its
+  zero value silently. An unexported field that must be injected panics with an
+  error value rather than a string.
 ## [v0.9.3] - 2026-08-12
 
 ### Fixed
