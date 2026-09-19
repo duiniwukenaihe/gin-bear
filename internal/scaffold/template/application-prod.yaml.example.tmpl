@@ -63,6 +63,9 @@ cors:
   allow_credentials: false
   max_age: "12h"
 
+# Schema changes are reviewed SQL files under migrations/. Apply them as a
+# separate deploy step before starting this version; the server never migrates
+# implicitly. See docs/production.md.
 database:
   enabled: true
   type: "postgres"

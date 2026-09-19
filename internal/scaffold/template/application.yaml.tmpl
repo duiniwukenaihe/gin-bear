@@ -11,6 +11,19 @@ config:
 grpc:
   enabled: false
 
+# Generated CRUD resources inject *bear.GormAdapter, which the framework only
+# registers while the database is enabled, so `bear gen api` warns and writes no
+# migration until you enable one. A local SQLite database is enough to run a
+# generated resource:
+#
+#   database:
+#     enabled: true
+#     type: "sqlite"
+#     dsn: {{yamlScalar (printf "%s.db" .Name)}}
+#
+# Release mode (GIN_MODE=release) rejects SQLite as a production database, so a
+# real deployment needs MySQL or PostgreSQL instead; application-prod.yaml.example
+# shows that shape.
 database:
   enabled: false
 

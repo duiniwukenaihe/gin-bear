@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,54 @@ func TestGeneratedProjectProvidesConfigureExtensionPoint(t *testing.T) {
 			t.Fatalf("generated routes.go missing %q:\n%s", want, routesSource)
 		}
 	}
+}
+
+func TestGeneratedProjectIgnoresLocalDatabaseState(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hygiene-api")
+	if err := Generate(context.Background(), Options{
+		Name:             "hygiene-api",
+		Module:           "example.com/hygiene-api",
+		Directory:        dir,
+		FrameworkVersion: "v0.9.2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ignore := readFile(t, filepath.Join(dir, ".gitignore"))
+	patterns := gitignorePatterns(ignore)
+	// The scaffold defaults to SQLite, so the first `go run ./cmd/migrate` writes
+	// hygiene-api.db into the project root. Committing it would commit local state.
+	// Compare whole patterns: a substring check would let "*.db-journal" stand in
+	// for "*.db", and dropping the "*.db" line would go unnoticed.
+	for _, want := range []string{"*.db", "/server", "/migrate"} {
+		if !slices.Contains(patterns, want) {
+			t.Fatalf("generated .gitignore does not ignore %q:\n%s", want, ignore)
+		}
+	}
+	// Migrations are reviewed SQL and are the project's schema history, so no
+	// pattern may ignore them. Comments mention the directory by name, so only
+	// the effective patterns are inspected.
+	for _, pattern := range patterns {
+		for _, forbidden := range []string{"migrations", "*.sql"} {
+			if strings.Contains(pattern, forbidden) {
+				t.Fatalf("generated .gitignore ignores %q through pattern %q:\n%s", forbidden, pattern, ignore)
+			}
+		}
+	}
+}
+
+// gitignorePatterns returns the effective patterns of a .gitignore, skipping
+// blank lines and comments.
+func gitignorePatterns(contents string) []string {
+	patterns := make([]string, 0)
+	for _, line := range strings.Split(contents, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	return patterns
 }
 
 func TestGeneratedServerHealthCheckTimesOutAndReapsUnresponsiveChild(t *testing.T) {
