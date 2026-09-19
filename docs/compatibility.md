@@ -38,6 +38,13 @@ opt into strict runtime checks with `framework.strict: true` and opt into
 automatic response envelopes independently with
 `framework.response_mode: envelope`.
 
+The `inject` tag is not part of that divergence in meaning: both modes resolve a
+tagged field by its type, and `inject:"-"` means "inject this field" rather than
+"skip". Only the set of fields considered and the failure timing differ.
+Compatibility injects `inject:"-"` and `inject:""` and warns when a dependency is
+missing; strict injects every field carrying the tag and fails startup. See
+[the dependency injection contract](production.md#dependency-injection-contract).
+
 `framework.strict` is not the same setting as `config.strict`. The latter
 controls unknown configuration fields and is forced on in production; the
 former controls strict framework runtime behavior and remains opt-in for an

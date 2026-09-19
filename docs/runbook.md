@@ -239,7 +239,7 @@ annotated release tag targets that exact commit.
 
 ## Migration Recovery
 
-Run migrations as a separate deploy step before starting the new app version. If a migration job is interrupted while holding the migration lock, verify no migration process is still running, then call `MigrationRunner.ForceUnlock(ctx)` from an admin command before retrying.
+Run migrations as a separate deploy step before starting the new app version. Generated projects do this with `go run ./cmd/migrate`; `cmd/server` never migrates. If a migration job is interrupted while holding the migration lock, verify no migration process is still running, then call `MigrationRunner.ForceUnlock(ctx)` from an admin command before retrying.
 
 Use `MigrationRunner.Down(ctx, migrations, steps)` only for reviewed rollback SQL. Prefer forward fixes when data loss is possible.
 

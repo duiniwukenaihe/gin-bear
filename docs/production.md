@@ -59,6 +59,8 @@ The tested production-loading pattern is in
 [`examples/migration/main.go`](../examples/migration/main.go). It calls
 `LoadConfig` and returns startup errors to the caller instead of relying on the
 legacy panic behavior.
+Its happy path and its wrapped-error path are exercised by
+`examples/migration/main_test.go` as part of `go test ./...`.
 
 ## Framework Runtime Contract
 
@@ -122,6 +124,35 @@ ownership after resources have begun closing.
 Gin mode is process-global. Once a strict Bear establishes the process mode,
 any later strict or compatibility instance requesting a different mode fails
 with `ErrGinRuntimeConflict` before mutating Gin global state.
+
+## Dependency Injection Contract
+
+Dependencies are always resolved by **field type**. The `inject` tag never names
+a bean, in either runtime mode. In particular `inject:"-"` does not mean "skip";
+it is the historical spelling of "inject this field", and the framework and the
+generated repositories use it throughout.
+
+The two modes differ in which fields they touch and in what happens when a
+dependency is absent:
+
+| | Compatibility (`framework.strict: false`) | Strict (`framework.strict: true`) |
+| --- | --- | --- |
+| Fields injected | only `inject:"-"` and `inject:""`; any other tag value is ignored | every field carrying an `inject` tag, whatever its value |
+| Missing dependency | warns and leaves the zero value | fails startup with `ErrBeanMissing` |
+| Unexported tagged field | panics with an error value, but only once the dependency resolves | returns an error |
+
+To leave a field alone, omit the `inject` tag. A typo in the tag value is not
+detected: `inject:"-"` and `inject:"typo"` behave identically in strict mode,
+while in compatibility mode `inject:"typo"` silently skips the field.
+
+Generated repositories inject `*bear.GormAdapter`, so a generated API resource
+needs that bean to exist before the application serves. `database.enabled: true`
+provides it through `EnableDatabaseE`; an application that owns its `*gorm.DB`
+can instead register one itself with `BeansE(&bear.GormAdapter{DB: db})`. A
+project that does neither fails strict startup with `ErrBeanMissing`, so
+`bear gen api` prints a hint whenever `database.enabled` is false. See
+[Database Migrations](#database-migrations) and
+[Code Generation](#code-generation).
 
 ## HTTP Security Defaults
 
@@ -493,7 +524,17 @@ migrations/
   002_add_user_email.up.sql
 ```
 
-Run them explicitly from a deploy command or one-off admin tool:
+Run them explicitly from a deploy command or one-off admin tool. Projects created
+by `bear new` ship that admin tool as `cmd/migrate`, which resolves the dialect
+from `database.type` and applies or rolls back the reviewed files:
+
+```bash
+go run ./cmd/migrate                 # apply every pending migration
+go run ./cmd/migrate -direction down -steps 1
+```
+
+Keep it out of the serving path: `cmd/server` never migrates. The same flow
+written directly against the framework API looks like this:
 
 ```go
 adapter, err := bear.NewGormAdapter(cfg.DB)
@@ -655,9 +696,72 @@ only the module path, framework/template versions, and generated API package
 names. It is not a database schema or migration history. Existing projects
 without this registry remain supported and receive the manual `AddModule` hint.
 
-The generated repository requires the application's `GormAdapter`. Decimal
-fields add `github.com/shopspring/decimal v1.4.0` to `go.mod` only when the
-requirement is missing. An existing decimal version is preserved.
+The generated repository requires the application's `GormAdapter`. When the
+target project has a scaffold `application.yaml` and it sets
+`database.enabled: false`, `bear gen api` still publishes the resource but warns
+on stderr and prints the block to add:
+
+```yaml
+database:
+  enabled: true
+  type: "sqlite"
+  dsn: "app.db"
+```
+
+The command does not fail. A disabled database only means the framework will not
+register an adapter for you, and an application is free to register one itself —
+the release E2E opens an in-memory SQLite handle and calls
+`BeansE(&bear.GormAdapter{DB: db})`. Projects without a scaffold
+`application.yaml` are not inspected, and `bear gen model` / `bear gen dto`
+never warn.
+
+`bear new` ships the database disabled on purpose, so the generated project also
+starts under `GIN_MODE=release`, which the framework treats as production and
+which rejects SQLite as a production database. Enabling a database is the step
+between `bear new` and `bear gen api`; the template carries the SQLite block to
+uncomment, and the warning repeats it.
+
+An API resource also needs a table, and `bear gen api` writes the migration for
+it instead of creating schema at startup:
+
+```text
+migrations/001_create_user_profile.up.sql
+migrations/001_create_user_profile.down.sql
+```
+
+The DDL is rendered for the configured `database.type` (`sqlite`, `mysql`, or
+`postgres`; an empty type keeps the MySQL default), covers the primary key and
+every generated column, marks `required` fields `NOT NULL`, and matches the
+column names and GORM types the model generates. The version is the highest
+existing version plus one, zero-padded to three digits, and an existing version
+is never overwritten. A project created by `bear new` therefore runs end to end:
+
+```bash
+bear gen api invoice --fields "name:string,email:email,amount:decimal"
+go mod tidy
+go run ./cmd/migrate
+go run ./cmd/server
+```
+
+Generation is atomic: if the migration write, the `go.mod` dependency pin, or
+the `.bear/scaffold.json` registry update fails, the new resource package and
+any migration files written for it are removed together.
+
+Concurrent generation in one project is excluded by `.bear/generate.lock`, which
+records the owning pid and start time and is removed when the run finishes. An
+interrupted run leaves it behind; the next `bear gen` reports the recorded owner
+and prints the command that clears the lock. It does not reclaim a stale lock on
+its own, because deciding that no other process is generating belongs to the
+operator. Generated projects ignore that lock file while keeping
+`.bear/scaffold.json` committed.
+
+`bear new` also writes a `.gitignore` covering the local SQLite files, the
+`cmd/server` and `cmd/migrate` build output, and the coverage profile. Migration
+SQL stays committed: it is the project's reviewed schema history, not local
+state.
+
+Decimal fields add `github.com/shopspring/decimal v1.4.0` to `go.mod` only when
+the requirement is missing. An existing decimal version is preserved.
 
 ## Request Binding
 
