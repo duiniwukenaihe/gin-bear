@@ -1829,12 +1829,20 @@ func (b *Bear) frameworkStrict() bool {
 // registration target and returns a function that restores the previous state.
 // Restoring instead of unconditionally clearing keeps nested or back-to-back
 // plugin registrations from clobbering each other's mode.
+//
+// The nil checks sit inside the returned closure instead of an early return
+// because an empty function body compiles to a zero-statement coverage block,
+// and scripts/check-coverage.sh rejects those as a malformed profile.
 func (b *Bear) enterPluginMode() func() {
-	if b == nil {
-		return func() {}
+	previous := false
+	if b != nil {
+		previous = b.pluginMode.Swap(true)
 	}
-	previous := b.pluginMode.Swap(true)
-	return func() { b.pluginMode.Store(previous) }
+	return func() {
+		if b != nil {
+			b.pluginMode.Store(previous)
+		}
+	}
 }
 
 func (b *Bear) inPluginMode() bool {
