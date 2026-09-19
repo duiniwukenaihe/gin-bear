@@ -121,6 +121,13 @@ All notable changes to gin-bear are documented in this file.
   gate runs `staticcheck` over the whole module, so the resulting `SA1019` report
   would fail the build. The contract now records the exception, and the package
   documentation explains why the marker is deliberately absent.
+- The warning list in `docs/compatibility.md` read as if its ten keys were the
+  whole set. `Ignite` logs thirteen warnings from the same
+  `compatibilityWarnings()` call: the deprecated `auth.storage_type: file`
+  alias, an explicitly enabled production compatibility runtime, and a
+  `database.sslmode` that MySQL ignores also warn from that path. Each of the
+  three has its own test, and the contract now states that the list is not
+  exhaustive.
 - The scaffold critical coverage group sat exactly on its 80% threshold. The
   precise figure was 132/165, so `100 * covered` equalled `80 * total`: any single
   covered statement moving out of coverage, or any single new uncovered statement,

@@ -30,6 +30,12 @@ configuration that is currently a no-op. The warning keys are `waf`, `geoip`,
 `circuit_breaker`, and `config_center`. Warnings are deduplicated within each
 startup.
 
+Those ten are not the whole warning set. The same startup path also warns for the
+deprecated `auth.storage_type: file` alias, for an explicitly enabled production
+compatibility runtime, and for a `database.sslmode` that MySQL ignores.
+`TestCompatibilityWarningsAreLoggedOnceDuringIgnite` pins the ten above, including
+their deduplication, and each of the other three has its own test.
+
 The ID generator is retained as a deprecated method without an enabled config
 flag. The legacy `GRPCService` interface remains for source compatibility; new
 gRPC services use the supported optional `GRPCServiceRegistrar` and
