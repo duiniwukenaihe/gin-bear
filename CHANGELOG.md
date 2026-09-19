@@ -57,6 +57,14 @@ All notable changes to gin-bear are documented in this file.
 - Development generators require an explicit local replacement and cannot mix
   unreleased HEAD templates with a published framework tag.
 
+### Fixed
+
+- Compatibility-mode `Mount`, `Beans`, and `AddModule` now publish bean
+  metadata and append their registration records under the shared registration
+  lock. Writing the `Bear` expression metadata without synchronization raced
+  with the request-time OpenAPI path that reads it through `authFairings`, and
+  `GenerateOpenAPI` now reads a stable route-metadata snapshot instead of the
+  live registry.
 ## [v0.9.3] - 2026-08-12
 
 ### Fixed

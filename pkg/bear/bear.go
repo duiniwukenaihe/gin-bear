@@ -94,6 +94,7 @@ type Bear struct {
 	*gin.Engine
 	g                            *gin.RouterGroup
 	exprData                     map[string]interface{}
+	exprDataMu                   sync.RWMutex
 	fairingHandler               *FairingHandler
 	routeTree                    *RouteTree // 路由树，用于存储路由级别的 Fairing
 	routeRegistry                []RouteMetadata
@@ -1003,10 +1004,14 @@ func (b *Bear) Mount(group string, classes ...IClass) *Bear {
 		}
 		return b
 	}
-	b.mounts = append(b.mounts, MountMetadata{Group: group, Classes: classes})
-	for _, class := range classes {
-		b.Beans(class)
-	}
+	b.mutateCompatibilityRegistration(func() {
+		b.mounts = append(b.mounts, MountMetadata{Group: group, Classes: classes})
+		beans := make([]Bean, 0, len(classes))
+		for _, class := range classes {
+			beans = append(beans, class)
+		}
+		b.compatRegisterBeansLocked(beans)
+	})
 	return b
 }
 
@@ -1029,7 +1034,7 @@ func (b *Bear) MountE(group string, classes ...IClass) error {
 	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
 		return fmt.Errorf("register mounted controllers: %w", err)
 	}
-	publishBeanMetadata(b.exprData, beans, names)
+	b.publishBeanMetadata(beans, names)
 	b.mounts = append(b.mounts, MountMetadata{Group: group, Classes: classes})
 	b.strictRegistrationVersion++
 	return nil
@@ -1171,10 +1176,9 @@ func (b *Bear) Beans(beans ...Bean) *Bear {
 		}
 		return b
 	}
-	for _, bean := range beans {
-		b.exprData[bean.Name()] = bean
-		b.runtime.Container.Set(bean)
-	}
+	b.mutateCompatibilityRegistration(func() {
+		b.compatRegisterBeansLocked(beans)
+	})
 	return b
 }
 
@@ -1192,7 +1196,7 @@ func (b *Bear) BeansE(beans ...Bean) error {
 	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
 		return fmt.Errorf("register beans: %w", err)
 	}
-	publishBeanMetadata(b.exprData, beans, names)
+	b.publishBeanMetadata(beans, names)
 	b.strictRegistrationVersion++
 	return nil
 }
@@ -1212,10 +1216,77 @@ func prepareStrictBeans(beans []Bean) ([]any, []string, error) {
 	return values, names, nil
 }
 
-func publishBeanMetadata(metadata map[string]interface{}, beans []Bean, names []string) {
-	for index, bean := range beans {
-		metadata[names[index]] = bean
+// publishBeanMetadata stores bean instances by name. It takes the expression-map
+// lock so request-time readers never observe a concurrent map write.
+func (b *Bear) publishBeanMetadata(beans []Bean, names []string) {
+	if b == nil {
+		return
 	}
+	b.exprDataMu.Lock()
+	defer b.exprDataMu.Unlock()
+	if b.exprData == nil {
+		b.exprData = make(map[string]interface{})
+	}
+	for index, bean := range beans {
+		b.exprData[names[index]] = bean
+	}
+}
+
+// setExprDataValue stores one framework metadata entry under the expression-map lock.
+func (b *Bear) setExprDataValue(key string, value any) {
+	if b == nil {
+		return
+	}
+	b.exprDataMu.Lock()
+	defer b.exprDataMu.Unlock()
+	if b.exprData == nil {
+		b.exprData = make(map[string]interface{})
+	}
+	b.exprData[key] = value
+}
+
+// exprDataValue reads one framework metadata entry under the expression-map lock.
+func (b *Bear) exprDataValue(key string) (any, bool) {
+	if b == nil {
+		return nil, false
+	}
+	b.exprDataMu.RLock()
+	defer b.exprDataMu.RUnlock()
+	value, ok := b.exprData[key]
+	return value, ok
+}
+
+// compatRegisterBeansLocked publishes compatibility-mode beans with the
+// historical lenient duplicate policy. It requires b.eRegistrationMu.
+func (b *Bear) compatRegisterBeansLocked(beans []Bean) {
+	for _, bean := range beans {
+		b.setExprDataValue(bean.Name(), bean)
+		b.runtime.Container.Set(bean)
+	}
+}
+
+// mutateCompatibilityRegistration runs mutate under the registration lock so
+// compatibility registration stays serialized with the strict registration
+// paths. The historical lenient policy is preserved: compatibility mode seals
+// the lifecycle before it builds routes, so a Build-time Mount or Beans call
+// must still succeed. Only the missing synchronization was the defect.
+func (b *Bear) mutateCompatibilityRegistration(mutate func()) {
+	if b == nil || b.runtime == nil {
+		return
+	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	mutate()
+}
+
+// routeMetadataSnapshot returns a stable copy of the registered route metadata.
+func (b *Bear) routeMetadataSnapshot() []RouteMetadata {
+	if b == nil {
+		return nil
+	}
+	b.eRegistrationMu.Lock()
+	defer b.eRegistrationMu.Unlock()
+	return append([]RouteMetadata(nil), b.routeRegistry...)
 }
 
 // Attach 注册全局 Fairing
@@ -1358,13 +1429,15 @@ func (b *Bear) AddModule(modules ...Module) *Bear {
 		}
 		return b
 	}
-	for _, mod := range modules {
-		b.runtime.Logger.Info("Loading module", "name", mod.Name())
-		// 1. 注册模块中的 Beans
-		b.Beans(mod.Beans()...)
-		// 2. 暂存模块
-		b.modules = append(b.modules, mod)
-	}
+	b.mutateCompatibilityRegistration(func() {
+		for _, mod := range modules {
+			b.runtime.Logger.Info("Loading module", "name", mod.Name())
+			// 1. 注册模块中的 Beans
+			b.compatRegisterBeansLocked(mod.Beans())
+			// 2. 暂存模块
+			b.modules = append(b.modules, mod)
+		}
+	})
 	return b
 }
 
@@ -1397,7 +1470,7 @@ func (b *Bear) addModulesE(pluginModules bool, modules ...Module) error {
 	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
 		return fmt.Errorf("register modules: %w", err)
 	}
-	publishBeanMetadata(b.exprData, beans, beanNames)
+	b.publishBeanMetadata(beans, beanNames)
 	for index, mod := range modules {
 		b.runtime.Logger.Info("Loading module", "name", moduleNames[index])
 		b.modules = append(b.modules, mod)

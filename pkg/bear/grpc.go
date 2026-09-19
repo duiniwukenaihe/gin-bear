@@ -69,7 +69,7 @@ func (b *Bear) AddGRPCServiceE(services ...GRPCServiceRegistrar) error {
 	if err := b.runtime.Container.trySetBatchStrict(values); err != nil {
 		return fmt.Errorf("register gRPC services: %w", err)
 	}
-	publishBeanMetadata(b.exprData, beans, names)
+	b.publishBeanMetadata(beans, names)
 	b.grpcServiceRegistrars = append(b.grpcServiceRegistrars, services...)
 	b.strictRegistrationVersion++
 	return nil
