@@ -6,6 +6,49 @@ All notable changes to gin-bear are documented in this file.
 
 ### Added
 
+- Controlled `CasbinAuthorizer` (`NewCasbinAuthorizer`) for online policy
+  changes behind the existing `Authorizer`/`PermissionFairing` contract: one
+  `RWMutex` for reads/writes/reloads, immediate revocation for authorizations
+  started after a successful write, fail-closed reads after persistence/reload
+  failures, three-parameter RBAC only with explicit `Scope` rejection, and
+  independent in-memory policy per instance (cluster revocation still needs a
+  control-plane `LoadPolicy` confirmation/drain per instance).
+- Versioned engineering docs (`docs/development.md`, `docs/architecture.md`,
+  `docs/recipes/`) and `bear agent init`, which scaffolds the local,
+  never-committed `AGENTS.md` entry, maintains `.gitignore`, and verifies
+  ignore/untracked state without staging anything.
+- `bear doctor [--format json] [--probe]`: static read-only diagnosis
+  (project, config, secrets, manifest, framework, database) with a versioned
+  JSON contract, 0/1/2 exit codes, redacted credentials, and bounded probes.
+- `extensions/agent` module (own go.mod, experimental): single read-only
+  runtime agent on eino v0.9.19 (fake plus explicit OpenAI-compatible vendor,
+  SSE/JSON endpoints, budgets, per-call authorization, tenant-scoped example),
+  durable tasks with approval-gated writes (leases, fencing, idempotency,
+  recovery), deterministic evals with a zero-bypass safety gate, audit
+  retention, bounded metrics, and alert thresholds.
+- Optional `tools/bear-mcp` module (own go.mod): stdio MCP bridge with three
+  read-only tools (project_info, doctor, gen_preview) over a pinned CLI path,
+  bound project roots, and output/time limits; no writes, no credentials.
+- Version support matrix and release checklist (`docs/supported-versions.md`).
+- Deterministic generation preview (`gen api --dry-run --format json`) sharing
+  the exact render with real generation, plus `gen apply --plan` with
+  re-verified inputs, stale-plan rejection, path/symlink containment, and
+  manifest v2 digest upgrades. Generated service samples now cover pagination
+  bounds, CRUD round trips, not-found mapping, and cancellation.
+- `bear new --profile production`: deployment assets (README, Makefile,
+  multi-stage non-root Dockerfile, .dockerignore, project CI, dev-only
+  compose) while the default stays minimal; embed directive now covers
+  dot-paths at any depth and the default render skips the profile subtree.
+- `tests/integration/` plus `scripts/test-integration.sh`, a pinned
+  compose file, and CI/release gating: real PostgreSQL/Redis acceptance
+  (generated-app migration and CRUD, rollback, cancellation, interruption
+  recovery, revocation reload, Redis round trip and designed failures) with
+  disposable credentials and redacted logs; MySQL runs when a DSN is provided.
+- Generation-only `LoadDatabaseConfigForGeneration` plus repeatable
+  `bear gen api --config <path>`: generation follows the runtime file chain
+  (base, `BEAR_ENV`/`GIN_MODE` overlay, `config.json`, environment overrides)
+  without connecting to a database or requiring production secrets.
+
 - Optional gRPC production runtime contracts for injectable
   `GRPCServiceRegistrar` services, unary/stream interceptors, TLS and mTLS,
   loopback-only proxy plaintext, health, reflection opt-in, resource limits,
@@ -23,6 +66,18 @@ All notable changes to gin-bear are documented in this file.
   step rather than something startup does implicitly.
 
 ### Changed
+
+- The factory-built `CasbinEnforcer` disables the decision cache by default so
+  role/policy removal takes effect on the next enforcement. The exported type,
+  constructor signature, and promoted methods are unchanged.
+- `CasbinAuthorizer` validates policy/grouping arity against the model before
+  writing, so malformed rules are rejected without touching memory or the
+  database. Memory-mode `LoadPolicy` returns `ErrCasbinReloadRequiresAdapter`
+  instead of panicking and keeps the existing policy usable.
+- `Repository.DB` preserves the `bear_db_tx` transaction while normalizing a
+  `*gin.Context` to its request context, so cancellation, deadlines, and
+  request-scoped values reach GORM. Operations that previously ignored
+  cancellation now return `context.Canceled`/`DeadlineExceeded`.
 
 - The pinned Go toolchain moved from `go1.25.12` to `go1.25.14`, and the
   dependencies carrying reachable vulnerabilities were raised, so `govulncheck`
@@ -141,6 +196,41 @@ All notable changes to gin-bear are documented in this file.
 
 ### Fixed
 
+- Approval/task state changes are transactional: submit (approval plus task
+  insert), approve (consume plus queue), and unknown requeue (fresh approval
+  plus move) commit or roll back together, with conditional writes still
+  fencing across instances and lock-contention retries for transient writer
+  conflicts. New crash-injection coverage proves rollback and single-winner
+  behavior, including against real PostgreSQL.
+- Workers renew task leases with a heartbeat, so executions longer than the
+  lease complete instead of being reaped mid-flight; renewal never touches
+  versions, and fencing still guards every state change.
+- Task claim/complete racing across instances: `Claim` is now an atomic
+  conditional UPDATE with loser retry, and `Complete`/`Cancel` commit
+  conditionally so cancellation wins over late results.
+- Crashed unconfirmed writes no longer blind-retry: the execution intent and
+  budget reservation persist across crashes, recovery moves them to `unknown`
+  for reconciliation (`ConfirmUnknown`/`RequeueUnknown`), and requeue demands
+  a fresh approval.
+- Nested-module CI invoked a root-relative script from module working
+  directories; it now uses the workspace-absolute script path.
+- `scripts/test-integration.sh` no longer forces maintainer-machine cache
+  paths on other hosts (explicit env wins, otherwise `go env` defaults), and
+  refuses to run below 10 GiB free disk.
+- Agent runs now gate vendor calls on remaining budget, send `max_tokens`
+  caps, request stream usage, and reconcile reports against conservative
+  reserves instead of accounting purely after the fact.
+- Runner identity is bound into the run context, so business tools observe
+  the same trusted identity over HTTP that `Authorize` sees.
+- Vendor SSE streams incrementally with per-event flushes and socket write
+  deadlines; dead clients terminate the handler instead of parking it.
+- `gen apply` replays the preview's explicit `--config` selection instead of
+  always resolving the default chain.
+- `model`/`dto` generation again pins `shopspring/decimal` for decimal
+  fields; only `api` plans database migrations.
+- Vendor tool definitions now carry the declared JSON-Schema parameters, and
+  invocations validate types, required fields, enums, and unknown fields
+  before authorization.
 - `docs/production.md` presented `examples/migration/main.go` as the tested
   production-loading pattern, but the package had no test file, so
   `loadProductionConfig` was only ever compiled and never executed. The example

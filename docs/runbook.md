@@ -7,7 +7,7 @@
    security policy:
 
    ```bash
-   GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify
+   GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 make verify
    ```
 3. Before an RC or tag, run the complete audited gate with an explicit shuffle
    seed. The default is offline and therefore requires preinstalled tools, a
@@ -90,7 +90,7 @@ diagnostics below are not formal release gate evidence. Publication requires
 the complete gate to pass against the exact clean commit referenced by the
 annotated release tag. The source-only release workflow publishes that already
 reviewed tag without repeating the quality gate.
-All commands use `GOSUMDB=sum.golang.org` and `GOTOOLCHAIN=go1.25.12`, run in
+All commands use `GOSUMDB=sum.golang.org` and `GOTOOLCHAIN=go1.26.6`, run in
 the foreground, and complete before the next command starts.
 
 The reproducible coverage sequence keeps its profile outside the worktree:
@@ -98,9 +98,9 @@ The reproducible coverage sequence keeps its profile outside the worktree:
 ```bash
 profile=$(mktemp /tmp/gin-bear-coverage.XXXXXX)
 trap 'rm -f "$profile"' EXIT
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test ./... -coverprofile="$profile" -count=1
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/check-coverage.sh "$profile"
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go tool cover -func="$profile"
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 go test ./... -coverprofile="$profile" -count=1
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 scripts/check-coverage.sh "$profile"
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 go tool cover -func="$profile"
 ```
 
 The development-time profile regenerated on 2026-07-11 contained 2,822 covered
@@ -176,7 +176,7 @@ iterations. Override it only with a positive integer followed by `s`, `m`, or
 Run the release-only compatibility test once with:
 
 ```bash
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1 -v
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1 -v
 ```
 
 It builds a v0.9-style application and a newly generated application in

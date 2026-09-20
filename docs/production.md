@@ -258,6 +258,62 @@ generic HTTP 500 at request time. Casbin enforcement errors are logged with
 internal detail but return only a generic 500 to the client, while policy
 denials remain HTTP 403.
 
+The factory-built `CasbinEnforcer` disables the Casbin decision cache by
+default, so removing a role or policy takes effect on the next enforcement
+without an explicit cache clear. Re-enabling the cache, or hand-building
+`CasbinEnforcer{CachedEnforcer: ...}` instead of using the factory, opts out
+of that guarantee. The legacy interface is still not safe for concurrent
+request authorization and policy writes.
+
+For online policy changes use the controlled `CasbinAuthorizer` with the
+existing `Authorizer`/`PermissionFairing` contract and explicit resource and
+action (for example `/secret`, `GET`). It serializes reads and writes on one
+`RWMutex`, validates policy/grouping arity against the model before writing
+(malformed rules are rejected without touching memory or the database),
+revokes immediately for authorizations started after a successful write, fails
+closed (errors, never a stale allow) when persistence or reload fails, accepts
+only the three-parameter RBAC model, and rejects non-empty `Scope` instead of
+dropping tenant/project scope silently. Memory-mode instances have no backend
+to reload from, so `LoadPolicy` returns a recognizable error and keeps serving
+the existing policy. Each instance owns
+independent in-memory policy: a shared database is not shared memory, so every
+instance must successfully `LoadPolicy` (driven by the deployment
+control plane with confirmation and unconfirmed-instance drain) before a
+revocation can be called cluster-wide.
+
+## Runtime agent (experimental)
+
+`extensions/agent` is an opt-in, separately versioned module and stays
+experimental: single read-only agent, fake model by default, budgets and
+per-call authorization enforced server-side, audit and bounded metrics
+included. Enabling a live vendor needs explicit configuration and operator
+credentials; a successful vendor call proves reachability, not production
+readiness. Durable tasks add approval-gated writes with leases, fencing, and
+idempotency. Do not enable write tools without approvals, revocation-tested
+authorization, and rehearsed alert/shutdown/rollback steps.
+
+## Request Context and Transactions
+
+`Repository.DB` keeps the transaction carried under `bear_db_tx` and
+normalizes the database operation context to the HTTP request context, so
+cancellation, deadlines, and request-scoped values (request ID, user ID,
+trace) reach GORM without opting into the global Gin `ContextWithFallback`.
+Plain contexts pass through unchanged. Expect operations that previously
+ignored cancellation to return `context.Canceled`/`DeadlineExceeded` now;
+handle those errors instead of committing the surrounding transaction.
+
+## Generation Database Selection
+
+`bear gen api` selects the migration dialect from the same configuration
+chain the runtime uses: base `application.yaml`, the `BEAR_ENV`/`GIN_MODE`
+overlay (with the existing compatibility filename rule), `config.json`, then
+environment overrides. Repeatable `bear gen api --config <path>` files replace
+that chain in order; relative paths resolve against the `go.mod` project root.
+`gen model`/`gen dto` read no database configuration and reject `--config`.
+Generation never connects to a database and never requires production secrets;
+a production file that enables auth without a JWT secret still yields its
+database dialect, while full startup keeps rejecting it.
+
 ## Resource Authorization
 
 Use `PermissionFairing` when a role string is not enough to describe access to
@@ -875,7 +931,7 @@ call that already started may finish in one bounded background worker, while
 Run the project verification gate locally before cutting a release:
 
 ```bash
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 make verify
 ```
 
 This is the pinned framework verification command used by `main` CI. The tag

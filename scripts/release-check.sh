@@ -13,7 +13,7 @@ case "${network_flag}" in
 	network_mode="online-opt-in"
 	export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
 	export GOSUMDB="${GOSUMDB:-sum.golang.org}"
-	export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.25.14}"
+	export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.6}"
 	;;
 *)
 	printf 'RC_ALLOW_NETWORK must be 0 or 1\n' >&2

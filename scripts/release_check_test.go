@@ -393,7 +393,7 @@ func TestReleaseVersionComesFromPushedTag(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"needs: verify",
+		"needs: [verify, integration]",
 		"run: make verify",
 		"staticcheck@v0.7.0",
 		"govulncheck@v1.6.0",
@@ -1002,7 +1002,7 @@ func TestAPICompatibilityGateRejectsInvalidRebuildFlag(t *testing.T) {
 	for _, value := range []string{"", "banana"} {
 		t.Run(value, func(t *testing.T) {
 			command := exec.Command("./check-api-compat.sh")
-			command.Env = releaseTestEnvironment("API_BASELINE_REBUILD="+value, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
+			command.Env = releaseTestEnvironment("API_BASELINE_REBUILD="+value, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 			output, err := command.CombinedOutput()
 			if err == nil {
 				t.Fatalf("API compatibility gate accepted invalid rebuild flag %q:\n%s", value, output)

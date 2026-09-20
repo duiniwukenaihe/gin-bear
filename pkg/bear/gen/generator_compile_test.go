@@ -60,7 +60,7 @@ func fixtureGo(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	command := exec.Command("go", args...)
 	command.Dir = dir
-	command.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
+	command.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	combined, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go %s in fixture: %v\n%s", strings.Join(args, " "), err, combined)
@@ -133,7 +133,7 @@ type Service struct {
 
 	command := exec.Command("go", "build", "./...")
 	command.Dir = project
-	command.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
+	command.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	combined, err := command.CombinedOutput()
 	if err == nil {
 		t.Fatalf("cross-package injector compiled; the layout limit no longer holds:\n%s", combined)
@@ -184,7 +184,7 @@ func TestExportedServiceTemplateKeepsThePinnedUnusedImport(t *testing.T) {
 
 	command := exec.Command("go", "build", "./...")
 	command.Dir = project
-	command.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
+	command.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	combined, err := command.CombinedOutput()
 	if err == nil {
 		t.Fatalf("ServiceTemplate now renders a compilable package; update the v0.9.1 baseline deliberately:\n%s", combined)

@@ -243,7 +243,7 @@ func TestChangelogSeparatesFutureWorkFromPublishedRelease(t *testing.T) {
 
 func TestProductionDocumentationUsesPinnedVerifyCommand(t *testing.T) {
 	text := readDocumentationFile(t, "../docs/production.md")
-	const command = "GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify"
+	const command = "GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 make verify"
 	if !strings.Contains(text, command) {
 		t.Fatalf("production documentation missing %q", command)
 	}
@@ -298,7 +298,7 @@ func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 	if strings.Contains(workflow, "API_BASELINE_REBUILD") {
 		t.Fatal("release workflow must not require API baseline reconstruction")
 	}
-	for _, required := range []string{"needs: verify", "run: make verify", "staticcheck@v0.7.0", "govulncheck@v1.6.0", "apidiff@v0.0.0-20260709172345-9ea1abe57597"} {
+	for _, required := range []string{"needs: [verify, integration]", "run: make verify", "staticcheck@v0.7.0", "govulncheck@v1.6.0", "apidiff@v0.0.0-20260709172345-9ea1abe57597"} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("release workflow missing source quality gate %q", required)
 		}
@@ -308,7 +308,7 @@ func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 func TestRunbookUsesPinnedVerificationAndSourceOnlyRelease(t *testing.T) {
 	runbook := readDocumentationFile(t, "../docs/runbook.md")
 	for _, phrase := range []string{
-		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.14 make verify",
+		"GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 make verify",
 		"SHUFFLE_SEED=20260711 STATICCHECK_BIN=/opt/gin-bear/bin/staticcheck STATICCHECK_EXPECTED_SHA256=<trusted-staticcheck-sha256> GOVULNCHECK_BIN=/opt/gin-bear/bin/govulncheck GOVULNCHECK_EXPECTED_SHA256=<trusted-govulncheck-sha256> GOVULNCHECK_DB=file:///opt/gin-bear/vulndb GOVULNCHECK_DB_MANIFEST=/opt/gin-bear/vulndb.manifest.sha256 GOVULNCHECK_DB_MANIFEST_EXPECTED_SHA256=<trusted-manifest-sha256> APIDIFF_BIN=/opt/gin-bear/bin/apidiff APIDIFF_EXPECTED_SHA256=84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f make verify-rc",
 		"GitHub-generated source archives",
 		"go list -m github.com/duiniwukenaihe/gin-bear@v0.9.3",
