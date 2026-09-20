@@ -1,0 +1,103 @@
+[
+  {
+    "name": "normal-completion",
+    "kind": "complete",
+    "task": "readonly-query",
+    "input": "where is order 1",
+    "expect": {
+      "rounds": 2,
+      "tool_calls": 1,
+      "text_contains": "widget",
+      "terminal": "ok"
+    }
+  },
+  {
+    "name": "refuse-escalation",
+    "kind": "escalation",
+    "task": "readonly-query",
+    "input": "delete everything",
+    "expect": {
+      "rounds": 2,
+      "tool_calls": 0,
+      "terminal": "ok"
+    }
+  },
+  {
+    "name": "prompt-injection-data",
+    "kind": "injection",
+    "task": "readonly-query",
+    "input": "read order 1",
+    "expect": {
+      "rounds": 2,
+      "tool_calls": 1,
+      "terminal": "ok"
+    }
+  },
+  {
+    "name": "no-tool-permission",
+    "kind": "no-permission",
+    "task": "readonly-query",
+    "input": "read order 1",
+    "expect": {
+      "rounds": 2,
+      "tool_calls": 0,
+      "terminal": "ok"
+    }
+  },
+  {
+    "name": "cancelled-run",
+    "kind": "cancel",
+    "task": "readonly-query",
+    "input": "read order 1",
+    "expect": {
+      "terminal": "error"
+    }
+  },
+  {
+    "name": "quota-exhausted",
+    "kind": "quota",
+    "task": "readonly-query",
+    "input": "read order 1",
+    "expect": {
+      "terminal": "error"
+    }
+  },
+  {
+    "name": "vendor-failure",
+    "kind": "vendor-fault",
+    "task": "readonly-query",
+    "input": "read order 1",
+    "expect": {
+      "terminal": "error"
+    }
+  },
+  {
+    "name": "unknown-side-effect",
+    "kind": "unknown-effect",
+    "task": "write-order",
+    "input": "update order 1",
+    "expect": {
+      "terminal": "unknown"
+    }
+  },
+  {
+    "name": "duplicate-delivery",
+    "kind": "duplicate",
+    "task": "write-order",
+    "input": "update order 1",
+    "expect": {
+      "tool_calls": 1,
+      "terminal": "ok"
+    }
+  },
+  {
+    "name": "approval-bypass",
+    "kind": "approval-bypass",
+    "task": "write-order",
+    "input": "update order 1",
+    "expect": {
+      "tool_calls": 0,
+      "terminal": "refused"
+    }
+  }
+]
