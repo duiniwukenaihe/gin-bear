@@ -1,0 +1,20 @@
+# DEVELOPMENT AND ACCEPTANCE ONLY. Never use this file, its passwords, or
+# its ports for production. Production dependencies are provisioned by the
+# deploy platform; this compose file exists so `make` targets and disposable
+# acceptance runs have loopback-only databases.
+name: {{.Name}}-dev
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: {{.Name}}_dev
+      POSTGRES_PASSWORD: dev-only-password
+      POSTGRES_DB: {{.Name}}_dev
+    ports:
+      - "127.0.0.1:5433:5432"
+
+  redis:
+    image: redis:7
+    ports:
+      - "127.0.0.1:6380:6379"

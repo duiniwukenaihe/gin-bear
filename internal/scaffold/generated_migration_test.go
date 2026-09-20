@@ -123,7 +123,7 @@ func assertGeneratedCRUDRoundTrip(t *testing.T, project string) {
 	var output bytes.Buffer
 	cmd := exec.Command(serverBinary)
 	cmd.Dir = project
-	cmd.Env = append(os.Environ(), fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
+	cmd.Env = append(os.Environ(), fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	prepareGeneratedProcess(cmd)
@@ -239,4 +239,119 @@ func TestGeneratedAPIWithDisabledDatabaseWarnsWithoutBlocking(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(project, "migrations")); !os.IsNotExist(err) {
 		t.Fatalf("generation without an enabled database still published migrations: %v", err)
 	}
+}
+
+// TestGeneratedInvoiceChainPropagatesContextAndTransaction generates a real
+// API resource and executes its generated Controller-shaped call path
+// (Service with a *gin.Context forwarded as context.Context into the
+// generated Repository). It proves cancellation and transaction rollback work
+// through actual generated code, not hand-written doubles: if a template stops
+// forwarding ctx, this test fails.
+func TestGeneratedInvoiceChainPropagatesContextAndTransaction(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "chain-context")
+	if err := Generate(context.Background(), Options{
+		Name:             "chain-context",
+		Module:           "example.com/chain-context",
+		Directory:        project,
+		FrameworkVersion: "v0.0.0",
+		FrameworkReplace: repoRoot(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	bearBinary := buildCLI(t, "./cmd/bear", "bear")
+	stdout, stderr, code := runCommand(t, project, bearBinary, "gen", "api", "invoice", "--fields", "name:string,email:email")
+	if code != 0 {
+		t.Fatalf("resource generation failed (%d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	const chainTest = `package invoice
+
+import (
+	"context"
+	"errors"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
+	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+)
+
+func openChainTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite failed: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql.DB failed: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := db.AutoMigrate(&InvoiceModel{}); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+	return db
+}
+
+func newChainService(t *testing.T, db *gorm.DB) *InvoiceService {
+	t.Helper()
+	repo := &InvoiceRepository{}
+	repo.Adapter = &bear.GormAdapter{DB: db}
+	if err := repo.Init(context.Background()); err != nil {
+		t.Fatalf("repository Init failed: %v", err)
+	}
+	return &InvoiceService{Repo: repo}
+}
+
+func canceledInvoiceContext() *gin.Context {
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest("GET", "/api/v1/invoice", nil).WithContext(reqCtx)
+	return ginCtx
+}
+
+func TestGeneratedInvoiceQueryPropagatesCancellation(t *testing.T) {
+	service := newChainService(t, openChainTestDB(t))
+	if _, err := service.Query(canceledInvoiceContext(), &InvoiceQueryDTO{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("generated Query err = %v, want context.Canceled", err)
+	}
+}
+
+func TestGeneratedInvoiceCreateHonorsTransactionRollback(t *testing.T) {
+	db := openChainTestDB(t)
+	service := newChainService(t, db)
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest("POST", "/api/v1/invoice", nil)
+	tx := db.Begin()
+	if tx.Error != nil {
+		t.Fatalf("Begin failed: %v", tx.Error)
+	}
+	// bear_db_tx is the transaction key Repository.DB honors.
+	ginCtx.Set("bear_db_tx", tx)
+	created, err := service.Create(ginCtx, &InvoiceCreateDTO{Name: "tx-row", Email: "tx@example.com"})
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("generated Create in tx failed: %v", err)
+	}
+	if err := tx.Rollback().Error; err != nil {
+		t.Fatalf("Rollback failed: %v", err)
+	}
+	if _, err := service.GetByID(context.Background(), int64(created.ID)); !errors.Is(err, bear.ErrNotFound) {
+		t.Fatalf("GetByID after rollback err = %v, want not found (write escaped the transaction)", err)
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(project, "internal", "invoice", "chain_context_test.go"), []byte(chainTest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runGo(t, project, "mod", "tidy")
+	runGo(t, project, "test", "./internal/invoice/")
 }

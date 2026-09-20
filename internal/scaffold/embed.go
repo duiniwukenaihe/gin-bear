@@ -27,9 +27,24 @@ type Options struct {
 	Directory        string
 	FrameworkVersion string
 	FrameworkReplace string
+	// Profile selects the scaffold output: "" or "minimal" keep the smallest
+	// runnable default; "production" adds deployment assets (README,
+	// Makefile, Dockerfile, .dockerignore, CI, dev compose). Anything else
+	// is rejected.
+	Profile string
 }
 
-//go:embed template/**
+// Scaffold profiles.
+const (
+	ProfileMinimal    = "minimal"
+	ProfileProduction = "production"
+)
+
+// productionProfileRoot is the template subtree rendered only for the
+// production profile.
+const productionProfileRoot = "template/profile/production"
+
+//go:embed all:template
 var templateFS embed.FS
 
 func Generate(ctx context.Context, opts Options) error {
@@ -60,8 +75,15 @@ func Generate(ctx context.Context, opts Options) error {
 		}
 	}()
 
-	if err := renderTemplateTree(ctx, templateFS, templateRoot, temporary, opts); err != nil {
+	// The default tree always skips the profile subtree; profiles render
+	// explicitly below so minimal output never gains deployment assets.
+	if err := renderTemplateTree(ctx, templateFS, templateRoot, temporary, opts, "profile"); err != nil {
 		return err
+	}
+	if IsProductionProfile(opts.Profile) {
+		if err := renderTemplateTree(ctx, templateFS, productionProfileRoot, temporary, opts); err != nil {
+			return fmt.Errorf("render production profile: %w", err)
+		}
 	}
 	if err := WriteManifest(temporary, NewManifest(opts.Module, opts.FrameworkVersion)); err != nil {
 		return err
@@ -74,6 +96,20 @@ func Generate(ctx context.Context, opts Options) error {
 	}
 	published = true
 	return nil
+}
+
+// IsProductionProfile reports whether the profile requests deployment assets.
+func IsProductionProfile(profile string) bool {
+	return strings.TrimSpace(profile) == ProfileProduction
+}
+
+func validateProfile(profile string) error {
+	switch trimmed := strings.TrimSpace(profile); trimmed {
+	case "", ProfileMinimal, ProfileProduction:
+		return nil
+	default:
+		return fmt.Errorf("profile %q is invalid (supported: %q, %q)", profile, ProfileMinimal, ProfileProduction)
+	}
 }
 
 func validateOptions(opts Options) error {
@@ -96,6 +132,9 @@ func validateOptions(opts Options) error {
 	}
 	if err := module.CheckPath(opts.Module); err != nil {
 		return fmt.Errorf("module %q is invalid: %w", opts.Module, err)
+	}
+	if err := validateProfile(opts.Profile); err != nil {
+		return err
 	}
 	if err := module.Check(frameworkModule, opts.FrameworkVersion); err != nil {
 		return fmt.Errorf("framework version %q is invalid: %w", opts.FrameworkVersion, err)
@@ -136,10 +175,19 @@ func validateFrameworkReplace(frameworkVersion, replacement string) error {
 	return nil
 }
 
-func renderTemplateTree(ctx context.Context, source fs.FS, root, destination string, data Options) error {
+func renderTemplateTree(ctx context.Context, source fs.FS, root, destination string, data Options, exclude ...string) error {
 	return fs.WalkDir(source, root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if entry.IsDir() {
+			if relative, relErr := filepath.Rel(root, path); relErr == nil && relative != "." {
+				for _, skipped := range exclude {
+					if relative == skipped {
+						return fs.SkipDir
+					}
+				}
+			}
 		}
 		if err := ctx.Err(); err != nil {
 			return err

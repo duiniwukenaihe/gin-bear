@@ -32,19 +32,21 @@ type generatedAPIDatabase struct {
 // inspectGeneratedAPIDatabase reads the project configuration so the generator
 // can refuse to emit a resource the project cannot run.
 func inspectGeneratedAPIDatabase(root string) (generatedAPIDatabase, error) {
-	path := filepath.Join(root, scaffoldConfigFile)
-	config := &bear.SysConfig{}
-	if err := bear.ParseConfig(path, config); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return generatedAPIDatabase{}, nil
-		}
-		return generatedAPIDatabase{}, fmt.Errorf("read %s: %w", scaffoldConfigFile, err)
+	return resolveGeneratedAPIDatabase(root, nil)
+}
+
+// resolveGeneratedAPIDatabase selects the database contract once per
+// generation using the shared bear parsing rules. Explicit paths replace the
+// default file chain; relative paths resolve against the project root.
+func resolveGeneratedAPIDatabase(root string, configPaths []string) (generatedAPIDatabase, error) {
+	snapshot, err := bear.LoadDatabaseConfigForGeneration(root, configPaths...)
+	if err != nil {
+		return generatedAPIDatabase{}, fmt.Errorf("read generation database config: %w", err)
 	}
-	database := generatedAPIDatabase{Known: true}
-	if config.DB != nil {
-		database.Enabled = config.DB.Enabled
-		database.Dialect = migrationDialect(config.DB.Type)
+	if snapshot == nil {
+		return generatedAPIDatabase{}, nil
 	}
+	database := generatedAPIDatabase{Known: true, Enabled: snapshot.Enabled, Dialect: migrationDialect(snapshot.Type)}
 	if database.Dialect == "" {
 		database.Dialect = migrationDialect("")
 	}
@@ -66,8 +68,15 @@ func generatedAPIAdapterHint(root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return adapterHintForDatabase(root, database), nil
+}
+
+// adapterHintForDatabase derives the disabled-database hint from an already
+// resolved snapshot so warnings share the single generation parse and never
+// re-read configuration files.
+func adapterHintForDatabase(root string, database generatedAPIDatabase) string {
 	if !database.Known || database.Enabled {
-		return "", nil
+		return ""
 	}
 	return fmt.Sprintf(`%s sets database.enabled to false, so the framework registers no *bear.GormAdapter.
 Every generated repository injects one, so the generated resource only starts once an
@@ -82,7 +91,7 @@ or register *bear.GormAdapter yourself before serving, for example
 application.BeansE(&bear.GormAdapter{DB: db}). Use "mysql" or "postgres" together
 with host, user, password and dbname for a real deployment, then run migrations
 before starting the server`,
-		scaffoldConfigFile, filepath.Base(root)), nil
+		scaffoldConfigFile, filepath.Base(root))
 }
 
 // migrationDialect normalises database.type onto the dialect names the generated
@@ -137,6 +146,13 @@ func writeGeneratedAPIMigration(root string, data resourceData) ([]string, error
 	if err != nil {
 		return nil, err
 	}
+	return writeGeneratedAPIMigrationWithDatabase(root, data, database)
+}
+
+// writeGeneratedAPIMigrationWithDatabase writes the reviewed migration pair
+// from an already resolved snapshot so dialect selection shares the single
+// generation parse instead of re-reading configuration files.
+func writeGeneratedAPIMigrationWithDatabase(root string, data resourceData, database generatedAPIDatabase) ([]string, error) {
 	if !database.Enabled {
 		return nil, nil
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -118,7 +119,7 @@ func TestGeneratedAPIRegistersManagedManifestAndStableRegistry(t *testing.T) {
 		{Name: "Alpha", Package: "alpha", Path: "internal/alpha", ModuleType: "alpha.Module"},
 		{Name: "Zeta", Package: "zeta", Path: "internal/zeta", ModuleType: "zeta.Module"},
 	} {
-		if manifest.APIs[index] != want {
+		if !reflect.DeepEqual(manifest.APIs[index], want) {
 			t.Fatalf("manifest API %d = %#v, want %#v", index, manifest.APIs[index], want)
 		}
 	}

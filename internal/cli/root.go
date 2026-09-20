@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -11,6 +12,11 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	root := NewRootCommand(stdout, stderr)
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
+		var exitErr *exitError
+		if errors.As(err, &exitErr) {
+			fmt.Fprintln(stderr, exitErr)
+			return exitErr.code
+		}
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
@@ -28,6 +34,6 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	}
 	root.SetOut(stdout)
 	root.SetErr(stderr)
-	root.AddCommand(newCommand(), genCommand())
+	root.AddCommand(newCommand(), genCommand(), doctorCommand(), agentCommand())
 	return root
 }

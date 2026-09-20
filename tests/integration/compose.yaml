@@ -1,0 +1,62 @@
+# Dedicated integration-test dependencies for gin-bear (W1).
+#
+# Versions are pinned and recorded here; tests/integration logs the actual
+# server versions it observes. Matrix policy: lowest supported majors only,
+# never a full cartesian product.
+#   postgres: lowest supported major 16 (local dev may run newer; observed
+#     versions are logged, e.g. PostgreSQL 18.4).
+#   mysql: lowest supported major 8.0.
+#   redis: lowest supported major 7 (local dev may run newer, e.g. 8.8.0).
+#
+# Safety: no host-pid mounts, ports bind to loopback only, credentials are
+# test-only and never touch development or production databases. The disposable
+# test database/role names always carry the bear_integration_ prefix (see
+# scripts/test-integration.sh).
+name: gin-bear-integration
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: bear_int_admin
+      POSTGRES_PASSWORD: bear_int_admin_pw
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bear_int_admin -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  mysql:
+    image: mysql:8.0
+    command: ["--default-authentication-plugin=mysql_native_password"]
+    environment:
+      MYSQL_ROOT_PASSWORD: bear_int_root_pw
+      MYSQL_DATABASE: mysql
+    ports:
+      - "127.0.0.1:3307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pbear_int_root_pw"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - mysqldata:/var/lib/mysql
+
+  redis:
+    image: redis:7
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
+  mysqldata:

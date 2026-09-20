@@ -222,14 +222,14 @@ func TestGenerateResourceCoversKindsAndRejectsUnsafeInputs(t *testing.T) {
 
 	for _, kind := range []string{"api", "model", "dto"} {
 		name := kind + "-record"
-		generated, err := generateResource(context.Background(), resourceOptions{
+		result, err := generateResource(context.Background(), resourceOptions{
 			Kind: kind, Name: name, Fields: fields, Directory: project,
 		})
 		if err != nil {
 			t.Fatalf("generate %s: %v", kind, err)
 		}
-		if generated != filepath.Join("internal", kind+"record") {
-			t.Fatalf("generate %s path = %q", kind, generated)
+		if result.Path != filepath.Join("internal", kind+"record") {
+			t.Fatalf("generate %s path = %q", kind, result.Path)
 		}
 	}
 
@@ -330,5 +330,30 @@ func TestResourceTemplatesReturnActionableErrors(t *testing.T) {
 	}
 	if contents, err := executeResourceTemplate("ok", "package {{.PackageName}}", resourceData{PackageName: "invoice"}); err != nil || string(contents) != "package invoice" {
 		t.Fatalf("template output = %q, err=%v", contents, err)
+	}
+}
+
+func TestGenerateModelAndDTOPinDecimalDependency(t *testing.T) {
+	for _, kind := range []string{"model", "dto"} {
+		project := t.TempDir()
+		goModPath := filepath.Join(project, "go.mod")
+		if err := os.WriteFile(goModPath, []byte("module example.com/"+kind+"decimal\n\ngo 1.25.14\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := generateResource(context.Background(), resourceOptions{
+			Kind:      kind,
+			Name:      "invoice",
+			Fields:    "amount:decimal",
+			Directory: project,
+		}); err != nil {
+			t.Fatalf("generate %s: %v", kind, err)
+		}
+		goMod, err := os.ReadFile(goModPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(goMod), "github.com/shopspring/decimal v1.4.0") {
+			t.Fatalf("generate %s did not pin decimal dependency:\n%s", kind, goMod)
+		}
 	}
 }

@@ -61,7 +61,7 @@ func TestManifestRejectsUnsafeOrAmbiguousRecords(t *testing.T) {
 	}{
 		{name: "module", mutate: func(m *Manifest) { m.Module = "../service" }},
 		{name: "framework version", mutate: func(m *Manifest) { m.FrameworkVersion = "latest" }},
-		{name: "template version", mutate: func(m *Manifest) { m.TemplateVersion = 2 }},
+		{name: "template version", mutate: func(m *Manifest) { m.TemplateVersion = 3 }},
 		{name: "unsafe API path", mutate: func(m *Manifest) {
 			m.APIs = append(m.APIs, GeneratedAPI{Name: "Users", Package: "users", Path: "../users", ModuleType: "users.Module"})
 		}},

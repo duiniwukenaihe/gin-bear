@@ -182,3 +182,65 @@ func repositoryRoot(t *testing.T) string {
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
 }
+
+func TestDevelopmentNewProductionProfileRendersDeploymentAssets(t *testing.T) {
+	previous := bear.Version
+	t.Cleanup(func() { bear.Version = previous })
+	bear.Version = "dev"
+
+	repository := repositoryRoot(t)
+	destination := filepath.Join(t.TempDir(), "service-prod")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Execute([]string{
+		"new", "service-prod",
+		"--module", "example.com/service-prod",
+		"--directory", destination,
+		"--framework-version", "dev",
+		"--framework-replace", repository,
+		"--profile", "production",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Execute() code = %d, stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{
+		"README.md",
+		"Makefile",
+		"Dockerfile",
+		".dockerignore",
+		".github/workflows/ci.yml",
+		"compose.dev.yaml",
+	} {
+		if _, err := os.Stat(filepath.Join(destination, filepath.FromSlash(want))); err != nil {
+			t.Fatalf("production profile missing %s: %v", want, err)
+		}
+	}
+}
+
+func TestDevelopmentNewRejectsInvalidProfile(t *testing.T) {
+	previous := bear.Version
+	t.Cleanup(func() { bear.Version = previous })
+	bear.Version = "dev"
+
+	repository := repositoryRoot(t)
+	destination := filepath.Join(t.TempDir(), "service-bad")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Execute([]string{
+		"new", "service-bad",
+		"--module", "example.com/service-bad",
+		"--directory", destination,
+		"--framework-version", "dev",
+		"--framework-replace", repository,
+		"--profile", "enterprise",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("Execute() with invalid profile exited 0, want failure")
+	}
+	if !strings.Contains(stderr.String(), "profile") {
+		t.Fatalf("invalid profile error missing profile hint: %q", stderr.String())
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("rejected profile still created %s", destination)
+	}
+}

@@ -543,7 +543,7 @@ func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, serverBinary)
 	cmd.Dir = project
-	cmd.Env = append(os.Environ(), "BEAR_ENV=production", fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "BEAR_AUTH_JWT_SECRET=", "JWT_SECRET=", "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
+	cmd.Env = append(os.Environ(), "BEAR_ENV=production", fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "BEAR_AUTH_JWT_SECRET=", "JWT_SECRET=", "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("generated production server started without BEAR_AUTH_JWT_SECRET:\n%s", output)
@@ -611,7 +611,7 @@ func runGo(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
+	cmd.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go %s failed: %v\n%s", strings.Join(args, " "), err, output)
 	}
@@ -629,7 +629,7 @@ func runGoForTarget(t *testing.T, dir, goos, goarch string, args ...string) {
 		}
 		env = append(env, entry)
 	}
-	env = append(env, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14", "GOOS="+goos, "GOARCH="+goarch)
+	env = append(env, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6", "GOOS="+goos, "GOARCH="+goarch)
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
 	cmd.Env = env
@@ -652,7 +652,7 @@ func runCommand(t *testing.T, dir, binary string, args ...string) (string, strin
 	t.Helper()
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
+	cmd.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -696,7 +696,7 @@ func runGeneratedServerHealthCheck(t *testing.T, dir, path string) {
 
 	cmd := exec.Command(serverBinary)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.14")
+	cmd.Env = append(os.Environ(), fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	prepareGeneratedProcess(cmd)
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
 	output, err := checkGeneratedServer(cmd, url, defaultGeneratedServerCheckConfig())

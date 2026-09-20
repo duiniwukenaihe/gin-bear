@@ -15,9 +15,14 @@ import (
 )
 
 const (
+	// TemplateVersion is the manifest version new projects start with.
 	TemplateVersion = 1
-	ManifestPath    = ".bear/scaffold.json"
-	ModulesPath     = "internal/app/modules_gen.go"
+	// TemplateVersionFiles adds per-API content digests for generator-owned
+	// files. Readers accept v1 and v2; writers stay on v1 unless an upgrade
+	// path (gen apply) explicitly moves a manifest to v2.
+	TemplateVersionFiles = 2
+	ManifestPath         = ".bear/scaffold.json"
+	ModulesPath          = "internal/app/modules_gen.go"
 )
 
 var (
@@ -39,6 +44,11 @@ type GeneratedAPI struct {
 	Package    string `json:"package"`
 	Path       string `json:"path"`
 	ModuleType string `json:"module_type"`
+	// Files maps generator-owned file paths (project-relative slash paths)
+	// to their sha256 digests at generation time. It exists only on
+	// template v2 manifests; v1 entries leave it empty. User-modified files
+	// (notably service.go) are never auto-overwritten on upgrade.
+	Files map[string]string `json:"files,omitempty"`
 }
 
 func NewManifest(modulePath, frameworkVersion string) Manifest {
@@ -55,6 +65,18 @@ func ReadManifest(root string) (Manifest, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read scaffold manifest %q: %w", path, err)
+	}
+	versionDecoder := json.NewDecoder(strings.NewReader(string(contents)))
+	var version struct {
+		TemplateVersion int `json:"template_version"`
+	}
+	// Version first, explicitly: v1 and v2 decode strictly against their own
+	// shape, anything else is rejected without guessing.
+	if err := versionDecoder.Decode(&version); err != nil {
+		return Manifest{}, fmt.Errorf("decode scaffold manifest %q: %w", path, err)
+	}
+	if version.TemplateVersion != TemplateVersion && version.TemplateVersion != TemplateVersionFiles {
+		return Manifest{}, fmt.Errorf("decode scaffold manifest %q: unsupported template version %d (supported: 1, 2)", path, version.TemplateVersion)
 	}
 	var manifest Manifest
 	decoder := json.NewDecoder(strings.NewReader(string(contents)))
@@ -114,7 +136,7 @@ func (manifest Manifest) Validate() error {
 	if err := module.Check(frameworkModule, manifest.FrameworkVersion); err != nil {
 		return fmt.Errorf("invalid framework version %q: %w", manifest.FrameworkVersion, err)
 	}
-	if manifest.TemplateVersion != TemplateVersion {
+	if manifest.TemplateVersion != TemplateVersion && manifest.TemplateVersion != TemplateVersionFiles {
 		return fmt.Errorf("unsupported template version %d", manifest.TemplateVersion)
 	}
 
@@ -144,6 +166,14 @@ func (manifest Manifest) Validate() error {
 		}
 		if expected := api.Package + ".Module"; api.ModuleType != expected {
 			return fmt.Errorf("api %d module type must be %q", index, expected)
+		}
+		for file, digest := range api.Files {
+			if err := validateManagedPath(file); err != nil {
+				return fmt.Errorf("api %d file: %w", index, err)
+			}
+			if len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
+				return fmt.Errorf("api %d file %q has an invalid sha256 digest", index, file)
+			}
 		}
 	}
 
