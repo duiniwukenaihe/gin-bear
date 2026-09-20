@@ -110,7 +110,12 @@ metadata and reject requests for another framework version.
 ## v0.9.2 Additive Behavior
 
 - `Authorizer` and `PermissionFairing` add resource/action/scope decisions
-  without changing or replacing the existing Casbin APIs.
+  without changing or replacing the existing Casbin APIs. `CasbinAuthorizer`
+  (`NewCasbinAuthorizer`) is an additive controlled implementation for online
+  policy changes; the existing `CasbinFairing` is untouched.
+- `LoadDatabaseConfigForGeneration` is an additive generation-only helper, and
+  `bear gen api --config <path>` (repeatable) is an additive flag. `gen
+  model`/`gen dto` reject `--config` with a usage error.
 - Current scaffolds use strict runtime and envelope defaults. Existing projects
   keep their current configuration until they opt in.
 - Current scaffolds maintain generated module registration through
@@ -168,6 +173,15 @@ in both compatibility and strict modes without removing the v0 public API:
 - Casbin authorization uses only the `CasbinEnforcer` injected from the current
   Bear container. There is no process-global fallback, and internal enforcement
   errors return a generic client 500.
+- The factory-built `CasbinEnforcer` now disables the decision cache by default
+  so sequential revocation is immediate. The exported type, constructor
+  signature, and promoted methods are unchanged; explicitly re-enabling the
+  cache opts out of the revocation guarantee, and concurrent authorization with
+  policy writes remains unsafe on the legacy interface.
+- `Repository.DB` normalizes a `*gin.Context` to its request context while
+  keeping the `bear_db_tx` transaction. Operations that previously ignored
+  request cancellation now return `context.Canceled`/`DeadlineExceeded`; this
+  is an intended behavior tightening, not an API removal.
 - Production WebSocket configuration rejects wildcard origins and all
   out-of-range timeout, message, and connection limits. Strict WebSocket routes
   require an explicit origin allowlist, and strict or production runtimes

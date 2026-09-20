@@ -416,29 +416,38 @@ func (r *Repository[T]) DB(ctx ...context.Context) *gorm.DB {
 		adapter = GetByType[*GormAdapter]()
 	}
 
-	var db *gorm.DB
-	var currentCtx context.Context
-
-	if len(ctx) > 0 {
-		currentCtx = ctx[0]
-		// 1. 尝试从 gin.Context 中提取事务
-		if ginCtx, ok := currentCtx.(*gin.Context); ok {
-			if tx, exists := ginCtx.Get(txKey); exists {
-				if gdb, ok := tx.(*gorm.DB); ok {
-					db = gdb.WithContext(currentCtx)
-				}
+	if len(ctx) == 0 {
+		return adapter.DB
+	}
+	currentCtx := ctx[0]
+	if currentCtx == nil {
+		return adapter.DB
+	}
+	// Gin 携带事务但其 Done/Deadline/Value 默认不透传请求上下文（除非全局
+	// 开启 Engine.ContextWithFallback，那会改变所有用户代码行为）。因此在
+	// 数据库边界保留事务句柄，同时把操作上下文规范化为 Request.Context()。
+	// 不使用 Session(NewDB:true)、不重开事务、不改变提交责任。
+	if ginCtx, ok := currentCtx.(*gin.Context); ok {
+		if ginCtx == nil {
+			return adapter.DB
+		}
+		var tx *gorm.DB
+		if stored, exists := ginCtx.Get(txKey); exists {
+			if gdb, ok := stored.(*gorm.DB); ok && gdb != nil {
+				tx = gdb
 			}
 		}
-		if db == nil {
-			db = adapter.DB.WithContext(currentCtx)
+		requestContext := currentCtx
+		if ginCtx.Request != nil && ginCtx.Request.Context() != nil {
+			requestContext = ginCtx.Request.Context()
 		}
-	} else {
-		db = adapter.DB
+		if tx != nil {
+			return tx.WithContext(requestContext)
+		}
+		return adapter.DB.WithContext(requestContext)
 	}
 
-	// 3. 多租户过滤 (已禁用 - 精简模式)
-
-	return db
+	return adapter.DB.WithContext(currentCtx)
 }
 
 func (r *Repository[T]) Create(ctx context.Context, entity *T) error {

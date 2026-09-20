@@ -17,7 +17,9 @@ type CasbinConfig struct {
 	ModelText string `yaml:"model_text"`
 }
 
-// CasbinEnforcer 是 Casbin CachedEnforcer 的包装，实现 Bean 接口
+// CasbinEnforcer 是 Casbin CachedEnforcer 的包装，实现 Bean 接口。
+// 工厂默认关闭决策缓存以保证撤权立即生效；公开嵌入字段为兼容保留，
+// 不保证并发鉴权与策略写入安全。
 type CasbinEnforcer struct {
 	*casbin.CachedEnforcer
 }
@@ -26,18 +28,25 @@ func (c *CasbinEnforcer) Name() string {
 	return "CasbinEnforcer"
 }
 
-// NewCasbinEnforcer 初始化一个新的 Casbin 执行器 (支持缓存)
-func NewCasbinEnforcer(adapter *GormAdapter, cfg *CasbinConfig) (*CasbinEnforcer, error) {
-	var m model.Model
-	var err error
-
+// buildCasbinModel 构造 Casbin 模型，每个调用者持有独立实例。
+// 由 NewCasbinEnforcer 与 NewCasbinAuthorizer 共享，避免可变模型对象在实例间共享。
+func buildCasbinModel(cfg *CasbinConfig) (model.Model, error) {
 	if cfg != nil && cfg.ModelText != "" {
-		m, err = model.NewModelFromString(cfg.ModelText)
-	} else if cfg != nil && cfg.ModelPath != "" {
-		m, err = model.NewModelFromFile(cfg.ModelPath)
-	} else {
-		// 默认 RBAC 模型，支持 RESTful 路径匹配 (keyMatch)
-		defaultModel := `
+		m, err := model.NewModelFromString(cfg.ModelText)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Casbin model: %w", err)
+		}
+		return m, nil
+	}
+	if cfg != nil && cfg.ModelPath != "" {
+		m, err := model.NewModelFromFile(cfg.ModelPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Casbin model: %w", err)
+		}
+		return m, nil
+	}
+	// 默认 RBAC 模型，支持 RESTful 路径匹配 (keyMatch)
+	const defaultModel = `
 [request_definition]
 r = sub, obj, act
 
@@ -53,11 +62,18 @@ e = some(where (p.eft == allow))
 [matchers]
 m = g(r.sub, p.sub) && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == "*")
 `
-		m, err = model.NewModelFromString(defaultModel)
-	}
-
+	m, err := model.NewModelFromString(defaultModel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Casbin model: %w", err)
+	}
+	return m, nil
+}
+
+// NewCasbinEnforcer 初始化一个新的 Casbin 执行器，默认关闭决策缓存。
+func NewCasbinEnforcer(adapter *GormAdapter, cfg *CasbinConfig) (*CasbinEnforcer, error) {
+	m, err := buildCasbinModel(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	var e *casbin.CachedEnforcer
@@ -77,8 +93,15 @@ m = g(r.sub, p.sub) && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == "*"
 		return nil, fmt.Errorf("failed to create Casbin enforcer: %w", err)
 	}
 
-	// 启用缓存失效机制 (如果需要手动管理缓存，可以调用 e.InvalidateCache())
-	// 默认情况下，CachedEnforcer 会在加载策略后自动管理缓存
+	// 默认关闭决策缓存，保证撤权立即生效。
+	// CachedEnforcer 并不会为所有角色、命名策略、过滤删除等操作完整清理
+	// 决策缓存；单独重写某个删除方法或增加 TTL 都不能满足立即撤权。
+	// 旧接口保留公开嵌入字段与构造签名以兼容 v0.9.1 API 基线，但默认不再
+	// 使用决策缓存。调用者显式重新开启缓存属于自定义行为，不在默认撤权
+	// 保证内；手工构造 CasbinEnforcer{CachedEnforcer: ...} 也不自动取得
+	// 工厂的默认保证。旧接口仍不保证“请求鉴权与策略写入并发执行”安全，
+	// 需要并发鉴权与在线策略变更请使用 CasbinAuthorizer。
+	e.EnableCache(false)
 
 	// 只有当有适配器时才需要加载策略，内存模式不需要显式 LoadPolicy
 	if adapter != nil {
@@ -87,7 +110,7 @@ m = g(r.sub, p.sub) && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == "*"
 		}
 	}
 
-	slog.Info("Casbin cached enforcer initialized successfully")
+	slog.Info("Casbin enforcer initialized successfully (decision cache disabled by default)")
 	return &CasbinEnforcer{CachedEnforcer: e}, nil
 }
 
