@@ -20,6 +20,7 @@ jobs:
       - name: Verify tag belongs to main
         run: |
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+          git fetch origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor HEAD origin/main
 
       - name: Set up Go
