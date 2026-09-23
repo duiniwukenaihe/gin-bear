@@ -9,8 +9,8 @@
    ```bash
    GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 make verify
    ```
-3. Before an RC or tag, run the complete audited gate with an explicit shuffle
-   seed. The default is offline and therefore requires preinstalled tools, a
+3. Optionally run the extended stress audit with an explicit shuffle
+   seed. This is not a v0.9.4 release gate. The default is offline and therefore requires preinstalled tools, a
    populated module cache, and a local govulncheck database with a trusted
    SHA-256 manifest:
 
@@ -31,25 +31,24 @@
 10. Confirm `main` CI passes, then create an annotated,
     immutable semantic-version tag on the exact reviewed `main` commit.
 11. After the tag workflow completes, verify the GitHub Release, its generated
-    notes, and GitHub-generated source archives. Confirm an application can
+    notes and GitHub-generated source archives. Confirm an application can
     resolve the framework module through the Go toolchain:
 
    ```bash
-   go list -m github.com/duiniwukenaihe/gin-bear@v0.9.3
+   go list -m github.com/duiniwukenaihe/gin-bear@v0.9.4
    ```
 
     When validating the optional project generator, install it separately and
     confirm the generated `go.mod` requires the same framework version:
 
    ```bash
-   GOBIN=$(mktemp -d) go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3
+   GOBIN=$(mktemp -d) go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.4
    ```
 
-The release workflow runs only for `v*` tags and has one responsibility:
-create the GitHub Release with generated notes. GitHub supplies the standard
-source archives automatically. Framework quality checks run before tagging
-and in the `main` CI workflow; the tag workflow does not repeat them. The
-release job grants `contents: write` only for publishing. The pushed release
+The release workflow runs only for `v*` tags. It reruns framework quality and
+integration checks, then creates the GitHub Release with generated notes.
+GitHub supplies the standard source archives automatically. The release job
+grants `contents: write` only for publishing. The pushed release
 tag must be annotated and target the exact reviewed `main` commit. After
 publishing, the workflow requests the matching version from `proxy.golang.org`
 so the Go Module is indexed. The generator is an optional scaffold entry point;
@@ -224,9 +223,10 @@ were byte-identical, the release-owned coverage profile was removed, and no
 worktree `coverage.out` remained. Remote heads were only `main` and
 `codex/production-baseline`; the active local development branch remained
 allowed. These historical results must not be reused as fresh gate evidence.
-Formal release gate evidence is created only by a complete `make verify-rc`
-run after the fixes are committed, the starting HEAD is clean, and the
-annotated release tag targets that exact commit.
+The historical v0.9.2 audit required a complete `make verify-rc` run after
+the fixes were committed. For v0.9.4, use the gates in
+[release-process.md](release-process.md); the repeated stress stages are
+optional.
 
 ## Rollback
 

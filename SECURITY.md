@@ -2,8 +2,9 @@
 
 ## Supported Versions
 
-`v0.9.3` is the current supported release. Users upgrading from `v0.9.1`
-should follow the
+`v0.9.4` is the current supported release. Users upgrading from `v0.9.3`
+should follow the [v0.9.4 upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md).
+Users upgrading from `v0.9.1` should also follow the
 [v0.9.1 to v0.9.2 migration guide](docs/migration-v0.9.1-to-v0.9.2.md).
 
 Generated applications should update from the scaffold regularly and run

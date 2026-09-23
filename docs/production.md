@@ -1,9 +1,8 @@
 # Production Guide
 
-`v0.9.3` is the current release. This guide also describes the repository source
-tree and its strict-runtime migration path. Entries under `Unreleased`,
-including the production gRPC runtime, are not a published release until the
-release gate and tagging process complete.
+`v0.9.4` is the current release. This guide also describes the repository source
+tree and its strict-runtime migration path. Entries under `Unreleased` are not
+a published release until the release gate and tagging process complete.
 
 ## Runtime
 

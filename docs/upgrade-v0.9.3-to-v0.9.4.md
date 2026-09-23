@@ -1,8 +1,6 @@
-# Upgrade from v0.9.3 to proposed v0.9.4
+# Upgrade from v0.9.3 to v0.9.4
 
-`v0.9.4` is a proposed version for the current unreleased source, not an
-available module yet. Continue pinning `v0.9.3` in production until the
-[release process](release-process.md) completes. Test the upgrade in an
+`v0.9.4` is the current framework release. Test the upgrade in an
 application checkout and keep its current configuration, migrations, and
 database backup available for rollback.
 

@@ -11,17 +11,15 @@ OpenAPI support.
 Add the current release to a Go application:
 
 ```bash
-go get github.com/duiniwukenaihe/gin-bear@v0.9.3
+go get github.com/duiniwukenaihe/gin-bear@v0.9.4
 ```
 
 Application code imports the runtime from
-`github.com/duiniwukenaihe/gin-bear/pkg/bear`. `v0.9.3` is the latest published
-release. The production gRPC work and the generator templates in this checkout
-are unreleased HEAD content; `v0.9.3` does not include or support those HEAD
-template fields. They remain under [Unreleased](CHANGELOG.md#unreleased) until
-they are reviewed, verified, and included in a future tag.
+`github.com/duiniwukenaihe/gin-bear/pkg/bear`. `v0.9.4` is the current
+release. Review the [changelog](CHANGELOG.md) and upgrade guide before updating
+an existing application.
 
-The proposed next release, upgrade steps, and `main`-based publishing flow are
+The upgrade steps and `main`-based publishing flow are
 documented in the [upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md) and
 [release process](docs/release-process.md).
 
@@ -31,12 +29,12 @@ documented in the [upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md) and
 when starting a new service from the maintained application structure:
 
 ```bash
-go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3
+go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.4
 bear new my-service
 ```
 
-The published `v0.9.3` generator contains the `v0.9.3` templates and pins the
-generated project's `go.mod` to `v0.9.3`. A released generator is bound to its
+The published `v0.9.4` generator contains the `v0.9.4` templates and pins the
+generated project's `go.mod` to `v0.9.4`. A released generator is bound to its
 own module version and rejects attempts to select another framework version.
 Existing applications do not need to install the generator.
 
@@ -50,8 +48,8 @@ go run ./cmd/bear new my-service \
 ```
 
 This development flow writes a local `replace` directive. It does not claim
-compatibility with `v0.9.3` or any other published tag. An unversioned HEAD
-generator rejects `--framework-version v0.9.3` before creating a project.
+compatibility with `v0.9.4` or any other published tag. An unversioned HEAD
+generator rejects `--framework-version v0.9.4` before creating a project.
 
 ## Recommended Startup
 
@@ -131,7 +129,7 @@ Run the basic service with `go run ./examples/basic` and open
 
 ## Optional gRPC Runtime
 
-The unreleased source tree defines `GRPCServiceRegistrar` for injectable
+`v0.9.4` defines `GRPCServiceRegistrar` for injectable
 services and the error-returning registration methods `AddGRPCServiceE`,
 `AddGRPCUnaryInterceptorE`, and `AddGRPCStreamInterceptorE`. Register at least
 one business service before enabling gRPC. Authentication belongs in unary and

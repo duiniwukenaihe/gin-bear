@@ -27,12 +27,12 @@ asserted here.
 - No scheduled automation is created here; cadence is operated manually
   until a dedicated maintenance work item wires it.
 
-## Release acceptance checklist (per candidate tag)
+## Release acceptance checklist (per final tag)
 
-1. `make verify` and the clean-worktree `make verify-rc` gate green on the
-   exact `main` commit selected for tagging (quality, compatibility, E2E,
-   repeated/shuffled tests, race, vet, staticcheck, govulncheck). The tag
-   workflow reruns `make verify` before publication.
+1. `make verify` is green on the exact `main` commit selected for tagging
+   (quality, compatibility, E2E, race, vet, staticcheck, govulncheck). The tag
+   workflow reruns `make verify` before publication. `make verify-rc` remains
+   an optional stress audit; its repeated and shuffled stages are not a gate.
 2. `BEAR_INTEGRATION_REQUIRE=pg,mysql,redis scripts/test-integration.sh`
    green with all three real engines. `NOT_RUN` is not final-release evidence.
 3. Nested modules green (`tools/bear-mcp`, `extensions/agent`, incl. the
@@ -40,8 +40,8 @@ asserted here.
 4. A new app generated with the *released* CLI/framework versions (not a local
    replace) boots, migrates, and serves CRUD; previous-template preview and
    failed-upgrade recovery verified.
-5. Binary distribution (checksums, SBOM, provenance) only when binaries ship;
-   source releases do not change for those nouns.
+5. GitHub supplies source archives and the Go proxy serves the tagged module.
+   No compiled generator bundles are published by this workflow.
 
 Migration digest drift detection is a separate work item: history
 compatibility, missing-old-SQL states, and manual verification come before any

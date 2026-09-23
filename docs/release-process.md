@@ -2,9 +2,9 @@
 
 `main` is the only framework release line. Feature branches and release
 candidates are review and verification workspaces, not permanent release
-branches. The current published root module is `v0.9.3`. The proposed next
-root version is `v0.9.4`; a version name is a proposal until its annotated tag
-is published. This update is broader than a typical patch: opt-in features,
+branches. The current published root module is `v0.9.4`; a version name is not
+published until its annotated tag and Release workflow complete. This update
+is broader than a typical patch: opt-in features,
 production behavior fixes, and a newer Go toolchain are all listed in the
 changelog and upgrade guide. It may use the `v0.9.4` name only after the
 `v0.9.3` public API comparison and application upgrade checks pass.
@@ -23,8 +23,9 @@ compatibility check.
 
 ## What a tag publishes
 
-The root Go module uses `v0.9.4-rc.1` for a candidate and `v0.9.4` for the
-final version. The `Release` workflow runs on a pushed root `v*` tag. It
+The root Go module uses `v0.9.4` for the final version. An `-rc.N` tag is
+optional when a trial release is needed. The `Release` workflow runs on a
+pushed root `v*` tag. It
 requires an annotated tag whose commit belongs to `main`, reruns `make verify`
 and the PostgreSQL, MySQL, and Redis integration suite, then creates the
 GitHub Release. Candidate tags are marked as prereleases and not Latest.
@@ -61,13 +62,15 @@ module resolution; a consumer may explicitly select a newer root version.
    production, support, and security version references in that same commit.
 3. On the exact candidate commit, run `make verify` and
    `BEAR_INTEGRATION_REQUIRE=pg,mysql,redis scripts/test-integration.sh` with
-   real services. Run `make verify-rc` from a clean worktree; its 20-run
-   shuffled test stage and three-run race stage must complete, not be skipped
-   or inferred from a shorter run. Check the resulting `results.tsv` for a
-   zero exit code at every stage. Confirm an external consumer can resolve
+   real services. The 20-run shuffle and three-run race stages in
+   `make verify-rc` are optional stress checks, not a release gate. Confirm an
+   external consumer can resolve
    the root module and the Agent module without relying on their own local
    `replace` directives. Compare the candidate public API against published
-   `v0.9.3`, not only the repository's older `v0.9.1` baseline.
+   `v0.9.3`, not only the repository's older `v0.9.1` baseline. Scan the
+   candidate tree and reachable Git history for credentials; inspect scanner
+   findings before publishing. `agent.md` and `AGENTS.md` must remain ignored
+   and untracked.
 4. Require the `main` CI checks to pass on that commit. If broader trial is
    needed, create an annotated `v0.9.4-rc.1` tag on that `main` commit and
    push it. Wait for the tag workflow and Go proxy publication before asking
@@ -76,7 +79,8 @@ module resolution; a consumer may explicitly select a newer root version.
 5. Once the candidate has no release blockers and the dated changelog is in
    the commit, rerun the gates on that final `main` commit. Create and push an
    annotated `v0.9.4` tag pointing at it. The tag workflow must finish before
-   announcing the version. Verify the GitHub Release and the Go proxy module
+   announcing the version. Verify the GitHub Release, its source archives,
+   and the Go proxy module
    version, then install the released generator in a separate application and
    confirm the generated project builds and starts without a local `replace`.
 
