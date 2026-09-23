@@ -3,7 +3,7 @@ module github.com/duiniwukenaihe/gin-bear/extensions/agent
 go 1.26.6
 
 require (
-	github.com/duiniwukenaihe/gin-bear v0.0.0
+	github.com/duiniwukenaihe/gin-bear v0.9.3
 	github.com/gin-gonic/gin v1.12.0
 	gorm.io/gorm v1.26.0
 )

@@ -95,7 +95,7 @@ func casbinRuleValues(sec, ptype string, rule []string) ([]any, error) {
 		return nil, fmt.Errorf("invalid Casbin policy type %q for section %q", ptype, sec)
 	}
 	if len(rule) > 6 {
-		return nil, fmt.Errorf("Casbin policy %q has %d fields, maximum is 6", ptype, len(rule))
+		return nil, fmt.Errorf("casbin policy %q has %d fields, maximum is 6", ptype, len(rule))
 	}
 	values := make([]any, 7)
 	values[0] = ptype
