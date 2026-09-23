@@ -76,7 +76,14 @@ jobs:
 
       - name: Run integration suite
         env:
+          BEAR_INTEGRATION_REQUIRE: pg,mysql,redis
           BEAR_INTEGRATION_PG_DSN: postgres://bear_int:bear_int_ci_pw@127.0.0.1:5433/bear_integration_ci?sslmode=disable
           BEAR_INTEGRATION_MYSQL_DSN: mysql://bear_int:bear_int_ci_pw@127.0.0.1:3307/bear_integration_ci
           BEAR_INTEGRATION_REDIS_ADDR: 127.0.0.1:6380
         run: scripts/test-integration.sh
+
+      - name: Verify nested modules (agent PostgreSQL variant)
+        env:
+          RC_ALLOW_NETWORK: "1"
+          BEAR_AGENT_PG_DSN: postgres://bear_int:bear_int_ci_pw@127.0.0.1:5433/bear_integration_ci?sslmode=disable
+        run: scripts/verify-modules.sh

@@ -135,13 +135,13 @@ type openAITool struct {
 }
 
 type openAIRequest struct {
-	Model          string          `json:"model"`
-	Messages       []openAIMessage `json:"messages"`
-	Tools          []openAIToolDef `json:"tools,omitempty"`
-	Stream         bool            `json:"stream"`
-	StreamOptions  *streamOptions  `json:"stream_options,omitempty"`
-	MaxTokens      int             `json:"max_tokens,omitempty"`
-	Temperature    *float64        `json:"temperature,omitempty"`
+	Model         string          `json:"model"`
+	Messages      []openAIMessage `json:"messages"`
+	Tools         []openAIToolDef `json:"tools,omitempty"`
+	Stream        bool            `json:"stream"`
+	StreamOptions *streamOptions  `json:"stream_options,omitempty"`
+	MaxTokens     int             `json:"max_tokens,omitempty"`
+	Temperature   *float64        `json:"temperature,omitempty"`
 	// ReasoningSplit is the vendor-specific extension that asks for the
 	// scratchpad to be returned in `reasoning_details`. Some OpenAI-
 	// compatible vendors (MiniMax M3 included) honour it.

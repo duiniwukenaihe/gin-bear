@@ -52,12 +52,16 @@ func applyPlanFile(cmd *cobra.Command, directory, planPath string) error {
 	activePackage := packageName(stored.Name)
 	var managed *managedGeneration
 	if stored.Kind == "api" {
+		release, err := lockGeneration(directory)
+		if err != nil {
+			return fmt.Errorf("plan %s is stale: %w", planPath, err)
+		}
+		defer release()
 		locked, err := prepareManagedGeneration(directory, stored.Kind, activePackage)
 		if err != nil {
 			return fmt.Errorf("plan %s is stale: %w", planPath, err)
 		}
 		managed = locked
-		defer managed.release()
 	}
 
 	var database generatedAPIDatabase

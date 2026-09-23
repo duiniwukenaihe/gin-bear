@@ -37,6 +37,14 @@ The server never migrates on startup. Apply reviewed SQL explicitly:
 make migrate            # runs ./cmd/migrate against application.yaml
 ```
 
+For a native binary deployment, build both commands from the same source
+revision and run the migration tool before starting the new server:
+
+```sh
+make build
+BEAR_ENV=prod GIN_MODE=release ./bin/migrate
+```
+
 `migrations/` files are append-only: never edit or rewrite a version that has
 already been applied anywhere; add a new version instead. Rolling the
 application binary back does not roll the database back; database rollback is
@@ -47,11 +55,14 @@ a separate, explicitly approved operation.
 - Liveness: `GET /live`. Readiness: `GET /ready` (fails while dependencies
   are unreachable).
 - The server handles `SIGTERM`/`SIGINT`: it stops accepting, drains
-  in-flight requests within `server.shutdown_timeout`, then exits. The
-  container entrypoint execs the server so signals reach PID 1:
+  in-flight requests within `server.shutdown_timeout`, then exits. Run
+  `./bin/server` under your service manager and give it the configured
+  shutdown timeout before forcing termination.
+
+Start the binary with production configuration and injected secrets:
 
 ```sh
-docker run --read-only --tmpfs /tmp my-registry/{{.Name}}:latest
+BEAR_ENV=prod GIN_MODE=release ./bin/server
 ```
 
 ## Logs and tracing
@@ -72,10 +83,11 @@ The framework owns no backups. The database operator owns them:
 
 1. Regenerate or rebase onto the new framework version in a scratch copy.
 2. Run `bear gen api ... --dry-run` equivalents and review the diff.
-3. `go test ./...`, `make docker`, boot against a disposable database,
-   apply migrations, smoke CRUD, then `TERM` and confirm a clean exit.
-4. Promote the image tag; keep the previous tag for instant rollback.
+3. `go test ./...` and `make build`; boot against a disposable database,
+   apply migrations, smoke CRUD, then send `TERM` and confirm a clean exit.
+4. Deploy the reviewed server and migration binaries together. Keep the
+   previous server binary and configuration for application rollback; do not
+   assume an applied database migration can be rolled back automatically.
 
-Base images are pinned in `Dockerfile` (`golang:1.26.6-bookworm`,
-`gcr.io/distroless/static-debian12:nonroot`). Bump them together with the
-`go` directive, rebuild from scratch, and re-run this checklist.
+`Dockerfile` and `docker-build` are optional for operators who use images;
+native deployments do not depend on them.

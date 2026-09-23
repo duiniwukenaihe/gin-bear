@@ -36,7 +36,7 @@ import (
 //	BEAR_INTEGRATION=1                  enable (set by the script)
 //	BEAR_INTEGRATION_PG_DSN             postgres DSN for the disposable test database
 //	BEAR_INTEGRATION_MYSQL_DSN          mysql DSN (optional; absent => MySQL NOT_RUN)
-//	BEAR_INTEGRATION_REDIS_ADDR         redis addr (optional; unreachable => Redis NOT_RUN)
+//	BEAR_INTEGRATION_REDIS_ADDR         redis addr (optional; unreachable => Redis NOT_RUN unless required)
 func requireIntegration(t *testing.T) {
 	t.Helper()
 	if os.Getenv("BEAR_INTEGRATION") != "1" {
@@ -74,6 +74,11 @@ func redisAddr(t *testing.T) (string, bool) {
 	defer cancel()
 	adapter, err := bear.OpenRedisAdapterContext(ctx, &bear.RedisConfig{Addr: addr})
 	if err != nil {
+		for _, engine := range strings.Split(os.Getenv("BEAR_INTEGRATION_REQUIRE"), ",") {
+			if strings.TrimSpace(engine) == "redis" {
+				t.Fatalf("required redis at %s is unavailable: %v", addr, err)
+			}
+		}
 		t.Logf("NOT_RUN: redis at %s unreachable: %v", addr, err)
 		return "", false
 	}
@@ -333,8 +338,8 @@ func TestIntegrationPostgresTransactionRollbackCancelInterruption(t *testing.T) 
 	})
 }
 
-// TestIntegrationPostgresRevocationReload proves grant/revoke/reload against
-// the real PostgreSQL policy store, including the stale-until-reload boundary.
+// TestIntegrationPostgresRevocationReload proves that a revocation committed
+// by one instance is visible on the next authorization of another instance.
 func TestIntegrationPostgresRevocationReload(t *testing.T) {
 	requireIntegration(t)
 	dsn, ok := pgDSN(t)
@@ -367,16 +372,21 @@ func TestIntegrationPostgresRevocationReload(t *testing.T) {
 	if _, err := a.RemoveGroupingPolicy("alice", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if allowed, err := b.Authorize(context.Background(), request); err != nil || !allowed {
-		t.Fatalf("b before reload = %v, %v; want stale true, nil", allowed, err)
+	if allowed, err := b.Authorize(context.Background(), request); err != nil {
+		t.Fatalf("b after remote revocation: %v", err)
+	} else if allowed {
+		t.Fatal("b after remote revocation = true, want false")
 	}
-	if err := b.LoadPolicy(); err != nil {
+	if _, err := a.AddGroupingPolicy("alice", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if allowed, err := b.Authorize(context.Background(), request); err != nil {
-		t.Fatalf("b after reload: %v", err)
-	} else if allowed {
-		t.Fatal("b after reload = true, want false")
+	// b last observed the revoked policy; its next mutation must refresh
+	// before deciding whether the newly restored rule exists.
+	if removed, err := b.RemoveGroupingPolicy("alice", "admin"); err != nil || !removed {
+		t.Fatalf("b remote revocation = %v, %v; want true, nil", removed, err)
+	}
+	if allowed, err := a.Authorize(context.Background(), request); err != nil || allowed {
+		t.Fatalf("a after b remote revocation = %v, %v; want false, nil", allowed, err)
 	}
 }
 

@@ -20,7 +20,9 @@ import (
 func taskOpsApp(t *testing.T, store *tasks.Store, user, tenant string) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	handler := &agent.Handler{Tasks: store, Auditor: agent.NewAuditor(100)}
+	handler := &agent.Handler{Tasks: store, Auditor: agent.NewAuditor(100), TaskAuthorize: func(_ context.Context, identity agent.Identity, task *tasks.Task, action string) (bool, error) {
+		return identity.UserID == "op" || (action == "status" && identity.UserID == task.Owner), nil
+	}}
 	engine := gin.New()
 	if user != "" {
 		engine.Use(func(ctx *gin.Context) {
@@ -194,5 +196,80 @@ func TestTaskOpsReconcileFlow(t *testing.T) {
 	code, body = callOps(t, app, http.MethodPost, "/agent/tasks/"+requeueTask.ID+"/requeue-unknown", "")
 	if code != http.StatusOK || body["status"] != "waiting_approval" || body["approval_id"] == oldApproval {
 		t.Fatalf("requeue = %d %v, want 200 waiting_approval with a fresh approval", code, body)
+	}
+}
+
+func TestTaskOpsRejectsSameTenantNonOperator(t *testing.T) {
+	store := openTaskOpsStore(t)
+	member := taskOpsApp(t, store, "member", "t1")
+	operator := taskOpsApp(t, store, "op", "t1")
+	for _, action := range []string{"approve", "confirm-unknown", "requeue-unknown"} {
+		task := submitOpsWrite(t, store, "unauthorized-"+action)
+		if action != "approve" {
+			if code, _ := callOps(t, operator, http.MethodPost, "/agent/tasks/"+task.ID+"/approve", `{}`); code != http.StatusOK {
+				t.Fatalf("prepare %s: approve = %d", action, code)
+			}
+			driveToUnknown(t, store, task.ID)
+		}
+		body := ""
+		if action != "requeue-unknown" {
+			body = `{}`
+		}
+		code, _ := callOps(t, member, http.MethodPost, "/agent/tasks/"+task.ID+"/"+action, body)
+		if code != http.StatusForbidden {
+			t.Fatalf("same-tenant member %s = %d, want 403", action, code)
+		}
+	}
+}
+
+func TestTaskOpsFailsClosedWithoutPolicyAndForSelfApproval(t *testing.T) {
+	store := openTaskOpsStore(t)
+	task := submitOpsWrite(t, store, "missing-policy")
+	app := taskOpsApp(t, store, "op", "t1")
+	// Replace the test policy with nil to verify the handler's default.
+	bare := &agent.Handler{Tasks: store}
+	app.GET("/bare/tasks/:id", bare.TaskStatus)
+	app.POST("/bare/tasks/:id/approve", bare.TaskApprove)
+	for _, path := range []string{"/bare/tasks/" + task.ID, "/bare/tasks/" + task.ID + "/approve"} {
+		method := http.MethodGet
+		body := ""
+		if strings.HasSuffix(path, "/approve") {
+			method, body = http.MethodPost, `{}`
+		}
+		if code, _ := callOps(t, app, method, path, body); code != http.StatusForbidden {
+			t.Fatalf("missing policy %s = %d, want 403", path, code)
+		}
+	}
+	owner := gin.New()
+	owner.Use(func(ctx *gin.Context) { agent.SetIdentity(ctx, agent.Identity{UserID: "u1", TenantID: "t1"}) })
+	permissive := &agent.Handler{Tasks: store, TaskAuthorize: func(context.Context, agent.Identity, *tasks.Task, string) (bool, error) { return true, nil }}
+	owner.POST("/agent/tasks/:id/approve", permissive.TaskApprove)
+	if code, _ := callOps(t, owner, http.MethodPost, "/agent/tasks/"+task.ID+"/approve", `{}`); code != http.StatusForbidden {
+		t.Fatalf("self approval = %d, want 403", code)
+	}
+}
+
+func TestTaskOpsRejectsNegativeUsageWithoutChangingBudget(t *testing.T) {
+	store := openTaskOpsStore(t)
+	task := submitOpsWrite(t, store, "negative-usage")
+	operator := taskOpsApp(t, store, "op", "t1")
+	if code, _ := callOps(t, operator, http.MethodPost, "/agent/tasks/"+task.ID+"/approve", `{}`); code != http.StatusOK {
+		t.Fatalf("approve = %d", code)
+	}
+	driveToUnknown(t, store, task.ID)
+	before, err := store.Get(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, _ := callOps(t, operator, http.MethodPost, "/agent/tasks/"+task.ID+"/confirm-unknown", `{"result":"wrote","usage":-1}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("negative usage = %d, want 400", code)
+	}
+	after, err := store.Get(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != before.Status || after.BudgetTokens != before.BudgetTokens {
+		t.Fatalf("negative usage changed task: before=%+v after=%+v", before, after)
 	}
 }

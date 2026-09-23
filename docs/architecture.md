@@ -41,8 +41,15 @@ the profile subtree) and writes `.bear/scaffold.json` (manifest v1).
 contract once, renders resource templates into a temp dir, publishes
 atomically, writes the migration pair, pins dependencies, and registers the
 module — holding `.bear/generate.lock`, rolling back on failure, never
-rewriting applied migrations. A `--dry-run` preview reusing the same render
-and manifest content digests are planned follow-ups, not current behavior.
+rewriting applied migrations. Every `api` generation takes that lock, managed
+or legacy (a manifest-less project still writes migrations), and a rollback
+removes the resource package, any partially written migration pair, and
+restores `go.mod` pins.
+
+`bear gen api --dry-run --format json` renders the identical plan without
+writing anything, and `bear gen apply --plan` re-verifies inputs, project root,
+and content digests before executing it (stale plans are rejected). A previewed
+apply upgrades the manifest to v2 with per-file digests.
 
 Migrations are reviewed SQL applied by the standalone `cmd/migrate` step via
 `MigrationRunner` (history + locking tables); the server never migrates at

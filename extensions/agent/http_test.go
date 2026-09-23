@@ -272,11 +272,6 @@ func TestStreamEmitsDeltasAndOneTerminal(t *testing.T) {
 	}
 }
 
-func mustStreamHandler(t *testing.T) *agent.Handler {
-	t.Helper()
-	handler, _ := testHandler(t)
-	return handler
-}
 func TestStreamDisconnectCancels(t *testing.T) {
 	handler, _ := testHandler(t, agent.FakeText("late"))
 	app := serveApp(t, handler, aliceResolve)

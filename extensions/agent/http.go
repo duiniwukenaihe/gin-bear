@@ -53,6 +53,10 @@ type Handler struct {
 	// endpoints (status/approve/confirm-unknown/requeue-unknown). Nil
 	// disables them; invocation paths never need it.
 	Tasks *tasks.Store
+	// TaskAuthorize is the application's trusted policy for task status,
+	// approval, and reconciliation. Nil fails closed; tenant matching alone
+	// never grants operator access.
+	TaskAuthorize func(context.Context, Identity, *tasks.Task, string) (bool, error)
 	// Disabled is the kill switch: when true, every invocation refuses
 	// without touching the model or tools.
 	Disabled bool
@@ -87,6 +91,8 @@ func (h *Handler) runnerFor(task string) (*Runner, error) {
 		return nil, err
 	}
 	runner.Gate = gate
+	runner.Auditor = h.Auditor
+	runner.Metrics = h.Metrics
 	return runner, nil
 }
 

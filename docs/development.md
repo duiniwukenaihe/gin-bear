@@ -11,7 +11,7 @@ All commands assume the local toolchain from `AGENTS.md`:
 ```sh
 export PATH="/opt/homebrew/bin:$PATH"
 export GOPROXY=https://goproxy.cn,direct
-export GOTOOLCHAIN=go1.25.14
+export GOTOOLCHAIN=go1.26.6
 ```
 
 | Task | Command |
@@ -23,10 +23,13 @@ export GOTOOLCHAIN=go1.25.14
 | Diagnose a project | `go run ./cmd/bear doctor [--format json] [--probe]` |
 | Scaffold / generate | `go run ./cmd/bear new`, `bear gen api <name>` |
 
-`make verify` covers tests, coverage, v0.9.1 API compatibility, generated-app
-E2E, race, vet, staticcheck, and govulncheck. `scripts/test-integration.sh`
-needs PostgreSQL/Redis (MySQL optional) and cleans up its disposable
-databases itself.
+`make verify` runs `scripts/verify-all.sh`: the root gate (tests, coverage,
+v0.9.1 API compatibility, generated-app E2E, race, vet, staticcheck,
+govulncheck) plus `scripts/verify-modules.sh`, which runs the same quality
+steps for the nested modules. `scripts/test-integration.sh` needs
+PostgreSQL/Redis (MySQL optional) and cleans up its disposable databases
+itself; in CI it sets `BEAR_INTEGRATION_REQUIRE` so a missing engine fails
+instead of reporting NOT_RUN.
 
 ## Directory map
 
@@ -39,13 +42,14 @@ databases itself.
 | `tests/integration` | Real-dependency acceptance (env-gated, skipped by default) |
 | `scripts/` | CI diagnostics, release check, integration entrypoint |
 | `docs/` | Versioned engineering docs (this file, `architecture.md`, `recipes/`) |
-| `extensions/`, `tools/` | Opt-in nested modules with their own `go.mod` and CI |
+| `extensions/`, `tools/` | Opt-in nested modules with their own `go.mod`, covered by `scripts/verify-modules.sh` |
 
 ## Dependency rules
 
 - Root module dependencies serve the runtime and CLI only. Nested modules
-  (`extensions/*`, `tools/*`) declare their own `go.mod` and are tested by
-  their own CI jobs; root `go test ./...` never covers them.
+  (`extensions/*`, `tools/*`) declare their own `go.mod`; root `go test ./...`
+  never descends into them, so `make verify` runs `scripts/verify-modules.sh`
+  and CI/release run the same gate with a real PostgreSQL service.
 - Prefer the standard library and existing dependencies over new ones.
 - Never `git add -f` ignored local files (`AGENTS.md`, `agent.md`, `.env`).
 

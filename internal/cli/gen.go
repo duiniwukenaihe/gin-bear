@@ -239,12 +239,19 @@ func generateResource(ctx context.Context, opts resourceOptions) (generateResult
 	if activePackage == "resource" && len(nameParts(opts.Name)) == 0 {
 		return generateResult{}, fmt.Errorf("resource name %q is invalid", opts.Name)
 	}
+	// Every api generation writes migrations, so every api generation takes
+	// the lock — managed or legacy. The lock is acquired before the manifest
+	// is read so the whole read-decide-write sequence is exclusive.
+	if opts.Kind == "api" {
+		release, err := lockGeneration(opts.Directory)
+		if err != nil {
+			return generateResult{}, err
+		}
+		defer release()
+	}
 	managed, err := prepareManagedGeneration(opts.Directory, opts.Kind, activePackage)
 	if err != nil {
 		return generateResult{}, err
-	}
-	if managed != nil {
-		defer managed.release()
 	}
 
 	// The plan renders exactly what preview shows; generation only executes it.
@@ -296,19 +303,37 @@ func executePlan(ctx context.Context, directory string, plan *resourcePlan, mana
 	}
 	published = true
 	var migrationFiles []string
+	// Snapshot go.mod so a later rollback can undo dependency pins: applyPins
+	// rewrites the file in place, and leaving pins behind after a failed
+	// registration would strand requirements the resource no longer needs.
+	goModPath := filepath.Join(directory, "go.mod")
+	goModOriginal, goModReadErr := os.ReadFile(goModPath)
+	goModExisted := goModReadErr == nil
+	goModMode := os.FileMode(0644)
+	if goModExisted {
+		if info, statErr := os.Stat(goModPath); statErr == nil {
+			goModMode = info.Mode().Perm()
+		}
+	}
 	rollback := func() error {
 		removeGeneratedFiles(directory, migrationFiles)
-		return os.RemoveAll(target)
+		var restoreErr error
+		if goModExisted {
+			restoreErr = os.WriteFile(goModPath, goModOriginal, goModMode)
+		}
+		return errors.Join(os.RemoveAll(target), restoreErr)
 	}
 	if plan.Kind == "api" && plan.Migration != nil {
 		written, err := writeResourceMigration(directory, plan.migration)
+		// Record partial writes before checking the error so rollback removes a
+		// migration pair whose second file failed after the first was written.
+		migrationFiles = written
 		if err != nil {
 			if removeErr := rollback(); removeErr != nil {
 				return generateResult{}, fmt.Errorf("%w (rollback resource: %v)", err, removeErr)
 			}
 			return generateResult{}, err
 		}
-		migrationFiles = written
 	}
 	if err := applyPins(directory, plan.GoMod); err != nil {
 		if removeErr := rollback(); removeErr != nil {
@@ -333,8 +358,6 @@ type managedGeneration struct {
 	manifest         scaffold.Manifest
 	originalManifest []byte
 	manifestMode     os.FileMode
-	lock             *os.File
-	lockPath         string
 }
 
 func scaffoldManifestExists(root string) (bool, error) {
@@ -368,6 +391,12 @@ const generateLockPath = ".bear/generate.lock"
 // liveness checks, and those differ per platform and misjudge a recycled pid.
 func acquireGenerationLock(root string) (*os.File, string, error) {
 	path := filepath.Join(root, filepath.FromSlash(generateLockPath))
+	// A legacy project has no .bear directory yet; the lock is the first thing
+	// to need it. Creating it is safe because release removes the lock and then
+	// removes the directory again when nothing else occupies it.
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, path, fmt.Errorf("create generation lock directory %q: %w", filepath.Dir(path), err)
+	}
 	lock, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err == nil {
 		if _, writeErr := fmt.Fprintf(lock, "pid=%d started=%s\n", os.Getpid(), time.Now().Format(time.RFC3339)); writeErr != nil {
@@ -386,6 +415,29 @@ func acquireGenerationLock(root string) (*os.File, string, error) {
 Another "bear gen" may be running in this project. Wait for it to finish, or delete the lock and retry:
     rm %q`,
 		path, describeGenerationLockHolder(path), path)
+}
+
+// lockGeneration takes the per-project generation lock for a command that
+// writes generated API files and returns its release. Both managed and legacy
+// (manifest-less) projects need it: both write migrations, and two concurrent
+// runs would otherwise allocate the same migration version. Callers invoke it
+// only for api generations; model/dto write neither a migration nor the
+// registry.
+func lockGeneration(root string) (func(), error) {
+	lock, lockPath, err := acquireGenerationLock(root)
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		if lock != nil {
+			_ = lock.Close()
+		}
+		_ = os.Remove(lockPath)
+		// Drop .bear again if this run created it for the lock and left it
+		// empty; a managed project keeps its manifest, so Remove fails and is
+		// ignored.
+		_ = os.Remove(filepath.Dir(lockPath))
+	}, nil
 }
 
 // describeGenerationLockHolder summarises the owner record of an existing lock.
@@ -412,18 +464,7 @@ func prepareManagedGeneration(root, kind, packageName string) (*managedGeneratio
 		return nil, err
 	}
 
-	lock, lockPath, err := acquireGenerationLock(root)
-	if err != nil {
-		return nil, err
-	}
-	managed := &managedGeneration{root: root, lock: lock, lockPath: lockPath}
-	prepared := false
-	defer func() {
-		if !prepared {
-			managed.release()
-		}
-	}()
-
+	managed := &managedGeneration{root: root}
 	managed.manifest, err = scaffold.ReadManifest(root)
 	if err != nil {
 		return nil, err
@@ -443,18 +484,7 @@ func prepareManagedGeneration(root, kind, packageName string) (*managedGeneratio
 		return nil, fmt.Errorf("inspect scaffold manifest %q: %w", manifestPath, err)
 	}
 	managed.manifestMode = info.Mode().Perm()
-	prepared = true
 	return managed, nil
-}
-
-func (managed *managedGeneration) release() {
-	if managed == nil {
-		return
-	}
-	if managed.lock != nil {
-		_ = managed.lock.Close()
-	}
-	_ = os.Remove(managed.lockPath)
 }
 
 func (managed *managedGeneration) register(data resourceData, files map[string]string) error {

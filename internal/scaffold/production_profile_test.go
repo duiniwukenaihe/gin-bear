@@ -5,7 +5,6 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,7 +125,9 @@ func TestProductionProfileContents(t *testing.T) {
 		"golang:1.26.6-bookworm",
 		"distroless/static-debian12",
 		"ENTRYPOINT",
-		"migrate",
+		"./cmd/server",
+		"./cmd/migrate",
+		"/app/migrate",
 	} {
 		if !strings.Contains(dockerfile, want) {
 			t.Fatalf("Dockerfile missing %q:\n%s", want, dockerfile)
@@ -147,10 +148,16 @@ func TestProductionProfileContents(t *testing.T) {
 		"Graceful shutdown",
 		"Backup and restore",
 		"Upgrades",
+		"make build",
+		"./bin/migrate",
+		"./bin/server",
 	} {
 		if !strings.Contains(readme, want) {
-			t.Fatalf("README missing section %q", want)
+			t.Fatalf("README missing %q:\n%s", want, readme)
 		}
+	}
+	if strings.Contains(readme, "make docker`") {
+		t.Fatalf("README references the non-existent `make docker` target:\n%s", readme)
 	}
 
 	makefile := readFile(t, filepath.Join(project, "Makefile"))
@@ -179,6 +186,9 @@ func TestProductionProfileContents(t *testing.T) {
 // acceptance run, or skips when no server is available.
 func productionPGDSN(t *testing.T) (dsn string, cleanup func()) {
 	t.Helper()
+	if dsn := os.Getenv("BEAR_PRODUCTION_PG_DSN"); dsn != "" {
+		return dsn, func() {}
+	}
 	if dsn := os.Getenv("BEAR_INTEGRATION_PG_DSN"); dsn != "" {
 		return dsn, func() {}
 	}
@@ -207,8 +217,12 @@ func productionPGDSN(t *testing.T) (dsn string, cleanup func()) {
 // project builds from zero, migrates, serves CRUD against a real database,
 // and exits cleanly on TERM.
 func TestProductionProfileBuildsBootsAndExits(t *testing.T) {
+	productionMode := os.Getenv("BEAR_PRODUCTION_PG_DSN") != ""
 	dsn, cleanup := productionPGDSN(t)
 	defer cleanup()
+	if !productionMode {
+		t.Log("NOT_RUN: production TLS boot requires BEAR_PRODUCTION_PG_DSN; exercising native profile against disposable PostgreSQL")
+	}
 
 	project := filepath.Join(t.TempDir(), "production-boot")
 	if err := Generate(context.Background(), Options{
@@ -229,8 +243,15 @@ func TestProductionProfileBuildsBootsAndExits(t *testing.T) {
 		t.Fatalf("gen api failed (%d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 	runGo(t, project, "mod", "tidy")
-	runGo(t, project, "run", "./cmd/migrate")
 	runGo(t, project, "test", "./...")
+	runGo(t, project, "build", "-o", filepath.Join(project, "bin", "migrate"), "./cmd/migrate")
+	if productionMode {
+		t.Setenv("BEAR_ENV", "prod")
+		t.Setenv("GIN_MODE", "release")
+	}
+	if stdout, stderr, code := runCommand(t, project, filepath.Join(project, "bin", "migrate")); code != 0 {
+		t.Fatalf("native migrate failed (%d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
 	runGo(t, project, "build", "-o", filepath.Join(project, "bin", "server"), "./cmd/server")
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -291,19 +312,8 @@ func TestProductionProfileBuildsBootsAndExits(t *testing.T) {
 // acceptance run exercises the documented configuration shape.
 func writeProductionTestConfig(t *testing.T, project, dsn string) {
 	t.Helper()
-	parsed, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("parse test DSN: %v", err)
-	}
-	password, _ := parsed.User.Password()
-	port := parsed.Port()
-	if port == "" {
-		port = "5432"
-	}
 	config := "server:\n  port: 8080\n  name: production-boot\ndatabase:\n  enabled: true\n  type: \"postgres\"\n" +
-		"  host: \"" + parsed.Hostname() + "\"\n  port: \"" + port + "\"\n  user: \"" + parsed.User.Username() +
-		"\"\n  password: \"" + password + "\"\n  dbname: \"" + strings.TrimPrefix(parsed.Path, "/") +
-		"\"\nconfig:\n  framework.response_mode: \"envelope\"\n"
+		"  dsn: " + strconv.Quote(dsn) + "\nconfig:\n  framework.strict: true\n  framework.allow_compatibility_in_production: false\n  framework.response_mode: \"envelope\"\n"
 	if err := os.WriteFile(filepath.Join(project, "application.yaml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}

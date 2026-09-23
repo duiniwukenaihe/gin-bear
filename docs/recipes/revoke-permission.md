@@ -1,7 +1,6 @@
 # Recipe: revoke a permission safely
 
-Goal: remove access so the next authorization denies, on one instance and
-then across instances.
+Goal: remove access so the next authorization denies across instances.
 
 Single instance (legacy interface):
 
@@ -25,9 +24,11 @@ Rules: only three string parameters per call (`sub, obj, act` for policies,
 Non-empty `Scope` is rejected — tenant checks belong in a custom
 `Authorizer` plus database conditions, never in the Casbin call.
 
-Cluster: repeat `LoadPolicy` on every instance and collect success
-confirmation; instances that never confirm must stop receiving protected
-traffic. A lean local check of this boundary lives in
-`TestCasbinAuthorizerMultiInstanceReload`.
+Cluster: with a persistent adapter, every `Authorize` reloads the policy
+before deciding. A committed revocation on one instance therefore reaches
+the next authorization on every instance. Reload errors fail closed and
+require an explicit successful `LoadPolicy` to recover. Plan for one database
+policy read per authorization and test capacity at the expected traffic rate.
+`TestCasbinAuthorizerMultiInstanceReload` covers the cross-instance boundary.
 
 Verify: `go test ./pkg/bear -run 'TestCasbinRevocation|TestCasbinAuthorizer' -count=1`.

@@ -268,18 +268,21 @@ request authorization and policy writes.
 For online policy changes use the controlled `CasbinAuthorizer` with the
 existing `Authorizer`/`PermissionFairing` contract and explicit resource and
 action (for example `/secret`, `GET`). It serializes reads and writes on one
-`RWMutex`, validates policy/grouping arity against the model before writing
+`RWMutex`, refreshes persisted policy before decisions and mutations,
+validates policy/grouping arity against the model before writing
 (malformed rules are rejected without touching memory or the database),
 revokes immediately for authorizations started after a successful write, fails
 closed (errors, never a stale allow) when persistence or reload fails, accepts
 only the three-parameter RBAC model, and rejects non-empty `Scope` instead of
 dropping tenant/project scope silently. Memory-mode instances have no backend
 to reload from, so `LoadPolicy` returns a recognizable error and keeps serving
-the existing policy. Each instance owns
-independent in-memory policy: a shared database is not shared memory, so every
-instance must successfully `LoadPolicy` (driven by the deployment
-control plane with confirmation and unconfirmed-instance drain) before a
-revocation can be called cluster-wide.
+the existing policy. With a persistent adapter, each authorization reloads
+policy from the database before enforcing. A revocation committed by another
+instance is therefore visible to the next authorization; a reload failure
+returns an error and requires a successful explicit `LoadPolicy` to recover.
+This performs a database read and takes the instance's authorizer lock on
+every authorization and policy mutation. Capacity-test the policy database at
+the expected authorization rate before enabling this mode in production.
 
 ## Runtime agent (experimental)
 
@@ -291,6 +294,28 @@ credentials; a successful vendor call proves reachability, not production
 readiness. Durable tasks add approval-gated writes with leases, fencing, and
 idempotency. Do not enable write tools without approvals, revocation-tested
 authorization, and rehearsed alert/shutdown/rollback steps.
+When mounting task status, approval, or reconciliation endpoints, configure
+`Handler.TaskAuthorize` with a trusted application policy for each action
+(`status`, `approve`, `confirm-unknown`, `requeue-unknown`). The callback receives
+the authenticated identity and stored task. A missing callback denies access;
+the task owner cannot approve their own write. Tenant matching alone is not an
+operator grant. Run the task migration before accepting work: submission,
+approval, completion, and unknown-result reconciliation of write tasks are
+recorded in `agent_task_audit` in the same database transaction as the task
+state change. Protect that table with the same access control, backup, and
+retention policy as task records.
+
+Every write worker must also set `Worker.WriteAuthorize` to a live,
+authoritative application-policy check for the stored task and its approved
+arguments. The worker calls it immediately before recording execution intent;
+an absent callback or a failed check prevents execution. The store's local
+`PolicyVersion` cannot by itself detect a revocation made on another process.
+The external write executor must use the persisted `ExecNonce` as its
+idempotency key. Once intent is recorded, any executor error leaves the task
+in `unknown` with its budget reservation held, even if the error is marked
+retryable. Requeue only after an operator verifies the external effect did not
+occur; confirm the observed effect and usage otherwise. A write integration
+without that idempotency and reconciliation contract is not production ready.
 
 ## Request Context and Transactions
 

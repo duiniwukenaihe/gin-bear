@@ -240,9 +240,9 @@ func sharedAuthorizerDB(t *testing.T) (*gorm.DB, *GormAdapter, *GormAdapter) {
 	return db, &GormAdapter{DB: db}, &GormAdapter{DB: db}
 }
 
-// TestCasbinAuthorizerMultiInstanceReload documents the §3.4 boundary: a
-// shared database is not shared memory. B keeps allowing after A's revocation
-// until B successfully reloads; a failed reload fails closed.
+// TestCasbinAuthorizerMultiInstanceReload requires a persisted revocation to
+// take effect on the other instance's next authorization without an external
+// notification or an operator-triggered reload.
 func TestCasbinAuthorizerMultiInstanceReload(t *testing.T) {
 	_, firstAdapter, secondAdapter := sharedAuthorizerDB(t)
 	first, err := NewCasbinAuthorizer(firstAdapter, nil)
@@ -269,18 +269,37 @@ func TestCasbinAuthorizerMultiInstanceReload(t *testing.T) {
 	if _, err := first.RemoveGroupingPolicy("alice", "admin"); err != nil {
 		t.Fatalf("first RemoveGroupingPolicy failed: %v", err)
 	}
-	// No auto-reload: the un-notified instance still allows. This is the
-	// control-plane gap called out in §3.4, not a local failure.
-	if allowed, err := second.Authorize(context.Background(), request); err != nil || !allowed {
-		t.Fatalf("second Authorize before reload = %v, %v; want stale true, nil", allowed, err)
-	}
-	if err := second.LoadPolicy(); err != nil {
-		t.Fatalf("second reload failed: %v", err)
-	}
 	if allowed, err := second.Authorize(context.Background(), request); err != nil {
-		t.Fatalf("second Authorize after reload failed: %v", err)
+		t.Fatalf("second Authorize after remote revocation failed: %v", err)
 	} else if allowed {
-		t.Fatal("second Authorize after reload = true, want false")
+		t.Fatal("second Authorize after remote revocation = true, want false")
+	}
+}
+
+func TestCasbinAuthorizerRemoteRevocationWithoutPriorRead(t *testing.T) {
+	_, firstAdapter, secondAdapter := sharedAuthorizerDB(t)
+	first, err := NewCasbinAuthorizer(firstAdapter, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewCasbinAuthorizer(secondAdapter, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.AddPolicy("admin", "/secret", "GET"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.AddGroupingPolicy("alice", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	// The second instance has never authorized or reloaded since the grant.
+	// Revocation still has to remove the persisted rule.
+	if removed, err := second.RemoveGroupingPolicy("alice", "admin"); err != nil || !removed {
+		t.Fatalf("remote RemoveGroupingPolicy = %v, %v; want true, nil", removed, err)
+	}
+	request := AuthorizationRequest{Subject: "alice", Resource: "/secret", Action: "GET"}
+	if allowed, err := first.Authorize(context.Background(), request); err != nil || allowed {
+		t.Fatalf("first Authorize after remote revoke = %v, %v; want false, nil", allowed, err)
 	}
 }
 

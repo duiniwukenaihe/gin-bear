@@ -194,6 +194,70 @@ func TestRevocationDeniesNextToolCall(t *testing.T) {
 	}
 }
 
+// TestToolCallMetricsAndAuditComeFromEnforcementPoint proves the per-tool-call
+// counters and audit fields are fed by the real invoke path, not only by direct
+// method calls in tests: a denial must increment denials (so the alert fires)
+// and every tool call must carry its name and an argument digest.
+func TestToolCallMetricsAndAuditComeFromEnforcementPoint(t *testing.T) {
+	metrics := &Metrics{}
+	auditor := NewAuditor(10)
+	executed := &atomic.Bool{}
+	allow := true
+	registry := testRegistry(t, executed, "ok", func(_ context.Context, _ Identity, _ map[string]any) error {
+		if !allow {
+			return errors.New("policy denied")
+		}
+		return nil
+	})
+	newRunner := func() *Runner {
+		return &Runner{
+			Model: NewFakeChatModel(WithScript(
+				FakeToolCall("c1", "get_order", `{"order_id":"1"}`),
+				FakeText("done"),
+			)),
+			Tools: registry, Metrics: metrics, Auditor: auditor,
+		}
+	}
+	identity := Identity{UserID: "u1", TenantID: "t1"}
+	input := []*schema.Message{{Role: schema.User, Content: "x"}}
+	if _, err := newRunner().Run(context.Background(), identity, input); err != nil {
+		t.Fatalf("allowed run: %v", err)
+	}
+	allow = false
+	if _, err := newRunner().Run(context.Background(), identity, input); err != nil {
+		t.Fatalf("denied run: %v", err)
+	}
+
+	snapshot := metrics.Snapshot()
+	if snapshot["tool:get_order\x00ok"] != 1 {
+		t.Fatalf("allowed tool call not counted: %v", snapshot)
+	}
+	if snapshot["tool:get_order\x00denied"] != 1 {
+		t.Fatalf("denied tool call not counted: %v", snapshot)
+	}
+	if snapshot["denials"] != 1 {
+		t.Fatalf("denials = %d, want 1 (alerts would never fire): %v", snapshot["denials"], snapshot)
+	}
+
+	records, _ := auditor.Snapshot()
+	var toolRecords int
+	for _, record := range records {
+		if record.Tool != "get_order" {
+			continue
+		}
+		toolRecords++
+		if record.ArgsDigest == "" {
+			t.Fatalf("tool audit record missing args digest: %+v", record)
+		}
+		if record.Actor != "u1" || record.Tenant != "t1" {
+			t.Fatalf("tool audit record lost identity: %+v", record)
+		}
+	}
+	if toolRecords != 2 {
+		t.Fatalf("tool audit records = %d, want 2 (one per call): %+v", toolRecords, records)
+	}
+}
+
 func TestQuotasBoundConcurrentRuns(t *testing.T) {
 	releaseTool := make(chan struct{})
 	registry, err := NewRegistry(&Tool{

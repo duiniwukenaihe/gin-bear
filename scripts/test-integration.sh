@@ -21,6 +21,11 @@
 #                               report NOT_RUN instead of passing.
 #   BEAR_INTEGRATION_REDIS_ADDR redis addr, default 127.0.0.1:6379; when the
 #                               server is unreachable, Redis subtests NOT_RUN.
+#   BEAR_INTEGRATION_REQUIRE    comma list of engines that must be available
+#                               (pg, mysql, redis). When one is missing the run
+#                               fails with exit 3 instead of degrading to a
+#                               NOT_RUN skip. CI sets this so a release cannot
+#                               pass without exercising the engines it provides.
 #   BEAR_INTEGRATION_KEEP_DB=1  keep the disposable database for inspection.
 set -euo pipefail
 
@@ -111,6 +116,50 @@ fi
 
 if [ -z "${BEAR_INTEGRATION_REDIS_ADDR:-}" ]; then
   export BEAR_INTEGRATION_REDIS_ADDR="127.0.0.1:6379"
+fi
+
+# Probe TCP reachability early; the Go test also checks the Redis protocol.
+# A required Redis engine fails the run if that protocol check fails.
+redis_probe_ok=0
+redis_host="${BEAR_INTEGRATION_REDIS_ADDR%:*}"
+redis_port="${BEAR_INTEGRATION_REDIS_ADDR##*:}"
+if (exec 3<>"/dev/tcp/${redis_host}/${redis_port}") 2>/dev/null; then
+  redis_probe_ok=1
+fi
+
+# Required-engine enforcement: a listed engine that is unavailable fails the
+# run instead of degrading to a NOT_RUN skip. Local runs leave the variable
+# unset and keep the historical NOT_RUN behavior.
+require_invalid=""
+require_missing=""
+if [ -n "${BEAR_INTEGRATION_REQUIRE:-}" ]; then
+  IFS=',' read -r -a require_engines <<<"${BEAR_INTEGRATION_REQUIRE}"
+  for require_engine in "${require_engines[@]}"; do
+    require_engine="$(printf '%s' "${require_engine}" | tr -d '[:space:]')"
+    [ -z "${require_engine}" ] && continue
+    case "${require_engine}" in
+    pg)
+      [ -n "${BEAR_INTEGRATION_PG_DSN:-}" ] || require_missing="${require_missing} pg"
+      ;;
+    mysql)
+      [ -n "${BEAR_INTEGRATION_MYSQL_DSN:-}" ] || require_missing="${require_missing} mysql"
+      ;;
+    redis)
+      [ "${redis_probe_ok}" = "1" ] || require_missing="${require_missing} redis"
+      ;;
+    *)
+      require_invalid="${require_invalid} ${require_engine}"
+      ;;
+    esac
+  done
+fi
+if [ -n "${require_invalid}" ]; then
+  echo "BEAR_INTEGRATION_REQUIRE has unsupported engines:${require_invalid} (want pg, mysql, redis)" >&2
+  exit 3
+fi
+if [ -n "${require_missing}" ]; then
+  echo "BEAR_INTEGRATION_REQUIRE demands engines that are unavailable:${require_missing}" >&2
+  exit 3
 fi
 
 export BEAR_INTEGRATION=1

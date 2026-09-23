@@ -11,8 +11,9 @@ All notable changes to gin-bear are documented in this file.
   `RWMutex` for reads/writes/reloads, immediate revocation for authorizations
   started after a successful write, fail-closed reads after persistence/reload
   failures, three-parameter RBAC only with explicit `Scope` rejection, and
-  independent in-memory policy per instance (cluster revocation still needs a
-  control-plane `LoadPolicy` confirmation/drain per instance).
+  independent in-memory policy per instance; persistent instances reload
+  policy before each authorization so cross-instance revocation is visible
+  on the next decision, with a database read per authorization.
 - Versioned engineering docs (`docs/development.md`, `docs/architecture.md`,
   `docs/recipes/`) and `bear agent init`, which scaffolds the local,
   never-committed `AGENTS.md` entry, maintains `.gitignore`, and verifies
@@ -79,21 +80,25 @@ All notable changes to gin-bear are documented in this file.
   request-scoped values reach GORM. Operations that previously ignored
   cancellation now return `context.Canceled`/`DeadlineExceeded`.
 
-- The pinned Go toolchain moved from `go1.25.12` to `go1.25.14`, and the
+- The pinned Go toolchain moved from `go1.25.12` through `go1.25.14` to
+  `go1.26.6` (all three modules' `go` directive and the pinned `GOTOOLCHAIN`),
+  and the
   dependencies carrying reachable vulnerabilities were raised, so `govulncheck`
-  reports no vulnerabilities again: `google.golang.org/grpc` v1.82.1 → v1.83.2
+  reports no reachable vulnerabilities: `google.golang.org/grpc` v1.82.1 → v1.83.2
   (GO-2026-6348, GO-2026-6443), `golang.org/x/net` v0.53.0 → v0.58.0
   (GO-2026-5026), plus the standard-library fixes shipped by the patch release
   (GO-2026-6088, GO-2026-6089, GO-2026-6090, GO-2026-6091, GO-2026-6218,
-  GO-2026-5972). `x/crypto`, `x/mod`, `x/sync`, `x/sys`, `x/text`, the
+  GO-2026-5972). `x/crypto` v0.56.0 still carries GO-2026-5932, which has no
+  fixed release and is not reachable on any call path; it is recorded as
+  accepted risk. `x/mod`, `x/sync`, `x/sys`, `x/text`, the
   OpenTelemetry modules, and the `genproto` pseudo-versions move forward as their
   requirements. The OpenTelemetry upgrade deprecated `attribute.Value.Emit`, so
   the one caller — the tracing redaction test — now uses
   `attribute.Value.String`, which returns the same `stringly` value for a STRING
   attribute; the leak assertion was re-verified by temporarily reintroducing an
   `error.message` attribute and watching the test fail. New scaffolds write
-  `go 1.25.14`, and the documented `make verify` command uses
-  `GOTOOLCHAIN=go1.25.14`. The runbook's dated v0.9.2 audit sections keep the
+  `go 1.26.6`, and the documented `make verify` command uses
+  `GOTOOLCHAIN=go1.26.6`. The runbook's dated v0.9.2 audit sections keep the
   toolchain they actually recorded.
 - `cmd/bear` no longer carries a second copy of the resource-name-to-identifier
   helpers. Unifying the commands moved generation into `internal/cli`, which owns

@@ -72,6 +72,31 @@ func (h *Handler) loadOwnTask(ctx *gin.Context, identity Identity) (*tasks.Task,
 	return task, true
 }
 
+func (h *Handler) authorizeTask(ctx *gin.Context, identity Identity, task *tasks.Task, action string) bool {
+	if action == "approve" && identity.UserID == task.Owner {
+		h.auditTask(identity, "task:"+action, "denied", task.ApprovalID)
+		ctx.JSON(http.StatusForbidden, gin.H{"error": "task operation forbidden"})
+		return false
+	}
+	if h.TaskAuthorize == nil {
+		h.auditTask(identity, "task:"+action, "denied", task.ApprovalID)
+		ctx.JSON(http.StatusForbidden, gin.H{"error": "task operation forbidden"})
+		return false
+	}
+	allowed, err := h.TaskAuthorize(ctx.Request.Context(), identity, task, action)
+	if err != nil {
+		h.auditTask(identity, "task:"+action, "error", task.ApprovalID)
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "task authorization unavailable"})
+		return false
+	}
+	if !allowed {
+		h.auditTask(identity, "task:"+action, "denied", task.ApprovalID)
+		ctx.JSON(http.StatusForbidden, gin.H{"error": "task operation forbidden"})
+		return false
+	}
+	return true
+}
+
 // TaskStatus serves GET /agent/tasks/:id.
 func (h *Handler) TaskStatus(ctx *gin.Context) {
 	identity, err := h.identity(ctx)
@@ -81,6 +106,9 @@ func (h *Handler) TaskStatus(ctx *gin.Context) {
 	}
 	task, ok := h.loadOwnTask(ctx, identity)
 	if !ok {
+		return
+	}
+	if !h.authorizeTask(ctx, identity, task, "status") {
 		return
 	}
 	ctx.JSON(http.StatusOK, summarizeTask(task))
@@ -101,6 +129,9 @@ func (h *Handler) TaskApprove(ctx *gin.Context) {
 	}
 	task, ok := h.loadOwnTask(ctx, identity)
 	if !ok {
+		return
+	}
+	if !h.authorizeTask(ctx, identity, task, "approve") {
 		return
 	}
 	var request approveRequest
@@ -139,13 +170,20 @@ func (h *Handler) TaskConfirmUnknown(ctx *gin.Context) {
 	if !ok {
 		return
 	}
+	if !h.authorizeTask(ctx, identity, task, "confirm-unknown") {
+		return
+	}
 	var request confirmUnknownRequest
 	if err := ctx.ShouldBindJSON(&request); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON body"})
 		return
 	}
+	if request.Usage < 0 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "usage cannot be negative"})
+		return
+	}
 	store, _ := h.taskStore()
-	confirmed, err := store.ConfirmUnknown(ctx.Request.Context(), task.ID, request.Result, request.Usage)
+	confirmed, err := store.ConfirmUnknownAs(ctx.Request.Context(), task.ID, identity.UserID, request.Result, request.Usage)
 	if err != nil {
 		h.auditTask(identity, "task:confirm-unknown", "denied", task.ApprovalID)
 		ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -166,8 +204,11 @@ func (h *Handler) TaskRequeueUnknown(ctx *gin.Context) {
 	if !ok {
 		return
 	}
+	if !h.authorizeTask(ctx, identity, task, "requeue-unknown") {
+		return
+	}
 	store, _ := h.taskStore()
-	requeued, err := store.RequeueUnknown(ctx.Request.Context(), task.ID)
+	requeued, err := store.RequeueUnknownAs(ctx.Request.Context(), task.ID, identity.UserID)
 	if err != nil {
 		h.auditTask(identity, "task:requeue-unknown", "denied", task.ApprovalID)
 		ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})

@@ -92,6 +92,8 @@ func okExecutor(result string) func(context.Context, *Task) Outcome {
 	return func(context.Context, *Task) Outcome { return Outcome{Result: result} }
 }
 
+func allowWrite(context.Context, *Task) error { return nil }
+
 func TestSubmitIsIdempotent(t *testing.T) {
 	store := openSQLite(t)
 	ctx := context.Background()
@@ -239,7 +241,7 @@ func TestWriteExecutesAfterApprovalAndRespectsPolicyBump(t *testing.T) {
 	task := submitWrite(t, store, "t1", "w1")
 	approveTask(t, store, task, "op")
 
-	worker := &Worker{Store: store, Owner: "w1", Executor: okExecutor("wrote")}
+	worker := &Worker{Store: store, Owner: "w1", Executor: okExecutor("wrote"), WriteAuthorize: allowWrite}
 	finished, err := worker.RunOnce(ctx)
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -487,13 +489,17 @@ func TestPostgresVariant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	worker := &Worker{Store: store, Owner: "w1", Executor: okExecutor("pg-done")}
+	worker := &Worker{Store: store, Owner: "w1", Executor: okExecutor("pg-done"), WriteAuthorize: allowWrite}
 	finished, err := worker.RunOnce(ctx)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if finished.Status != StatusSucceeded || finished.Result != "pg-done" {
 		t.Fatalf("task = %+v", finished)
+	}
+	var auditCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_task_audit WHERE task_id = $1 AND action IN ('submit', 'approve', 'complete')`, task.ID).Scan(&auditCount); err != nil || auditCount != 3 {
+		t.Fatalf("PostgreSQL durable audit count = %d, %v; want 3", auditCount, err)
 	}
 	_ = approved
 }
@@ -689,7 +695,7 @@ func TestWriteCrashReconcilesInsteadOfRetrying(t *testing.T) {
 	approveTask(t, store, task, "op")
 
 	effects := map[string]int{}
-	worker := &Worker{Store: store, Owner: "w1", WriteReserveTokens: 200, Executor: func(_ context.Context, task *Task) Outcome {
+	worker := &Worker{Store: store, Owner: "w1", WriteReserveTokens: 200, WriteAuthorize: allowWrite, Executor: func(_ context.Context, task *Task) Outcome {
 		effects[task.ExecNonce]++
 		return Outcome{Result: "wrote", Usage: 60}
 	}}
@@ -759,7 +765,7 @@ func TestDefaultWorkerWriteCrashReconcilesInsteadOfRetrying(t *testing.T) {
 	approveTask(t, store, task, "op")
 
 	effects := map[string]int{}
-	worker := &Worker{Store: store, Owner: "w1", Executor: func(_ context.Context, task *Task) Outcome {
+	worker := &Worker{Store: store, Owner: "w1", WriteAuthorize: allowWrite, Executor: func(_ context.Context, task *Task) Outcome {
 		effects[task.ExecNonce]++
 		return Outcome{Result: "wrote", Usage: 60}
 	}}
@@ -824,7 +830,7 @@ func TestUnknownRequeueRequiresFreshApproval(t *testing.T) {
 	task := submitWrite(t, store, "t1", "w1")
 	approveTask(t, store, task, "op")
 	var executions int
-	worker := &Worker{Store: store, Owner: "w1", WriteReserveTokens: 200, Executor: func(context.Context, *Task) Outcome {
+	worker := &Worker{Store: store, Owner: "w1", WriteReserveTokens: 200, WriteAuthorize: allowWrite, Executor: func(context.Context, *Task) Outcome {
 		executions++
 		return Outcome{Result: "wrote"}
 	}}
@@ -1008,7 +1014,7 @@ func TestConcurrentApproveAndRequeueSingleWinner(t *testing.T) {
 		ctx := context.Background()
 		task := submitWrite(t, a, "t1", "k-requeue")
 		approveTask(t, a, task, "op")
-		worker := &Worker{Store: a, Owner: "w1", Executor: okExecutor("x")}
+		worker := &Worker{Store: a, Owner: "w1", Executor: okExecutor("x"), WriteAuthorize: allowWrite}
 		a.Hooks.BeforeStore = func(*Task) error { return errors.New("crash") }
 		if _, err := worker.RunOnce(ctx); err == nil {
 			t.Fatal("crash swallowed")
@@ -1070,6 +1076,323 @@ func TestConcurrentApproveAndRequeueSingleWinner(t *testing.T) {
 			t.Fatalf("task = %s, want canceled", canceled.Status)
 		}
 	})
+}
+
+// openPairWithController is openPair plus a third connection that can hold a
+// row's write lock, forcing a deterministic read-before-write interleaving
+// for cross-instance reconciliation races instead of a timing guess.
+func openPairWithController(t *testing.T) (*Store, *Store, *sql.DB) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "confirm.db")
+	open := func() *sql.DB {
+		db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return db
+	}
+	first, second, controller := open(), open(), open()
+	up, err := MigrationUp("sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range splitStatements(up) {
+		if _, err := first.Exec(stmt); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+	}
+	a, err := Open(first, "sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Open(second, "sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, b, controller
+}
+
+// TestConcurrentConfirmUnknownSingleWinner proves ConfirmUnknown fences on the
+// unknown state and the version it read: two instances reconciling the same
+// unconfirmed write produce exactly one winner and never a lost update.
+func TestConcurrentConfirmUnknownSingleWinner(t *testing.T) {
+	a, b, controller := openPairWithController(t)
+	ctx := context.Background()
+	task := submitWrite(t, a, "t1", "k-confirm")
+	approveTask(t, a, task, "op")
+	worker := &Worker{Store: a, Owner: "w1", WriteReserveTokens: 200, Executor: okExecutor("wrote"), WriteAuthorize: allowWrite}
+	a.Hooks.BeforeStore = func(*Task) error { return errors.New("crash") }
+	if _, err := worker.RunOnce(ctx); err == nil {
+		t.Fatal("crash swallowed")
+	}
+	a.Hooks.BeforeStore = nil
+	expireLease(t, a, task.ID)
+	if _, err := a.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, err := a.Get(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Status != StatusUnknown {
+		t.Fatalf("status = %s, want unknown", before.Status)
+	}
+
+	// Hold the row's write lock so both reconcilers read the same version
+	// before either can commit, then release and let them race.
+	lock, err := controller.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lock.ExecContext(ctx, `UPDATE agent_tasks SET updated_at = updated_at WHERE id = ?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, err := a.ConfirmUnknown(ctx, task.ID, "wrote-a", 60); results <- err }()
+	go func() { defer wg.Done(); _, err := b.ConfirmUnknown(ctx, task.ID, "wrote-b", 60); results <- err }()
+	time.Sleep(500 * time.Millisecond)
+	if err := lock.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	close(results)
+	var succeeded, refused int
+	for err := range results {
+		if err == nil {
+			succeeded++
+		} else {
+			refused++
+		}
+	}
+	if succeeded != 1 || refused != 1 {
+		t.Fatalf("confirm race: %d won, %d refused; want exactly one winner", succeeded, refused)
+	}
+	after, err := a.Get(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != StatusSucceeded {
+		t.Fatalf("status = %s, want succeeded", after.Status)
+	}
+	if after.Version != before.Version+1 {
+		t.Fatalf("version = %d, want %d (exactly one settlement)", after.Version, before.Version+1)
+	}
+	wantBudget := before.BudgetTokens + before.ReservedTokens - 60
+	if after.BudgetTokens != wantBudget || after.ReservedTokens != 0 {
+		t.Fatalf("budget = %d reserved = %d, want %d/0", after.BudgetTokens, after.ReservedTokens, wantBudget)
+	}
+}
+
+func TestCompleteRejectsNegativeUsage(t *testing.T) {
+	store := openSQLite(t)
+	ctx := context.Background()
+	submitReadonly(t, store, "t1", "negative-complete")
+	task, err := store.Claim(ctx, "w1", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Complete(ctx, task.ID, task.Version, Outcome{Result: "ok", Usage: -1}); err == nil {
+		t.Fatal("negative usage was accepted")
+	}
+	after, err := store.Get(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != StatusRunning || after.BudgetTokens != task.BudgetTokens {
+		t.Fatalf("negative usage changed task: %+v", after)
+	}
+}
+
+func TestWriteApprovalAuditSurvivesStoreReopen(t *testing.T) {
+	first, second := openPair(t)
+	ctx := context.Background()
+	task := submitWrite(t, first, "t1", "audit-write")
+	if _, err := first.Approve(ctx, task.ApprovalID, "reviewer", task.Args); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := second.db.QueryContext(ctx, `SELECT action, actor FROM agent_task_audit WHERE task_id = ? ORDER BY created_at, id`, task.ID)
+	if err != nil {
+		t.Fatalf("read durable audit from independent store: %v", err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var action, actor string
+		if err := rows.Scan(&action, &actor); err != nil {
+			t.Fatal(err)
+		}
+		got[action] = actor
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if got["submit"] != "u1" || got["approve"] != "reviewer" {
+		t.Fatalf("durable write audit = %v, want submit:u1 and approve:reviewer", got)
+	}
+}
+
+func TestStoreRejectsSelfApproval(t *testing.T) {
+	store := openSQLite(t)
+	ctx := context.Background()
+	task := submitWrite(t, store, "t1", "self-approval")
+	if _, err := store.Approve(ctx, task.ApprovalID, task.Owner, task.Args); err == nil {
+		t.Fatal("task owner approved their own write")
+	}
+	approved, err := store.Approve(ctx, task.ApprovalID, "reviewer", task.Args)
+	if err != nil || approved.Status != StatusQueued {
+		t.Fatalf("independent reviewer approve = %+v, %v", approved, err)
+	}
+}
+
+func TestWriteCompletionAuditIsAtomic(t *testing.T) {
+	store := openSQLite(t)
+	ctx := context.Background()
+	task := submitWrite(t, store, "t1", "audit-complete")
+	if _, err := store.Approve(ctx, task.ApprovalID, "reviewer", task.Args); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Complete(ctx, claimed.ID, claimed.Version, Outcome{Result: "ok", Usage: 7}); err != nil {
+		t.Fatal(err)
+	}
+	var actor string
+	if err := store.db.QueryRowContext(ctx, `SELECT actor FROM agent_task_audit WHERE task_id = ? AND action = 'complete'`, task.ID).Scan(&actor); err != nil {
+		t.Fatalf("completion audit missing: %v", err)
+	}
+	if actor != "worker" {
+		t.Fatalf("completion actor = %q, want worker", actor)
+	}
+	other := submitWrite(t, store, "t1", "audit-rollback")
+	if _, err := store.Approve(ctx, other.ApprovalID, "reviewer", other.Args); err != nil {
+		t.Fatal(err)
+	}
+	running, err := store.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if running.ID != other.ID {
+		t.Fatalf("claimed %s, want %s", running.ID, other.ID)
+	}
+	if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER reject_audit BEFORE INSERT ON agent_task_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Complete(ctx, running.ID, running.Version, Outcome{Result: "ok", Usage: 7}); err == nil {
+		t.Fatal("completion committed without audit")
+	}
+	after, err := store.Get(ctx, running.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != StatusRunning || after.Version != running.Version {
+		t.Fatalf("audit failure changed task: %+v", after)
+	}
+}
+
+func TestUnknownWriteKeepsReservationUntilConfirmation(t *testing.T) {
+	store := openSQLite(t)
+	ctx := context.Background()
+	task := submitWrite(t, store, "t1", "unknown-reservation")
+	if _, err := store.Approve(ctx, task.ApprovalID, "reviewer", task.Args); err != nil {
+		t.Fatal(err)
+	}
+	running, err := store.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := store.Reserve(ctx, running.ID, running.Version, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown, err := store.Complete(ctx, reserved.ID, reserved.Version, Outcome{Err: ErrUnknownResult, Usage: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unknown.Status != StatusUnknown || unknown.ReservedTokens != 100 || unknown.BudgetTokens != 900 {
+		t.Fatalf("unknown write settled before confirmation: %+v", unknown)
+	}
+	confirmed, err := store.ConfirmUnknownAs(ctx, task.ID, "reconciler", "wrote", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.BudgetTokens != 940 || confirmed.ReservedTokens != 0 {
+		t.Fatalf("confirmed budget = %+v, want 940/0", confirmed)
+	}
+}
+
+func TestWriteExecutionErrorNeverBlindRetries(t *testing.T) {
+	store := openSQLite(t)
+	ctx := context.Background()
+	task := submitWrite(t, store, "t1", "write-transient")
+	approveTask(t, store, task, "reviewer")
+	var calls int
+	worker := &Worker{Store: store, Owner: "worker", WriteReserveTokens: 100, WriteAuthorize: allowWrite, Executor: func(_ context.Context, task *Task) Outcome {
+		calls++
+		if task.ExecNonce == "" {
+			t.Fatal("write executor received no persisted nonce")
+		}
+		return Outcome{Err: errors.New("network timeout after send"), Retryable: true}
+	}}
+	first, err := worker.RunOnce(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != StatusUnknown || first.ReservedTokens != 100 {
+		t.Fatalf("uncertain write = %+v, want unknown with reservation", first)
+	}
+	if _, err := worker.RunOnce(ctx); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("uncertain write was scheduled again: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("write executed %d times, want once", calls)
+	}
+}
+
+func TestWriteWorkerRequiresLiveAuthorization(t *testing.T) {
+	store := openSQLite(t)
+	ctx := context.Background()
+	task := submitWrite(t, store, "t1", "live-auth-required")
+	approveTask(t, store, task, "reviewer")
+	called := false
+	worker := &Worker{Store: store, Owner: "worker", Executor: func(context.Context, *Task) Outcome {
+		called = true
+		return Outcome{Result: "wrote"}
+	}}
+	finished, err := worker.RunOnce(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Status != StatusFailed || called {
+		t.Fatalf("missing live policy executed write: task=%+v called=%v", finished, called)
+	}
+}
+
+func TestWriteWorkerHonorsRemotePolicyRevocation(t *testing.T) {
+	store := openSQLite(t)
+	store.PolicyVersion = "v1"
+	ctx := context.Background()
+	task := submitWrite(t, store, "t1", "remote-revocation")
+	approveTask(t, store, task, "reviewer")
+	called := false
+	worker := &Worker{Store: store, Owner: "worker",
+		WriteAuthorize: func(context.Context, *Task) error { return errors.New("revoked in policy database") },
+		Executor: func(context.Context, *Task) Outcome {
+			called = true
+			return Outcome{Result: "wrote"}
+		},
+	}
+	finished, err := worker.RunOnce(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Status != StatusFailed || finished.ExecNonce != "" || called {
+		t.Fatalf("remote revocation executed write: task=%+v called=%v", finished, called)
+	}
 }
 
 // TestRenewLeaseExtendsAndFences proves renewal extends only the caller's
@@ -1152,7 +1475,7 @@ func TestReservationRefusesOverBudget(t *testing.T) {
 	}
 	approveTask(t, store, task, "op")
 	called := false
-	worker := &Worker{Store: store, Owner: "w1", WriteReserveTokens: 200, Executor: func(context.Context, *Task) Outcome {
+	worker := &Worker{Store: store, Owner: "w1", WriteReserveTokens: 200, WriteAuthorize: allowWrite, Executor: func(context.Context, *Task) Outcome {
 		called = true
 		return Outcome{Result: "x"}
 	}}

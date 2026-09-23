@@ -189,6 +189,10 @@ func TestGeneratedAPIRegistrationFailureRollsBackResourceAndMetadata(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	goModBefore, err := os.ReadFile(filepath.Join(project, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	appDirectory := filepath.Dir(registryPath)
 	if err := os.Chmod(appDirectory, 0555); err != nil {
 		t.Fatal(err)
@@ -215,6 +219,13 @@ func TestGeneratedAPIRegistrationFailureRollsBackResourceAndMetadata(t *testing.
 	}
 	if !bytes.Equal(manifestAfter, manifestBefore) || !bytes.Equal(registryAfter, registryBefore) {
 		t.Fatalf("failed registration changed metadata\nmanifest before=%safter=%s\nregistry before=%safter=%s", manifestBefore, manifestAfter, registryBefore, registryAfter)
+	}
+	goModAfter, err := os.ReadFile(filepath.Join(project, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(goModAfter, goModBefore) {
+		t.Fatalf("failed registration left dependency pins in go.mod\nbefore=%safter=%s", goModBefore, goModAfter)
 	}
 	assertGenerationLockAbsent(t, project)
 }

@@ -60,8 +60,8 @@ func TestMakeVerifyPreservesQualityGateAndFailureDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(makefile), `scripts/ci-diagnostic.sh "Quality baseline failed" scripts/release-check.sh`) {
-		t.Fatalf("make verify must run release-check.sh through CI diagnostics:\n%s", makefile)
+	if !strings.Contains(string(makefile), `scripts/ci-diagnostic.sh "Quality baseline failed" scripts/verify-all.sh`) {
+		t.Fatalf("make verify must run every module through CI diagnostics:\n%s", makefile)
 	}
 
 	diagnostics, err := os.ReadFile("ci-diagnostic.sh")
@@ -1502,6 +1502,9 @@ func fakeRCRepository(t *testing.T) (string, string, string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(repository, "scripts", "release-check.sh"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "scripts", "verify-modules.sh"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	fakeGo := `#!/usr/bin/env bash

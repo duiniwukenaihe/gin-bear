@@ -4,9 +4,12 @@
 #   golang:1.26.6-bookworm          build toolchain, matches go.mod
 #   gcr.io/distroless/static-debian12:nonroot   runtime, non-root uid 65532
 #
-# Migration is a separate deploy step (run the migrate image/target first);
-# the server never alters schema at startup. Run read-only with a writable
-# /tmp (e.g. docker run --read-only --tmpfs /tmp ...).
+# Migration is a separate deploy step. This image carries both binaries; the
+# server never alters schema at startup. Apply reviewed SQL before starting the
+# new server version:
+#   docker run --read-only --tmpfs /tmp --entrypoint /app/migrate <image>
+# Run the server read-only with a writable /tmp
+# (e.g. docker run --read-only --tmpfs /tmp ...).
 
 FROM golang:1.26.6-bookworm AS build
 WORKDIR /src
@@ -14,10 +17,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
 RUN CGO_ENABLED=0 go build -trimpath -o /out/server ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath -o /out/migrate ./cmd/migrate
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 COPY --from=build /out/server /app/server
+COPY --from=build /out/migrate /app/migrate
 COPY application.yaml /app/application.yaml
 ENV GOTMPDIR=/tmp TMPDIR=/tmp
 EXPOSE 8080

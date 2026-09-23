@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -43,6 +45,12 @@ type Runner struct {
 	// Gate shares admission state across runs. Nil means an isolated gate
 	// with no cross-run limits.
 	Gate *Gate
+	// Auditor and Metrics are optional enforcement-point sinks for per-tool
+	// call facts. Nil disables recording. The Handler wires them from its own
+	// fields so tool-level counters and audit fields are populated by real
+	// invocations, not only by direct calls in tests.
+	Auditor *Auditor
+	Metrics *Metrics
 }
 
 // errBudgetExhausted ends a run before any further vendor spend.
@@ -190,27 +198,34 @@ func (r *Runner) invoke(ctx context.Context, ledger *Ledger, identity Identity, 
 	name := call.Function.Name
 	tool, ok := r.Tools.Lookup(name)
 	if !ok {
+		r.recordToolCall(identity, name, call.Function.Arguments, "error")
 		return toolErrorMessage(call, fmt.Sprintf("unknown tool %q", name)), false, fmt.Errorf("unknown tool %q", name)
 	}
 	args, err := decodeArgs(call.Function.Arguments, tool.MaxArgsBytes)
 	if err != nil {
+		r.recordToolCall(identity, name, call.Function.Arguments, "error")
 		return toolErrorMessage(call, err.Error()), false, err
 	}
 	if err := validateToolArgs(tool.Info, args); err != nil {
+		r.recordToolCall(identity, name, call.Function.Arguments, "error")
 		return toolErrorMessage(call, err.Error()), false, err
 	}
 	if err := tool.Authorize(ctx, identity, args); err != nil {
+		r.recordToolCall(identity, name, call.Function.Arguments, "denied")
 		return toolErrorMessage(call, "not authorized"), false, err
 	}
 	if err := ledger.chargeCall(name); err != nil {
+		r.recordToolCall(identity, name, call.Function.Arguments, "error")
 		return toolErrorMessage(call, err.Error()), false, err
 	}
 	toolCtx, cancel := context.WithTimeout(ctx, r.Budget.ToolTimeout)
 	defer cancel()
 	output, err := tool.Execute(toolCtx, args)
 	if err != nil {
+		r.recordToolCall(identity, name, call.Function.Arguments, "error")
 		return toolErrorMessage(call, err.Error()), true, err
 	}
+	r.recordToolCall(identity, name, call.Function.Arguments, "ok")
 	if len(output) > tool.MaxArgsBytes*4 {
 		output = output[:tool.MaxArgsBytes*4] + "...[truncated]"
 	}
@@ -220,6 +235,31 @@ func (r *Runner) invoke(ctx context.Context, ledger *Ledger, identity Identity, 
 		ToolCallID: call.ID,
 		Name:       name,
 	}, true, nil
+}
+
+// recordToolCall feeds the enforcement-point sinks: one counter and one audit
+// record per proposed call. Denials increment the denial alert counter, and
+// every record carries the tool name and an argument digest, never raw
+// arguments. Nil sinks disable recording.
+func (r *Runner) recordToolCall(identity Identity, name, rawArgs, status string) {
+	if r.Metrics != nil {
+		r.Metrics.AddToolCall(name, status)
+	}
+	if r.Auditor != nil {
+		r.Auditor.Append(AuditRecord{
+			Actor:      identity.UserID,
+			Tenant:     identity.TenantID,
+			Decision:   "tool:" + name,
+			Tool:       name,
+			ArgsDigest: digestArgs(rawArgs),
+			Outcome:    status,
+		})
+	}
+}
+
+func digestArgs(rawArgs string) string {
+	sum := sha256.Sum256([]byte(rawArgs))
+	return hex.EncodeToString(sum[:])
 }
 
 func toolErrorMessage(call schema.ToolCall, detail string) *schema.Message {

@@ -19,9 +19,10 @@ import (
 // CachedEnforcer，不导出底层对象，不提供任意修改回调，不再套一层
 // SyncedEnforcer 形成重复锁体系。
 //
-// 并发契约：Authorize 在读锁内检查可用状态并执行 Enforce；所有写操作和
-// LoadPolicy 在同一把写锁内执行。撤权方法成功返回后才开始的新鉴权必须看到
-// 新策略；已经在撤权之前完成授权的在途业务不在追溯取消范围内。
+// 并发契约：持久化模式每次鉴权都在写锁内重载策略后执行 Enforce，确保另一
+// 实例已提交的撤权在下一次鉴权生效；内存模式继续使用读锁。所有写操作和
+// LoadPolicy 在同一把写锁内执行。持久化模式因此每次鉴权都会访问数据库，
+// 部署时须按鉴权 QPS 规划数据库容量。已授权的在途业务不追溯取消。
 //
 // 失败关闭：后端持久化/加载失败时返回错误并将该 authorizer 标为不可用，
 // 后续鉴权返回错误，不使用可能陈旧的允许策略；成功 LoadPolicy 后才恢复。
@@ -161,16 +162,41 @@ func (a *CasbinAuthorizer) Authorize(ctx context.Context, request AuthorizationR
 	if len(request.Scope) > 0 {
 		return false, fmt.Errorf("CasbinAuthorizer does not support scoped authorization (scope has %d entries)", len(request.Scope))
 	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.unavailable {
-		return false, fmt.Errorf("casbin policy is unavailable: refusing to authorize with a possibly stale policy")
+	if a.hasAdapter {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+	} else {
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+	}
+	if err := a.refreshLocked(); err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	allowed, err := a.enforcer.Enforce(request.Subject, request.Resource, request.Action)
 	if err != nil {
 		return false, err
 	}
 	return allowed, nil
+}
+
+// refreshLocked keeps both decisions and mutations in sync with persisted
+// policy. A stale instance must not report a remote rule as absent and skip
+// its revocation. LoadPolicy is the explicit recovery path after a failure.
+func (a *CasbinAuthorizer) refreshLocked() error {
+	if a.unavailable {
+		return fmt.Errorf("casbin policy is unavailable: refusing to use a possibly stale policy")
+	}
+	if !a.hasAdapter {
+		return nil
+	}
+	if err := a.enforcer.LoadPolicy(); err != nil {
+		a.unavailable = true
+		return fmt.Errorf("refresh casbin policy: %w", err)
+	}
+	return nil
 }
 
 // stringParams 把调用参数规范化为 Casbin 策略字符串；非字符串参数明确拒绝
@@ -198,6 +224,9 @@ func (a *CasbinAuthorizer) AddPolicy(params ...any) (bool, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.refreshLocked(); err != nil {
+		return false, err
+	}
 	added, err := a.enforcer.AddPolicy(rule)
 	if err != nil {
 		a.unavailable = true
@@ -217,6 +246,9 @@ func (a *CasbinAuthorizer) RemovePolicy(params ...any) (bool, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.refreshLocked(); err != nil {
+		return false, err
+	}
 	removed, err := a.enforcer.RemovePolicy(rule)
 	if err != nil {
 		a.unavailable = true
@@ -236,6 +268,9 @@ func (a *CasbinAuthorizer) AddGroupingPolicy(params ...any) (bool, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.refreshLocked(); err != nil {
+		return false, err
+	}
 	added, err := a.enforcer.AddGroupingPolicy(rule)
 	if err != nil {
 		a.unavailable = true
@@ -255,6 +290,9 @@ func (a *CasbinAuthorizer) RemoveGroupingPolicy(params ...any) (bool, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.refreshLocked(); err != nil {
+		return false, err
+	}
 	removed, err := a.enforcer.RemoveGroupingPolicy(rule)
 	if err != nil {
 		a.unavailable = true

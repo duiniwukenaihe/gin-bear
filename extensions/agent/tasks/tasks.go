@@ -154,7 +154,19 @@ CREATE TABLE IF NOT EXISTS agent_approvals (
   consumed INTEGER NOT NULL DEFAULT 0,
   consumed_by TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
-);`, nil
+);
+CREATE TABLE IF NOT EXISTS agent_task_audit (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL,
+  to_status TEXT NOT NULL,
+  approval_id TEXT NOT NULL,
+  usage INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_task_audit_task ON agent_task_audit (task_id, created_at);`, nil
 	default:
 		return "", fmt.Errorf("unsupported tasks dialect %q", dialect)
 	}
@@ -164,7 +176,8 @@ CREATE TABLE IF NOT EXISTS agent_approvals (
 func MigrationDown(dialect string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(dialect)) {
 	case "sqlite", "postgres", "postgresql":
-		return `DROP TABLE IF EXISTS agent_approvals;
+		return `DROP TABLE IF EXISTS agent_task_audit;
+DROP TABLE IF EXISTS agent_approvals;
 DROP TABLE IF EXISTS agent_tasks;`, nil
 	default:
 		return "", fmt.Errorf("unsupported tasks dialect %q", dialect)
@@ -240,7 +253,10 @@ func (s *Store) Submit(ctx context.Context, task Task) (*Task, error) {
 			}
 			task.ApprovalID = approval.ID
 			task.Status = StatusWaiting
-			return insertTaskOn(s, tx, ctx, &task)
+			if err := insertTaskOn(s, tx, ctx, &task); err != nil {
+				return err
+			}
+			return s.insertTaskAuditOn(tx, ctx, &task, "submit", task.Owner, 0)
 		})
 		if err != nil {
 			// Lost race with a concurrent submit: this attempt rolled
@@ -299,6 +315,17 @@ func insertApprovalOn(s *Store, tx *sql.Tx, ctx context.Context, approval *Appro
 	return err
 }
 
+// insertTaskAuditOn records a write-task transition in the same transaction
+// as the state change. It deliberately stores neither raw arguments nor the
+// result. A failed audit insert rolls the transition back.
+func (s *Store) insertTaskAuditOn(tx *sql.Tx, ctx context.Context, task *Task, action, actor string, usage int64) error {
+	_, err := s.execOn(tx, ctx, `INSERT INTO agent_task_audit
+(id, task_id, tenant_id, actor, action, to_status, approval_id, usage, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		newID(), task.ID, task.TenantID, actor, action, task.Status, task.ApprovalID, usage, now())
+	return err
+}
+
 // Approve consumes one approval exactly once: expiry, tenant, args hash, and
 // policy version must all match, and the task moves to queued. Parameter
 // changes need a fresh approval because the hash stops matching. Consuming
@@ -308,6 +335,9 @@ func insertApprovalOn(s *Store, tx *sql.Tx, ctx context.Context, approval *Appro
 func (s *Store) Approve(ctx context.Context, approvalID, operator, args string) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strings.TrimSpace(operator) == "" {
+		return nil, fmt.Errorf("operator is required")
+	}
 	var approval Approval
 	var consumed int
 	err := s.queryRow(ctx, `SELECT id, tenant_id, operator, tool, args_hash, policy_version, expires_at, consumed, consumed_by, created_at
@@ -362,6 +392,9 @@ WHERE id = ? AND consumed = 0`, operator, operator, approvalID)
 		if task.Status != StatusWaiting {
 			return fmt.Errorf("task is %s, not waiting for approval", task.Status)
 		}
+		if task.Owner == operator {
+			return fmt.Errorf("task owner cannot approve their own write")
+		}
 		if s.Hooks.BeforeApprovalCommit != nil {
 			// A crash here must roll back the consume above: the
 			// approval stays usable instead of stranding the task.
@@ -381,7 +414,7 @@ WHERE id = ? AND consumed = 0`, operator, operator, approvalID)
 		if !committed {
 			return fmt.Errorf("task changed during approval")
 		}
-		return nil
+		return s.insertTaskAuditOn(tx, ctx, task, "approve", operator, 0)
 	})
 	if err != nil {
 		return nil, err
@@ -477,6 +510,9 @@ lease_owner = ?, lease_expires = ?, updated_at = ? WHERE id = ? AND version = ? 
 func (s *Store) Complete(ctx context.Context, id string, version int64, outcome Outcome) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if outcome.Usage < 0 {
+		return nil, fmt.Errorf("usage cannot be negative")
+	}
 	if s.Hooks.BeforeStore != nil {
 		if err := s.Hooks.BeforeStore(&Task{ID: id}); err != nil {
 			return nil, err
@@ -497,9 +533,10 @@ func (s *Store) Complete(ctx context.Context, id string, version int64, outcome 
 	if isTerminal(task.Status) {
 		return task, nil
 	}
+	worker := task.LeaseOwner
 	task.Attempts++
 	if outcome.Err != nil {
-		if errors.Is(outcome.Err, ErrUnknownResult) {
+		if errors.Is(outcome.Err, ErrUnknownResult) || (task.Kind == "write" && task.ExecNonce != "") {
 			task.Status = StatusUnknown
 			task.ErrorText = "external result unknown; reconcile, do not blind-retry"
 		} else if outcome.Retryable && task.Attempts < task.MaxAttempts {
@@ -514,17 +551,29 @@ func (s *Store) Complete(ctx context.Context, id string, version int64, outcome 
 		task.Status = StatusSucceeded
 		task.Result = outcome.Result
 	}
-	// Reservation-aware accounting: the reserve moved budget aside before the
-	// attempt; the actual usage settles against it now.
-	if task.ReservedTokens > 0 {
-		task.BudgetTokens += task.ReservedTokens - outcome.Usage
-		task.ReservedTokens = 0
-	} else {
-		task.BudgetTokens -= outcome.Usage
+	// An unknown external result cannot be settled yet. Keep its reservation
+	// until an operator confirms the actual usage or requeues with a new
+	// approval; otherwise confirmation would charge it twice.
+	if task.Status != StatusUnknown {
+		if task.ReservedTokens > 0 {
+			task.BudgetTokens += task.ReservedTokens - outcome.Usage
+			task.ReservedTokens = 0
+		} else {
+			task.BudgetTokens -= outcome.Usage
+		}
 	}
 	task.Version++
 	task.UpdatedAt = now()
-	committed, err := s.updateWhere(ctx, task, `id = ? AND version = ? AND status = ?`, id, version, StatusRunning)
+	committed := false
+	err = s.transact(ctx, func(tx *sql.Tx) error {
+		committed = false
+		var err error
+		committed, err = s.updateWhereOn(tx, ctx, task, `id = ? AND version = ? AND status = ?`, id, version, StatusRunning)
+		if err != nil || !committed || task.Kind != "write" {
+			return err
+		}
+		return s.insertTaskAuditOn(tx, ctx, task, "complete", worker, outcome.Usage)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -716,25 +765,49 @@ func (s *Store) RecordIntent(ctx context.Context, id string, version int64) (*Ta
 
 // ConfirmUnknown reconciles an unconfirmed write after out-of-band
 // verification: the recorded result commits with exact accounting against
-// the surviving reservation.
+// the surviving reservation. The write is fenced on the unknown state and the
+// version just read, so two instances reconciling the same task produce one
+// winner and a lost update is impossible across instances.
 func (s *Store) ConfirmUnknown(ctx context.Context, id, result string, actualUsage int64) (*Task, error) {
+	return s.ConfirmUnknownAs(ctx, id, "system", result, actualUsage)
+}
+
+// ConfirmUnknownAs persists the reconciler's identity with the settlement.
+func (s *Store) ConfirmUnknownAs(ctx context.Context, id, actor, result string, actualUsage int64) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, err := s.get(ctx, id)
+	if actualUsage < 0 {
+		return nil, fmt.Errorf("usage cannot be negative")
+	}
+	if strings.TrimSpace(actor) == "" {
+		return nil, fmt.Errorf("actor is required")
+	}
+	err := s.transact(ctx, func(tx *sql.Tx) error {
+		task, err := s.getOn(tx, ctx, id)
+		if err != nil {
+			return err
+		}
+		if task.Status != StatusUnknown {
+			return fmt.Errorf("task is %s, not unknown", task.Status)
+		}
+		version := task.Version
+		task.Status = StatusSucceeded
+		task.Result = result
+		task.BudgetTokens += task.ReservedTokens - actualUsage
+		task.ReservedTokens = 0
+		task.Attempts++
+		task.Version++
+		task.UpdatedAt = now()
+		committed, err := s.updateWhereOn(tx, ctx, task, `id = ? AND status = ? AND version = ?`, id, StatusUnknown, version)
+		if err != nil {
+			return err
+		}
+		if !committed {
+			return fmt.Errorf("task changed during confirmation")
+		}
+		return s.insertTaskAuditOn(tx, ctx, task, "confirm-unknown", actor, actualUsage)
+	})
 	if err != nil {
-		return nil, err
-	}
-	if task.Status != StatusUnknown {
-		return nil, fmt.Errorf("task is %s, not unknown", task.Status)
-	}
-	task.Status = StatusSucceeded
-	task.Result = result
-	task.BudgetTokens += task.ReservedTokens - actualUsage
-	task.ReservedTokens = 0
-	task.Attempts++
-	task.Version++
-	task.UpdatedAt = now()
-	if err := s.update(ctx, task); err != nil {
 		return nil, err
 	}
 	return s.get(ctx, id)
@@ -747,15 +820,23 @@ func (s *Store) ConfirmUnknown(ctx context.Context, id, result string, actualUsa
 // concurrent requeues produce one winner with no orphan approval, and a
 // crash between them leaves the task unknown instead of half-moved.
 func (s *Store) RequeueUnknown(ctx context.Context, id string) (*Task, error) {
+	return s.RequeueUnknownAs(ctx, id, "system")
+}
+
+// RequeueUnknownAs persists the reconciler's identity with the new approval.
+func (s *Store) RequeueUnknownAs(ctx context.Context, id, actor string) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.requeueUnknownTx(ctx, id); err != nil {
+	if strings.TrimSpace(actor) == "" {
+		return nil, fmt.Errorf("actor is required")
+	}
+	if err := s.requeueUnknownTx(ctx, id, actor); err != nil {
 		return nil, err
 	}
 	return s.get(ctx, id)
 }
 
-func (s *Store) requeueUnknownTx(ctx context.Context, id string) error {
+func (s *Store) requeueUnknownTx(ctx context.Context, id, actor string) error {
 	return s.transact(ctx, func(tx *sql.Tx) error {
 		task, err := s.getOn(tx, ctx, id)
 		if err != nil {
@@ -788,7 +869,7 @@ func (s *Store) requeueUnknownTx(ctx context.Context, id string) error {
 		if !committed {
 			return fmt.Errorf("task changed during requeue")
 		}
-		return nil
+		return s.insertTaskAuditOn(tx, ctx, task, "requeue-unknown", actor, 0)
 	})
 }
 
@@ -816,10 +897,14 @@ func isTerminal(status string) bool {
 // execution intent (idempotency nonce) is still persisted for every write,
 // so crash recovery never blind-retries.
 type Worker struct {
-	Store              *Store
-	Owner              string
-	Lease              time.Duration
-	Executor           func(ctx context.Context, task *Task) Outcome
+	Store    *Store
+	Owner    string
+	Lease    time.Duration
+	Executor func(ctx context.Context, task *Task) Outcome
+	// WriteAuthorize must check the current authoritative policy immediately
+	// before a write attempt. A missing callback fails closed. The Store's
+	// local PolicyVersion alone cannot observe revocation on another instance.
+	WriteAuthorize     func(ctx context.Context, task *Task) error
 	WriteReserveTokens int64
 }
 
@@ -850,12 +935,12 @@ func (w *Worker) RunOnce(ctx context.Context) (*Task, error) {
 		if err := w.checkWriteApproval(ctx, task); err != nil {
 			return w.Store.Complete(ctx, task.ID, version, Outcome{Err: err})
 		}
-		recorded, err := w.Store.RecordIntent(ctx, task.ID, version)
-		if err != nil {
+		if w.WriteAuthorize == nil {
+			return w.Store.Complete(ctx, task.ID, version, Outcome{Err: fmt.Errorf("live write authorization is not configured")})
+		}
+		if err := w.WriteAuthorize(ctx, task); err != nil {
 			return w.Store.Complete(ctx, task.ID, version, Outcome{Err: err})
 		}
-		task = recorded
-		version = recorded.Version
 		if w.WriteReserveTokens > 0 {
 			reserved, err := w.Store.Reserve(ctx, task.ID, version, w.WriteReserveTokens)
 			if err != nil {
@@ -863,6 +948,13 @@ func (w *Worker) RunOnce(ctx context.Context) (*Task, error) {
 			}
 			task = reserved
 			version = reserved.Version
+		} else {
+			recorded, err := w.Store.RecordIntent(ctx, task.ID, version)
+			if err != nil {
+				return w.Store.Complete(ctx, task.ID, version, Outcome{Err: err})
+			}
+			task = recorded
+			version = recorded.Version
 		}
 	}
 	outcome := w.Executor(ctx, task)
@@ -967,11 +1059,6 @@ func insertTaskArgs(task *Task) []any {
 		task.Result, task.ErrorText, task.Attempts, task.MaxAttempts,
 		task.ExpiresAt, task.CreatedAt, task.UpdatedAt,
 	}
-}
-
-func (s *Store) update(ctx context.Context, task *Task) error {
-	_, err := s.updateWhere(ctx, task, `id = ?`, task.ID)
-	return err
 }
 
 // updateTaskColumns is the full-row SET list shared by the direct and
