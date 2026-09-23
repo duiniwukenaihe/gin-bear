@@ -177,6 +177,9 @@ func TestValidateProductionDBTLSPostgresStructuredAndRawDSN(t *testing.T) {
 }
 
 func TestValidateProductionDBTLSMySQLStructuredAndRawDSN(t *testing.T) {
+	if !mysqlDriverAvailable {
+		t.Skip("requires the MySQL driver")
+	}
 	const secureTLSName = "gin-bear-security-test-verify"
 	const insecureTLSName = "gin-bear-security-test-insecure"
 	if err := mysqldriver.RegisterTLSConfig(secureTLSName, &tls.Config{MinVersion: tls.VersionTLS12}); err != nil {
@@ -320,6 +323,9 @@ func TestNewGormAdapterRejectsDowngradablePostgresTLS(t *testing.T) {
 }
 
 func TestNewGormAdapterConnectsSQLiteInDevelopment(t *testing.T) {
+	if !sqliteDriverAvailable {
+		t.Skip("requires the SQLite driver")
+	}
 	t.Setenv("BEAR_ENV", "dev")
 	t.Setenv("GIN_MODE", "debug")
 
@@ -338,6 +344,9 @@ func TestNewGormAdapterConnectsSQLiteInDevelopment(t *testing.T) {
 }
 
 func TestProductionMySQLTLSFailsAtAllStartupBoundaries(t *testing.T) {
+	if !mysqlDriverAvailable {
+		t.Skip("requires the MySQL driver")
+	}
 	const dsn = "app:mysql-path-secret@tcp(db.example:3306)/app?tls=false"
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")

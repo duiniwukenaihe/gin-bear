@@ -13,9 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
-	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -97,29 +95,7 @@ func buildDSN(cfg *DBConfig) (string, error) {
 		postgresURL.RawQuery = query.Encode()
 		return postgresURL.String(), nil
 	case "mysql":
-		if port == "" {
-			port = "3306"
-		}
-		driverConfig := mysqldriver.NewConfig()
-		driverConfig.User = user
-		driverConfig.Passwd = cfg.Password
-		driverConfig.Net = "tcp"
-		driverConfig.Addr = net.JoinHostPort(host, port)
-		driverConfig.DBName = dbname
-		driverConfig.Params = map[string]string{"charset": "utf8mb4"}
-		driverConfig.ParseTime = true
-		driverConfig.Loc = time.Local
-		driverConfig.TLSConfig = strings.TrimSpace(cfg.TLS)
-		driverConfig.ClientFoundRows = true
-		dsn := driverConfig.FormatDSN()
-		parsed, err := mysqldriver.ParseDSN(dsn)
-		if err != nil {
-			return "", fmt.Errorf("invalid MySQL DSN configuration: %w", err)
-		}
-		if parsed.User != driverConfig.User || parsed.Passwd != driverConfig.Passwd || parsed.DBName != driverConfig.DBName {
-			return "", errors.New("MySQL user, password, or database name contains characters that cannot be represented safely in a DSN")
-		}
-		return dsn, nil
+		return mysqlDSN(cfg, host, port, user, dbname)
 	default:
 		return "", fmt.Errorf("unsupported database type: %s, supported: mysql, postgres, sqlite", dbType)
 	}
@@ -168,13 +144,7 @@ func validateProductionDBTLS(cfg *DBConfig, production bool) error {
 			return errors.New("production PostgreSQL requires sslmode=disable or verify-full")
 		}
 	case "mysql":
-		parsed, parseErr := mysqldriver.ParseDSN(dsn)
-		if parseErr != nil {
-			return errors.New("production MySQL DSN is invalid")
-		}
-		if parsed.TLS == nil || parsed.TLS.InsecureSkipVerify || parsed.AllowFallbackToPlaintext {
-			return errors.New("production MySQL requires TLS with certificate verification")
-		}
+		return validateProductionMySQLTLS(dsn)
 	default:
 		return errors.New("production database type is unsupported")
 	}
@@ -246,7 +216,10 @@ func OpenGormAdapter(ctx context.Context, cfg *DBConfig) (*GormAdapter, error) {
 	case "postgres", "postgresql":
 		dialector = postgres.Open(dsn)
 	case "mysql", "":
-		dialector = mysql.Open(dsn)
+		dialector, err = mysqlDialector(dsn)
+		if err != nil {
+			return nil, err
+		}
 	case "sqlite", "sqlite3":
 		dialector, err = sqliteDialector(dsn)
 		if err != nil {
@@ -309,35 +282,6 @@ func OpenGormAdapter(ctx context.Context, cfg *DBConfig) (*GormAdapter, error) {
 		"max_idle", maxIdle,
 		"max_open", maxOpen)
 	return &GormAdapter{DB: db}, nil
-}
-
-func databaseStartupDSN(ctx context.Context, dbType, dsn string) (string, error) {
-	if !strings.EqualFold(strings.TrimSpace(dbType), "mysql") {
-		return dsn, nil
-	}
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		return dsn, nil
-	}
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return "", fmt.Errorf("database startup canceled: %w", context.DeadlineExceeded)
-	}
-	config, err := mysqldriver.ParseDSN(dsn)
-	if err != nil {
-		return "", errors.New("invalid MySQL DSN configuration")
-	}
-	config.Timeout = boundedDatabaseTimeout(config.Timeout, remaining)
-	config.ReadTimeout = boundedDatabaseTimeout(config.ReadTimeout, remaining)
-	config.WriteTimeout = boundedDatabaseTimeout(config.WriteTimeout, remaining)
-	return config.FormatDSN(), nil
-}
-
-func boundedDatabaseTimeout(configured, remaining time.Duration) time.Duration {
-	if configured <= 0 || configured > remaining {
-		return remaining
-	}
-	return configured
 }
 
 func buildGormConfig(cfg *DBConfig) *gorm.Config {

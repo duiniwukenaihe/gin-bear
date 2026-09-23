@@ -18,14 +18,55 @@ export BEAR_AUTH_JWT_SECRET="$(openssl rand -base64 48)"
 
 `server.mode: release` in YAML has the same effect as `GIN_MODE=release`.
 
-For a service that does not use Casbin or SQLite, build with
-`go build -tags bear_no_casbin,bear_no_sqlite` (or set the same tags in
-`GOFLAGS` for a generated project's `make build`). The default build keeps
-both features. `bear_no_casbin` removes the Casbin APIs at compile time;
-`bear_no_sqlite` makes selecting SQLite return an error. Use both flags to
-remove SQLite from the compiled dependency graph because Casbin's GORM adapter
-also imports it. Module manifests may still list optional dependencies for
-default builds and tests; the flags reduce the service binary, not `go.mod`.
+`application.yaml` controls runtime activation: `database.enabled: false`
+does not open any database, `database.type: postgres` opens PostgreSQL only,
+`redis.required: false` avoids Redis unless authentication uses Redis, and
+`tracing.enabled`, `metrics.enabled`, and `plugins.enabled` control their
+respective startup paths. Disabling Redis while `auth.storage_type: redis`
+would leave authentication without its required store, so Redis is started in
+that case. Casbin is not started by configuration alone; the application must
+construct and register an authorizer.
+
+Runtime configuration cannot remove Go imports from a compiled binary. For a
+PostgreSQL service using Casbin, apply the reviewed migration under
+`migrations/optional/casbin-postgres`, construct `NewPostgresCasbinAdapter`
+from the application's PostgreSQL `*sql.DB`, and use
+`NewCasbinAuthorizerWithAdapter`. Build with
+`-tags bear_no_mysql,bear_no_sqlite,bear_casbin_no_gorm_adapter` to exclude
+the MySQL and SQLite drivers plus Casbin's broad GORM adapter. A service that
+does not use Casbin can instead use
+`-tags bear_no_mysql,bear_no_sqlite,bear_no_casbin`. Default builds keep the
+legacy APIs. Exclusion tags fail explicitly if an excluded database is
+selected at runtime; they must match every deployed environment's config.
+The root `go.mod` still lists optional dependencies for default builds and
+tests, so these tags reduce the compiled dependency graph, not module
+downloads. The planned split into optional Go modules is required to remove
+unused modules from generated projects' manifests.
+
+For Casbin on PostgreSQL, first copy and version
+`migrations/optional/casbin-postgres/001_create_casbin_rule.up.sql` in the
+application's migration history, review existing `casbin_rule` rows for
+logical duplicates, and apply it before starting the service. It has no
+automatic down migration because dropping an existing policy table could
+erase live authorization data. After `EnableDatabaseE` has registered the
+PostgreSQL adapter, wire the authorizer explicitly:
+
+```go
+database, err := bear.ResolveE[*bear.GormAdapter](application.Runtime().Container)
+if err != nil { return err }
+sqlDB, err := database.DB.DB()
+if err != nil { return err }
+store, err := bear.NewPostgresCasbinAdapter(sqlDB)
+if err != nil { return err }
+authorizer, err := bear.NewCasbinAuthorizerWithAdapter(store, nil)
+if err != nil { return err }
+if err := application.BeansE(authorizer); err != nil { return err }
+```
+
+The application must register its authorization fairing or use the
+`Authorizer` interface where it handles permissions; creating this bean
+alone does not enforce access. The PostgreSQL adapter uses the existing pool
+and performs no schema migration during startup.
 
 ## Configuration
 

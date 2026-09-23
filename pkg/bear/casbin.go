@@ -9,7 +9,7 @@ import (
 
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/model"
-	gormadapter "github.com/casbin/gorm-adapter/v3"
+	"github.com/casbin/casbin/v2/persist"
 	"github.com/gin-gonic/gin"
 )
 
@@ -25,7 +25,7 @@ func (c *CasbinEnforcer) Name() string {
 }
 
 // buildCasbinModel 构造 Casbin 模型，每个调用者持有独立实例。
-// 由 NewCasbinEnforcer 与 NewCasbinAuthorizer 共享，避免可变模型对象在实例间共享。
+// 由执行器与鉴权入口共享，避免可变模型对象在实例间共享。
 func buildCasbinModel(cfg *CasbinConfig) (model.Model, error) {
 	if cfg != nil && cfg.ModelText != "" {
 		m, err := model.NewModelFromString(cfg.ModelText)
@@ -65,8 +65,9 @@ m = g(r.sub, p.sub) && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == "*"
 	return m, nil
 }
 
-// NewCasbinEnforcer 初始化一个新的 Casbin 执行器，默认关闭决策缓存。
-func NewCasbinEnforcer(adapter *GormAdapter, cfg *CasbinConfig) (*CasbinEnforcer, error) {
+// NewCasbinEnforcerWithAdapter 初始化执行器；持久化适配器由调用者选择。
+// 在线策略变更和并发鉴权应使用 CasbinAuthorizer。
+func NewCasbinEnforcerWithAdapter(adapter persist.Adapter, cfg *CasbinConfig) (*CasbinEnforcer, error) {
 	m, err := buildCasbinModel(cfg)
 	if err != nil {
 		return nil, err
@@ -74,12 +75,7 @@ func NewCasbinEnforcer(adapter *GormAdapter, cfg *CasbinConfig) (*CasbinEnforcer
 
 	var e *casbin.CachedEnforcer
 	if adapter != nil {
-		// 使用 GORM 适配器实现持久化存储
-		a, adapterErr := gormadapter.NewAdapterByDB(adapter.DB)
-		if adapterErr != nil {
-			return nil, fmt.Errorf("failed to create Casbin adapter: %w", adapterErr)
-		}
-		e, err = casbin.NewCachedEnforcer(m, a)
+		e, err = casbin.NewCachedEnforcer(m, adapter)
 	} else {
 		// 使用内存适配器
 		e, err = casbin.NewCachedEnforcer(m)

@@ -103,6 +103,9 @@ func TestRepositoryZeroRowsReturnsNotFoundWithoutFollowUpRace(t *testing.T) {
 }
 
 func TestBuildMySQLDSNRequestsMatchedRowCounts(t *testing.T) {
+	if !mysqlDriverAvailable {
+		t.Skip("requires the MySQL driver")
+	}
 	dsn, err := buildDSN(&DBConfig{
 		Enabled: true,
 		Type:    "mysql",
@@ -125,6 +128,9 @@ func TestBuildMySQLDSNRequestsMatchedRowCounts(t *testing.T) {
 
 func newRemainingRepositoryAdapter(t *testing.T, models ...interface{}) *GormAdapter {
 	t.Helper()
+	if !sqliteDriverAvailable {
+		t.Skip("requires the SQLite driver")
+	}
 	t.Setenv("BEAR_ENV", "dev")
 	t.Setenv("GIN_MODE", "")
 	dsn := filepath.Join(t.TempDir(), fmt.Sprintf("repository-%s.db", t.Name()))

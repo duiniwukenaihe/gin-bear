@@ -7,6 +7,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const sqliteDriverAvailable = true
+
 func sqliteDialector(dsn string) (gorm.Dialector, error) {
 	return sqlite.Open(dsn), nil
 }

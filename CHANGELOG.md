@@ -76,6 +76,11 @@ All notable changes to gin-bear are documented in this file.
   that use neither feature omit both from the compiled binary while the
   default build remains compatible. Casbin's GORM adapter itself imports
   SQLite, so both tags are needed to remove SQLite completely.
+- PostgreSQL-only services can exclude MySQL with `bear_no_mysql`. Casbin can
+  use the application's PostgreSQL pool through `NewPostgresCasbinAdapter`
+  and `NewCasbinAuthorizerWithAdapter`; `bear_casbin_no_gorm_adapter` excludes
+  the legacy adapter's SQLite and SQL Server imports. Policy schema creation
+  is an explicit optional migration.
 - Durable write tasks retain their unknown-result reconciliation state when
   canceled or timed out after execution intent; a version check prevents a
   cancellation on another instance from erasing a newly recorded intent.

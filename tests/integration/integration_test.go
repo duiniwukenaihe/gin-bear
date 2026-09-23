@@ -348,11 +348,28 @@ func TestIntegrationPostgresRevocationReload(t *testing.T) {
 	}
 	first := openPG(t, dsn)
 	second := openPG(t, dsn)
-	a, err := bear.NewCasbinAuthorizer(first, nil)
+	migrations, err := bear.LoadSQLMigrations(filepath.Join("..", "..", "migrations", "optional", "casbin-postgres"))
+	if err != nil {
+		t.Fatalf("load Casbin PostgreSQL migration: %v", err)
+	}
+	runner := bear.NewMigrationRunnerWithDialect(sqlDB(t, first), bear.MigrationDialectPostgreSQL).
+		ConfigureTables("casbin_pg_schema_migrations_test", "casbin_pg_migration_locks_test")
+	if err := runner.Up(context.Background(), migrations); err != nil {
+		t.Fatalf("apply Casbin PostgreSQL migration: %v", err)
+	}
+	firstStore, err := bear.NewPostgresCasbinAdapter(sqlDB(t, first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondStore, err := bear.NewPostgresCasbinAdapter(sqlDB(t, second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := bear.NewCasbinAuthorizerWithAdapter(firstStore, nil)
 	if err != nil {
 		t.Fatalf("first authorizer: %v", err)
 	}
-	b, err := bear.NewCasbinAuthorizer(second, nil)
+	b, err := bear.NewCasbinAuthorizerWithAdapter(secondStore, nil)
 	if err != nil {
 		t.Fatalf("second authorizer: %v", err)
 	}

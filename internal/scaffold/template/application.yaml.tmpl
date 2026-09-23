@@ -23,11 +23,13 @@ grpc:
 #
 # Release mode (GIN_MODE=release) rejects SQLite as a production database, so a
 # real deployment needs MySQL or PostgreSQL instead; application-prod.yaml.example
-# shows that shape.
+# shows that shape. When enabled, database.type selects exactly one driver.
+# Other databases are not opened or probed.
 database:
   enabled: false
 
 redis:
+  required: false
   # Keep false for local plaintext Redis. Enable TLS for remote Redis.
   tls:
     enabled: false
@@ -54,3 +56,7 @@ auth:
 metrics:
   enabled: true
   path: "/metrics"
+
+# Dynamic Go plugins are optional and never loaded when disabled.
+plugins:
+  enabled: false

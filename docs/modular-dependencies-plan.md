@@ -41,10 +41,11 @@ Cobra、fsnotify 属于开发工具；它们与业务二进制的编译依赖应
 
 ## 第一阶段：兼容的二进制瘦身（当前候选）
 
-保留默认构建行为。未使用 Casbin、SQLite 的服务可以使用
-`-tags bear_no_casbin,bear_no_sqlite`。前者在编译时排除旧 Casbin API，后者
-让选择 SQLite 的启动路径明确报错。只设置 `bear_no_sqlite` 仍会被 Casbin 的
-通用 GORM 适配器带入 SQLite，所以需要两个标记同时使用。用
+保留默认构建行为。未使用 Casbin、SQLite、MySQL 的 PostgreSQL 服务可以使用
+`-tags bear_no_casbin,bear_no_sqlite,bear_no_mysql`。前者在编译时排除 Casbin
+API，后两者让选择被排除数据库的启动路径明确报错。只设置
+`bear_no_sqlite` 仍会被 Casbin 的通用 GORM 适配器带入 SQLite，所以需要
+`bear_no_casbin` 或第二阶段的 `bear_casbin_no_gorm_adapter`。用
 `go list -deps -tags ...` 验证依赖不在编译图中，用普通构建和精简构建各跑一次
 启动验收。此阶段不声称清理 `go.mod`：默认构建和测试仍需要这些模块。
 
@@ -58,6 +59,9 @@ Cobra、fsnotify 属于开发工具；它们与业务二进制的编译依赖应
 `NewCasbinEnforcer(*GormAdapter, ...)` 和 `NewCasbinAuthorizer(*GormAdapter, ...)`
 在兼容期保留，由旧包实现。
 
+当前已实现 `NewCasbinAuthorizerWithAdapter`、PostgreSQL 专用适配器和可审查
+迁移；构建时使用
+`-tags bear_no_mysql,bear_no_sqlite,bear_casbin_no_gorm_adapter`。
 这一阶段的验收条件是：Casbin + PostgreSQL 的业务二进制可以通过
 `go list -deps` 证明没有 SQLite/SQL Server 驱动；现有 `casbin_rule` 数据无需
 重建；跨实例撤权、策略写入失败关闭、并发、迁移和回滚均在真实 PostgreSQL
@@ -70,8 +74,11 @@ Cobra、fsnotify 属于开发工具；它们与业务二进制的编译依赖应
 拆包，不为每个小工具创建一个 module：数据库驱动、Casbin、Redis、gRPC、
 观测和 Agent 这些重依赖需要可独立选择。功能通过显式构造/注册接入，不能
 依赖空白导入或全局副作用注册。生成器明确选择 `postgres`、`mysql` 或
-`sqlite` 数据库模块及可选功能；不选择时生成项目不导入相应模块，也不在
-`go.mod` 中声明它。模板只调用选中功能的启动方法。兼容期保留现有 `bear new`
+`sqlite` 数据库模块及可选功能。选择写在生成项目的构建配置文件中；
+`application.yaml` 继续控制运行时启停。构建配置排除某功能时，运行配置若
+尝试启用它必须明确失败，而不能暗中换用其他实现。不选择时生成项目不导入
+相应模块，也不在 `go.mod` 中声明它。模板只调用选中功能的启动方法。
+兼容期保留现有 `bear new`
 行为，新增显式精简 profile；例如选择 PostgreSQL 与 Redis 时只生成这两项
 接线。精简 profile 在不选数据库时也能启动；生产 profile 只给出已选功能的
 配置示例。继续维护旧 `pkg/bear` 兼容入口，

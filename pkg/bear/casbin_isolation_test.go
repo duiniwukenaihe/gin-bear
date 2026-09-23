@@ -1,3 +1,5 @@
+//go:build !bear_no_casbin && !bear_casbin_no_gorm_adapter
+
 package bear
 
 import (

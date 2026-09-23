@@ -45,11 +45,16 @@ make build
 BEAR_ENV=prod GIN_MODE=release ./bin/migrate
 ```
 
-If this application uses neither Casbin nor SQLite, build smaller binaries
-with `GOFLAGS="-tags=bear_no_casbin,bear_no_sqlite" make build`. These tags
-remove those features from the compiled service and migration tool; leave
-them unset if the application uses either feature. Tests that import SQLite
-should continue to run without the opt-out tags.
+Runtime features are selected in `application.yaml`: a PostgreSQL database
+does not open SQLite, and disabled Redis, tracing, metrics, and dynamic
+plugins do not start. For a PostgreSQL-only binary without Casbin, use
+`GOFLAGS="-tags=bear_no_mysql,bear_no_sqlite,bear_no_casbin" make build`.
+For PostgreSQL with Casbin, use the reviewed PostgreSQL policy migration and
+adapter described in `gin-bear/docs/production.md`, then build with
+`GOFLAGS="-tags=bear_no_mysql,bear_no_sqlite,bear_casbin_no_gorm_adapter" make build`.
+The default build retains compatibility. Excluded drivers reject a mismatched
+runtime configuration. These tags trim compiled dependencies; they do not
+remove default/test dependencies from `go.mod`.
 
 `migrations/` files are append-only: never edit or rewrite a version that has
 already been applied anywhere; add a new version instead. Rolling the

@@ -11,7 +11,7 @@ import (
 
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/model"
-	gormadapter "github.com/casbin/gorm-adapter/v3"
+	"github.com/casbin/casbin/v2/persist"
 )
 
 // CasbinAuthorizer 是在线策略变更场景的受控鉴权入口。
@@ -60,9 +60,9 @@ var _ Authorizer = (*CasbinAuthorizer)(nil)
 // LoadPolicy 无法重载，该错误可被 errors.Is 识别；内存策略保持可用。
 var ErrCasbinReloadRequiresAdapter = errors.New("casbin reload requires a persistent adapter")
 
-// NewCasbinAuthorizer 构造受控鉴权入口。每个 authorizer 拥有独立模型及内存
-// 策略，不共享可变模型对象。
-func NewCasbinAuthorizer(adapter *GormAdapter, cfg *CasbinConfig) (*CasbinAuthorizer, error) {
+// NewCasbinAuthorizerWithAdapter 构造受控鉴权入口。持久化适配器由调用者显式
+// 选择；每个 authorizer 拥有独立模型及内存策略，不共享可变模型对象。
+func NewCasbinAuthorizerWithAdapter(adapter persist.Adapter, cfg *CasbinConfig) (*CasbinAuthorizer, error) {
 	m, err := buildCasbinModel(cfg)
 	if err != nil {
 		return nil, err
@@ -77,11 +77,7 @@ func NewCasbinAuthorizer(adapter *GormAdapter, cfg *CasbinConfig) (*CasbinAuthor
 	authorizer := &CasbinAuthorizer{hasAdapter: adapter != nil, policyLen: policyLen, groupingLen: groupingLen}
 	var e *casbin.Enforcer
 	if adapter != nil {
-		a, adapterErr := gormadapter.NewAdapterByDB(adapter.DB)
-		if adapterErr != nil {
-			return nil, fmt.Errorf("failed to create Casbin adapter: %w", adapterErr)
-		}
-		e, err = casbin.NewEnforcer(m, a)
+		e, err = casbin.NewEnforcer(m, adapter)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Casbin enforcer: %w", err)
 		}
