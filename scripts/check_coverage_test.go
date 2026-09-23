@@ -186,7 +186,7 @@ func TestCriticalCoverageManifestCoversAuditedProductionFiles(t *testing.T) {
 	}
 
 	command := exec.Command("go", "list", "-f", `{{range .GoFiles}}{{println .}}{{end}}`, "../internal/scaffold")
-	command.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+	command.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	output, err := command.Output()
 	if err != nil {
 		t.Fatal(err)

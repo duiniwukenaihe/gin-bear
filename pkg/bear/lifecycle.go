@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,11 +17,15 @@ type ContextShutdowner interface {
 
 // Lifecycle owns component startup and shutdown order for one application.
 type Lifecycle struct {
-	mu                 sync.Mutex
-	components         []*lifecycleEntry
-	beanEntries        map[reflect.Type]*lifecycleEntry
-	strict             bool
-	state              lifecycleState
+	mu          sync.Mutex
+	components  []*lifecycleEntry
+	beanEntries map[reflect.Type]*lifecycleEntry
+	strict      bool
+	state       lifecycleState
+	// stoppedFlag mirrors state == lifecycleStopped so liveness can be checked
+	// without taking l.mu. Callers that run on logging or request paths must not
+	// contend on the lifecycle mutex. Only markStoppedLocked writes it.
+	stoppedFlag        atomic.Bool
 	registrationSealed bool
 	operationDone      chan struct{}
 	startErr           error
@@ -96,6 +101,23 @@ func (l *Lifecycle) registrationClosed() bool {
 	closed := l.registrationSealed || l.state != lifecycleNew
 	l.mu.Unlock()
 	return closed
+}
+
+// stopped reports whether the lifecycle has finished stopping. A lifecycle that
+// never started also counts as stopped once Stop has run on it. It is lock-free
+// because it is consulted from logging and request paths.
+func (l *Lifecycle) stopped() bool {
+	if l == nil {
+		return true
+	}
+	return l.stoppedFlag.Load()
+}
+
+// markStoppedLocked moves the lifecycle to its terminal stopped state. It
+// requires l.mu and is the only writer of stoppedFlag.
+func (l *Lifecycle) markStoppedLocked() {
+	l.state = lifecycleStopped
+	l.stoppedFlag.Store(true)
 }
 
 func (l *Lifecycle) sealRegistration() {
@@ -413,7 +435,7 @@ func (l *Lifecycle) rollbackStrictStart(startErr error) error {
 		l.startRetryable = false
 		l.stopErr = rollbackErr
 		if complete {
-			l.state = lifecycleStopped
+			l.markStoppedLocked()
 		} else {
 			l.state = lifecycleStarted
 		}
@@ -500,7 +522,7 @@ func (l *Lifecycle) rollbackStart(startErr error) error {
 	rollbackErr := stopLifecycleComponents(ctx, components)
 	l.mu.Lock()
 	l.stopErr = rollbackErr
-	l.state = lifecycleStopped
+	l.markStoppedLocked()
 	close(l.operationDone)
 	l.mu.Unlock()
 	if rollbackErr != nil {
@@ -581,7 +603,7 @@ func (l *Lifecycle) stopStrict(ctx context.Context) error {
 			terminalErr := l.strictTerminalStopError()
 			l.mu.Lock()
 			if complete {
-				l.state = lifecycleStopped
+				l.markStoppedLocked()
 				l.stopErr = terminalErr
 				stopErr = l.stopErr
 			} else {
@@ -733,7 +755,7 @@ func (l *Lifecycle) stopComponents(ctx context.Context, components []any) error 
 	stopErr := stopLifecycleComponents(ctx, components)
 	l.mu.Lock()
 	l.stopErr = stopErr
-	l.state = lifecycleStopped
+	l.markStoppedLocked()
 	close(l.operationDone)
 	l.mu.Unlock()
 	return stopErr

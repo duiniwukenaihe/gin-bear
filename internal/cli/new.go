@@ -43,6 +43,7 @@ func newCommand() *cobra.Command {
 	var directory string
 	var frameworkVersion string
 	var frameworkReplace string
+	var profile string
 	generatorVersion := defaultFrameworkVersion()
 	command := &cobra.Command{
 		Use:   "new <project_name>",
@@ -72,6 +73,7 @@ func newCommand() *cobra.Command {
 				Directory:        projectDirectory,
 				FrameworkVersion: dependencyVersion,
 				FrameworkReplace: localReplace,
+				Profile:          profile,
 			}); err != nil {
 				return fmt.Errorf("create project: %w", err)
 			}
@@ -83,6 +85,7 @@ func newCommand() *cobra.Command {
 	command.Flags().StringVarP(&directory, "directory", "d", "", "destination directory (defaults to project name)")
 	command.Flags().StringVar(&frameworkVersion, "framework-version", generatorVersion, "gin-bear framework version")
 	command.Flags().StringVar(&frameworkReplace, "framework-replace", "", "local gin-bear checkout for development templates")
+	command.Flags().StringVar(&profile, "profile", "", "scaffold profile: empty (minimal default) or production for deployment assets")
 	return command
 }
 

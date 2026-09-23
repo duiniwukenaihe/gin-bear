@@ -139,9 +139,9 @@ func TestPluginRouteExecutesControllerFairings(t *testing.T) {
 		groupName: group.BasePath(),
 		fairings:  []Fairing{fairing},
 	}
-	app.pluginMode = true
+	app.pluginMode.Store(true)
 	err := app.HandleE(http.MethodGet, "/private", func() string { return "secret" })
-	app.pluginMode = false
+	app.pluginMode.Store(false)
 	app.registration = nil
 	if err != nil {
 		t.Fatalf("HandleE() error = %v", err)
@@ -227,11 +227,11 @@ func TestPluginRoutesUseFullGroupPathAndCallerMiddleware(t *testing.T) {
 
 	group := app.Engine.Group("/plugins")
 	app.registration = &routeRegistrationContext{group: group, groupName: group.BasePath()}
-	app.pluginMode = true
+	app.pluginMode.Store(true)
 	err = app.HandleE(http.MethodGet, "/:name", func(ctx *gin.Context) {
 		ctx.String(http.StatusOK, "plugin:%s", ctx.Param("name"))
 	})
-	app.pluginMode = false
+	app.pluginMode.Store(false)
 	app.registration = nil
 	if err != nil {
 		t.Fatalf("HandleE() error = %v", err)
@@ -262,9 +262,9 @@ func TestPluginRoutesUseMiddlewareRegisteredAfterIgnite(t *testing.T) {
 		t.Fatalf("UseE() error = %v", err)
 	}
 
-	app.pluginMode = true
+	app.pluginMode.Store(true)
 	err := app.HandleE(http.MethodGet, "/plugin-late-middleware", func() string { return "ok" })
-	app.pluginMode = false
+	app.pluginMode.Store(false)
 	if err != nil {
 		t.Fatalf("HandleE() error = %v", err)
 	}
@@ -287,9 +287,9 @@ func TestBearNoRoutePreservesPluginDispatchAndCustomFallback(t *testing.T) {
 	config := NewSysConfig()
 	config.SetFrameworkStrict(true)
 	app := Ignite(config)
-	app.pluginMode = true
+	app.pluginMode.Store(true)
 	err := app.HandleE(http.MethodGet, "/plugin-with-fallback", func() string { return "plugin" })
-	app.pluginMode = false
+	app.pluginMode.Store(false)
 	if err != nil {
 		t.Fatalf("HandleE() error = %v", err)
 	}

@@ -424,7 +424,9 @@ func TestTracingRecordsSafeErrorMetadataWithoutGinErrorMessage(t *testing.T) {
 		t.Fatalf("event name = %q", event.Name)
 	}
 	for _, attr := range event.Attributes {
-		if strings.Contains(attr.Value.Emit(), "trace-secret") || string(attr.Key) == "error.message" {
+		// Value.String replaced the deprecated Value.Emit in
+		// go.opentelemetry.io/otel v1.44.0; both return v.stringly for STRING.
+		if strings.Contains(attr.Value.String(), "trace-secret") || string(attr.Key) == "error.message" {
 			t.Fatalf("trace event leaked raw error in %#v", attr)
 		}
 	}

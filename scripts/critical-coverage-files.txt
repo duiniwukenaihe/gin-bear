@@ -20,8 +20,13 @@ auth pkg/bear/jwt.go
 auth pkg/bear/jwt_fairing.go
 migration-lock pkg/bear/migration.go
 cron-lock pkg/bear/cron_lock.go
+cli internal/cli/agent.go
+cli internal/cli/apply.go
+cli internal/cli/doctor.go
 cli internal/cli/gen.go
+cli internal/cli/migration.go
 cli internal/cli/new.go
+cli internal/cli/plan.go
 cli internal/cli/root.go
 scaffold internal/scaffold/embed.go
 scaffold internal/scaffold/manifest.go

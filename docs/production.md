@@ -1,9 +1,8 @@
 # Production Guide
 
-`v0.9.3` is the current release. This guide also describes the repository source
-tree and its strict-runtime migration path. Entries under `Unreleased`,
-including the production gRPC runtime, are not a published release until the
-release gate and tagging process complete.
+`v0.9.4` is the current release. This guide also describes the repository source
+tree and its strict-runtime migration path. Entries under `Unreleased` are not
+a published release until the release gate and tagging process complete.
 
 ## Runtime
 
@@ -17,6 +16,56 @@ export BEAR_AUTH_JWT_SECRET="$(openssl rand -base64 48)"
 ```
 
 `server.mode: release` in YAML has the same effect as `GIN_MODE=release`.
+
+`application.yaml` controls runtime activation: `database.enabled: false`
+does not open any database, `database.type: postgres` opens PostgreSQL only,
+`redis.required: false` avoids Redis unless authentication uses Redis, and
+`tracing.enabled`, `metrics.enabled`, and `plugins.enabled` control their
+respective startup paths. Disabling Redis while `auth.storage_type: redis`
+would leave authentication without its required store, so Redis is started in
+that case. Casbin is not started by configuration alone; the application must
+construct and register an authorizer.
+
+Runtime configuration cannot remove Go imports from a compiled binary. For a
+PostgreSQL service using Casbin, apply the reviewed migration under
+`migrations/optional/casbin-postgres`, construct `NewPostgresCasbinAdapter`
+from the application's PostgreSQL `*sql.DB`, and use
+`NewCasbinAuthorizerWithAdapter`. Build with
+`-tags bear_no_mysql,bear_no_sqlite,bear_casbin_no_gorm_adapter` to exclude
+the MySQL and SQLite drivers plus Casbin's broad GORM adapter. A service that
+does not use Casbin can instead use
+`-tags bear_no_mysql,bear_no_sqlite,bear_no_casbin`. Default builds keep the
+legacy APIs. Exclusion tags fail explicitly if an excluded database is
+selected at runtime; they must match every deployed environment's config.
+The root `go.mod` still lists optional dependencies for default builds and
+tests, so these tags reduce the compiled dependency graph, not module
+downloads. The planned split into optional Go modules is required to remove
+unused modules from generated projects' manifests.
+
+For Casbin on PostgreSQL, first copy and version
+`migrations/optional/casbin-postgres/001_create_casbin_rule.up.sql` in the
+application's migration history, review existing `casbin_rule` rows for
+logical duplicates, and apply it before starting the service. It has no
+automatic down migration because dropping an existing policy table could
+erase live authorization data. After `EnableDatabaseE` has registered the
+PostgreSQL adapter, wire the authorizer explicitly:
+
+```go
+database, err := bear.ResolveE[*bear.GormAdapter](application.Runtime().Container)
+if err != nil { return err }
+sqlDB, err := database.DB.DB()
+if err != nil { return err }
+store, err := bear.NewPostgresCasbinAdapter(sqlDB)
+if err != nil { return err }
+authorizer, err := bear.NewCasbinAuthorizerWithAdapter(store, nil)
+if err != nil { return err }
+if err := application.BeansE(authorizer); err != nil { return err }
+```
+
+The application must register its authorization fairing or use the
+`Authorizer` interface where it handles permissions; creating this bean
+alone does not enforce access. The PostgreSQL adapter uses the existing pool
+and performs no schema migration during startup.
 
 ## Configuration
 
@@ -40,6 +89,14 @@ Start from `application-prod.yaml.example` and keep real secrets outside git. Su
 - `TRACING_OTLP_ENDPOINT`
 - `REDIS_REQUIRED`
 
+PostgreSQL connection security is a deployment choice. Set
+`database.postgres_sslmode: "verify-full"` (or `sslmode` in a DSN) to verify the
+server certificate and hostname, or set `"disable"` for a plaintext link on
+a trusted network. The production loader accepts both. It rejects PostgreSQL
+`allow`/`prefer` fallback and TLS modes that skip hostname verification, so
+the selected transport cannot silently change. The production example shows
+`verify-full`; change it explicitly when your topology uses plaintext.
+
 Production configuration is always strict. `LoadConfig(paths ...string)` loads
 files in order, returns syntax, unknown-field, and validation errors, then
 applies environment overrides. YAML uses known-field validation and JSON
@@ -59,6 +116,8 @@ The tested production-loading pattern is in
 [`examples/migration/main.go`](../examples/migration/main.go). It calls
 `LoadConfig` and returns startup errors to the caller instead of relying on the
 legacy panic behavior.
+Its happy path and its wrapped-error path are exercised by
+`examples/migration/main_test.go` as part of `go test ./...`.
 
 ## Framework Runtime Contract
 
@@ -122,6 +181,35 @@ ownership after resources have begun closing.
 Gin mode is process-global. Once a strict Bear establishes the process mode,
 any later strict or compatibility instance requesting a different mode fails
 with `ErrGinRuntimeConflict` before mutating Gin global state.
+
+## Dependency Injection Contract
+
+Dependencies are always resolved by **field type**. The `inject` tag never names
+a bean, in either runtime mode. In particular `inject:"-"` does not mean "skip";
+it is the historical spelling of "inject this field", and the framework and the
+generated repositories use it throughout.
+
+The two modes differ in which fields they touch and in what happens when a
+dependency is absent:
+
+| | Compatibility (`framework.strict: false`) | Strict (`framework.strict: true`) |
+| --- | --- | --- |
+| Fields injected | only `inject:"-"` and `inject:""`; any other tag value is ignored | every field carrying an `inject` tag, whatever its value |
+| Missing dependency | warns and leaves the zero value | fails startup with `ErrBeanMissing` |
+| Unexported tagged field | panics with an error value, but only once the dependency resolves | returns an error |
+
+To leave a field alone, omit the `inject` tag. A typo in the tag value is not
+detected: `inject:"-"` and `inject:"typo"` behave identically in strict mode,
+while in compatibility mode `inject:"typo"` silently skips the field.
+
+Generated repositories inject `*bear.GormAdapter`, so a generated API resource
+needs that bean to exist before the application serves. `database.enabled: true`
+provides it through `EnableDatabaseE`; an application that owns its `*gorm.DB`
+can instead register one itself with `BeansE(&bear.GormAdapter{DB: db})`. A
+project that does neither fails strict startup with `ErrBeanMissing`, so
+`bear gen api` prints a hint whenever `database.enabled` is false. See
+[Database Migrations](#database-migrations) and
+[Code Generation](#code-generation).
 
 ## HTTP Security Defaults
 
@@ -226,6 +314,89 @@ strict mode a missing injection fails startup; compatibility mode returns a
 generic HTTP 500 at request time. Casbin enforcement errors are logged with
 internal detail but return only a generic 500 to the client, while policy
 denials remain HTTP 403.
+
+The factory-built `CasbinEnforcer` disables the Casbin decision cache by
+default, so removing a role or policy takes effect on the next enforcement
+without an explicit cache clear. Re-enabling the cache, or hand-building
+`CasbinEnforcer{CachedEnforcer: ...}` instead of using the factory, opts out
+of that guarantee. The legacy interface is still not safe for concurrent
+request authorization and policy writes.
+
+For online policy changes use the controlled `CasbinAuthorizer` with the
+existing `Authorizer`/`PermissionFairing` contract and explicit resource and
+action (for example `/secret`, `GET`). It serializes reads and writes on one
+`RWMutex`, refreshes persisted policy before decisions and mutations,
+validates policy/grouping arity against the model before writing
+(malformed rules are rejected without touching memory or the database),
+revokes immediately for authorizations started after a successful write, fails
+closed (errors, never a stale allow) when persistence or reload fails, accepts
+only the three-parameter RBAC model, and rejects non-empty `Scope` instead of
+dropping tenant/project scope silently. Memory-mode instances have no backend
+to reload from, so `LoadPolicy` returns a recognizable error and keeps serving
+the existing policy. With a persistent adapter, each authorization reloads
+policy from the database before enforcing. A revocation committed by another
+instance is therefore visible to the next authorization; a reload failure
+returns an error and requires a successful explicit `LoadPolicy` to recover.
+This performs a database read and takes the instance's authorizer lock on
+every authorization and policy mutation. Capacity-test the policy database at
+the expected authorization rate before enabling this mode in production.
+
+## Runtime agent (experimental)
+
+`extensions/agent` is an opt-in, separately versioned module and stays
+experimental: single read-only agent, fake model by default, budgets and
+per-call authorization enforced server-side, audit and bounded metrics
+included. Enabling a live vendor needs explicit configuration and operator
+credentials; a successful vendor call proves reachability, not production
+readiness. Durable tasks add approval-gated writes with leases, fencing, and
+idempotency. Do not enable write tools without approvals, revocation-tested
+authorization, and rehearsed alert/shutdown/rollback steps.
+When mounting task status, approval, or reconciliation endpoints, configure
+`Handler.TaskAuthorize` with a trusted application policy for each action
+(`status`, `approve`, `confirm-unknown`, `requeue-unknown`). The callback receives
+the authenticated identity and stored task. A missing callback denies access;
+the task owner cannot approve their own write. Tenant matching alone is not an
+operator grant. Run the task migration before accepting work: submission,
+approval, completion, and unknown-result reconciliation of write tasks are
+recorded in `agent_task_audit` in the same database transaction as the task
+state change. Protect that table with the same access control, backup, and
+retention policy as task records.
+
+Every write worker must also set `Worker.WriteAuthorize` to a live,
+authoritative application-policy check for the stored task and its approved
+arguments. The worker calls it immediately before recording execution intent;
+an absent callback or a failed check prevents execution. The store's local
+`PolicyVersion` cannot by itself detect a revocation made on another process.
+The external write executor must use the persisted `ExecNonce` as its
+idempotency key. Once intent is recorded, any executor error leaves the task
+in `unknown` with its budget reservation held, even if the error is marked
+retryable. Requeue only after an operator verifies the external effect did not
+occur; confirm the observed effect and usage otherwise. A write integration
+without that idempotency and reconciliation contract is not production ready.
+Canceling or timing out a write after intent was recorded also leaves it in
+`unknown`; neither action can prove the external effect was absent.
+
+## Request Context and Transactions
+
+`Repository.DB` keeps the transaction carried under `bear_db_tx` and
+normalizes the database operation context to the HTTP request context, so
+cancellation, deadlines, and request-scoped values (request ID, user ID,
+trace) reach GORM without opting into the global Gin `ContextWithFallback`.
+Plain contexts pass through unchanged. Expect operations that previously
+ignored cancellation to return `context.Canceled`/`DeadlineExceeded` now;
+handle those errors instead of committing the surrounding transaction.
+
+## Generation Database Selection
+
+`bear gen api` selects the migration dialect from the same configuration
+chain the runtime uses: base `application.yaml`, the `BEAR_ENV`/`GIN_MODE`
+overlay (with the existing compatibility filename rule), `config.json`, then
+environment overrides. Repeatable `bear gen api --config <path>` files replace
+that chain in order; relative paths resolve against the `go.mod` project root.
+`gen model`/`gen dto` read no database configuration and reject `--config`.
+Generation never connects to a database and never requires production secrets;
+a production file that enables auth without a JWT secret still yields its
+database dialect, while full startup keeps rejecting it.
 
 ## Resource Authorization
 
@@ -493,7 +664,17 @@ migrations/
   002_add_user_email.up.sql
 ```
 
-Run them explicitly from a deploy command or one-off admin tool:
+Run them explicitly from a deploy command or one-off admin tool. Projects created
+by `bear new` ship that admin tool as `cmd/migrate`, which resolves the dialect
+from `database.type` and applies or rolls back the reviewed files:
+
+```bash
+go run ./cmd/migrate                 # apply every pending migration
+go run ./cmd/migrate -direction down -steps 1
+```
+
+Keep it out of the serving path: `cmd/server` never migrates. The same flow
+written directly against the framework API looks like this:
 
 ```go
 adapter, err := bear.NewGormAdapter(cfg.DB)
@@ -655,9 +836,72 @@ only the module path, framework/template versions, and generated API package
 names. It is not a database schema or migration history. Existing projects
 without this registry remain supported and receive the manual `AddModule` hint.
 
-The generated repository requires the application's `GormAdapter`. Decimal
-fields add `github.com/shopspring/decimal v1.4.0` to `go.mod` only when the
-requirement is missing. An existing decimal version is preserved.
+The generated repository requires the application's `GormAdapter`. When the
+target project has a scaffold `application.yaml` and it sets
+`database.enabled: false`, `bear gen api` still publishes the resource but warns
+on stderr and prints the block to add:
+
+```yaml
+database:
+  enabled: true
+  type: "sqlite"
+  dsn: "app.db"
+```
+
+The command does not fail. A disabled database only means the framework will not
+register an adapter for you, and an application is free to register one itself —
+the release E2E opens an in-memory SQLite handle and calls
+`BeansE(&bear.GormAdapter{DB: db})`. Projects without a scaffold
+`application.yaml` are not inspected, and `bear gen model` / `bear gen dto`
+never warn.
+
+`bear new` ships the database disabled on purpose, so the generated project also
+starts under `GIN_MODE=release`, which the framework treats as production and
+which rejects SQLite as a production database. Enabling a database is the step
+between `bear new` and `bear gen api`; the template carries the SQLite block to
+uncomment, and the warning repeats it.
+
+An API resource also needs a table, and `bear gen api` writes the migration for
+it instead of creating schema at startup:
+
+```text
+migrations/001_create_user_profile.up.sql
+migrations/001_create_user_profile.down.sql
+```
+
+The DDL is rendered for the configured `database.type` (`sqlite`, `mysql`, or
+`postgres`; an empty type keeps the MySQL default), covers the primary key and
+every generated column, marks `required` fields `NOT NULL`, and matches the
+column names and GORM types the model generates. The version is the highest
+existing version plus one, zero-padded to three digits, and an existing version
+is never overwritten. A project created by `bear new` therefore runs end to end:
+
+```bash
+bear gen api invoice --fields "name:string,email:email,amount:decimal"
+go mod tidy
+go run ./cmd/migrate
+go run ./cmd/server
+```
+
+Generation is atomic: if the migration write, the `go.mod` dependency pin, or
+the `.bear/scaffold.json` registry update fails, the new resource package and
+any migration files written for it are removed together.
+
+Concurrent generation in one project is excluded by `.bear/generate.lock`, which
+records the owning pid and start time and is removed when the run finishes. An
+interrupted run leaves it behind; the next `bear gen` reports the recorded owner
+and prints the command that clears the lock. It does not reclaim a stale lock on
+its own, because deciding that no other process is generating belongs to the
+operator. Generated projects ignore that lock file while keeping
+`.bear/scaffold.json` committed.
+
+`bear new` also writes a `.gitignore` covering the local SQLite files, the
+`cmd/server` and `cmd/migrate` build output, and the coverage profile. Migration
+SQL stays committed: it is the project's reviewed schema history, not local
+state.
+
+Decimal fields add `github.com/shopspring/decimal v1.4.0` to `go.mod` only when
+the requirement is missing. An existing decimal version is preserved.
 
 ## Request Binding
 
@@ -771,7 +1015,7 @@ call that already started may finish in one bounded background worker, while
 Run the project verification gate locally before cutting a release:
 
 ```bash
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 make verify
 ```
 
 This is the pinned framework verification command used by `main` CI. The tag

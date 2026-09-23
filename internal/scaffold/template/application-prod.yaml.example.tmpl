@@ -63,6 +63,9 @@ cors:
   allow_credentials: false
   max_age: "12h"
 
+# Schema changes are reviewed SQL files under migrations/. Apply them as a
+# separate deploy step before starting this version; the server never migrates
+# implicitly. See docs/production.md.
 database:
   enabled: true
   type: "postgres"
@@ -71,6 +74,8 @@ database:
   user: "gin_bear"
   password: "" # Set with POSTGRES_PASSWORD.
   dbname: "gin_bear"
+  # Choose verify-full with a trusted CA, or disable on a network boundary
+  # that you operate. The framework does not force PostgreSQL TLS.
   sslmode: "verify-full"
 
 redis:
@@ -98,3 +103,6 @@ auth:
 metrics:
   enabled: false
   path: "/metrics"
+
+plugins:
+  enabled: false

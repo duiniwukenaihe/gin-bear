@@ -77,6 +77,9 @@ func TestBuildDSNPostgresValidatesSSLModeAndSupportsLegacyInput(t *testing.T) {
 }
 
 func TestBuildDSNMySQLUsesDriverConfigTLSAndReservedValues(t *testing.T) {
+	if !mysqlDriverAvailable {
+		t.Skip("requires the MySQL driver")
+	}
 	cfg := &DBConfig{
 		Type:     "mysql",
 		Host:     "localhost",
@@ -102,6 +105,9 @@ func TestBuildDSNMySQLUsesDriverConfigTLSAndReservedValues(t *testing.T) {
 }
 
 func TestBuildDSNMySQLIgnoresLegacySSLModeAndWarns(t *testing.T) {
+	if !mysqlDriverAvailable {
+		t.Skip("requires the MySQL driver")
+	}
 	cfg := NewSysConfig()
 	cfg.DB.Type = "mysql"
 	cfg.DB.SSLMode = "require"

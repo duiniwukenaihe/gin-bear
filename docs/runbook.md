@@ -7,10 +7,10 @@
    security policy:
 
    ```bash
-   GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify
+   GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 make verify
    ```
-3. Before an RC or tag, run the complete audited gate with an explicit shuffle
-   seed. The default is offline and therefore requires preinstalled tools, a
+3. Optionally run the extended stress audit with an explicit shuffle
+   seed. This is not a v0.9.4 release gate. The default is offline and therefore requires preinstalled tools, a
    populated module cache, and a local govulncheck database with a trusted
    SHA-256 manifest:
 
@@ -31,25 +31,24 @@
 10. Confirm `main` CI passes, then create an annotated,
     immutable semantic-version tag on the exact reviewed `main` commit.
 11. After the tag workflow completes, verify the GitHub Release, its generated
-    notes, and GitHub-generated source archives. Confirm an application can
+    notes and GitHub-generated source archives. Confirm an application can
     resolve the framework module through the Go toolchain:
 
    ```bash
-   go list -m github.com/duiniwukenaihe/gin-bear@v0.9.3
+   go list -m github.com/duiniwukenaihe/gin-bear@v0.9.4
    ```
 
     When validating the optional project generator, install it separately and
     confirm the generated `go.mod` requires the same framework version:
 
    ```bash
-   GOBIN=$(mktemp -d) go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.3
+   GOBIN=$(mktemp -d) go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.4
    ```
 
-The release workflow runs only for `v*` tags and has one responsibility:
-create the GitHub Release with generated notes. GitHub supplies the standard
-source archives automatically. Framework quality checks run before tagging
-and in the `main` CI workflow; the tag workflow does not repeat them. The
-release job grants `contents: write` only for publishing. The pushed release
+The release workflow runs only for `v*` tags. It reruns framework quality and
+integration checks, then creates the GitHub Release with generated notes.
+GitHub supplies the standard source archives automatically. The release job
+grants `contents: write` only for publishing. The pushed release
 tag must be annotated and target the exact reviewed `main` commit. After
 publishing, the workflow requests the matching version from `proxy.golang.org`
 so the Go Module is indexed. The generator is an optional scaffold entry point;
@@ -72,9 +71,10 @@ both `VALIDSIG` and `TRUST_FULLY` or `TRUST_ULTIMATE`. `false` is recorded as an
 explicit exemption. Supplying the signature variable without a release tag is
 invalid.
 
-The ordinary CI quality job installs pinned versions under
-`${RUNNER_TEMP}/bin` and passes all three absolute binary paths to `make verify`,
-so the gate does not depend on tools preinstalled by the runner image.
+The ordinary CI quality job runs the pinned Go tool module versions through
+`make verify` with `RC_ALLOW_NETWORK=1` and `API_COMPAT_ALLOW_NETWORK=1`.
+The Go checksum database verifies
+downloads, and the gate does not depend on tools preinstalled by the runner.
 Offline verification rejects remote vulnerability database URLs. It accepts
 only an absolute local directory or `file://` URI, requires an independently
 trusted SHA-256 manifest, verifies every relative manifest entry inside the
@@ -90,7 +90,7 @@ diagnostics below are not formal release gate evidence. Publication requires
 the complete gate to pass against the exact clean commit referenced by the
 annotated release tag. The source-only release workflow publishes that already
 reviewed tag without repeating the quality gate.
-All commands use `GOSUMDB=sum.golang.org` and `GOTOOLCHAIN=go1.25.12`, run in
+All commands use `GOSUMDB=sum.golang.org` and `GOTOOLCHAIN=go1.26.6`, run in
 the foreground, and complete before the next command starts.
 
 The reproducible coverage sequence keeps its profile outside the worktree:
@@ -98,9 +98,9 @@ The reproducible coverage sequence keeps its profile outside the worktree:
 ```bash
 profile=$(mktemp /tmp/gin-bear-coverage.XXXXXX)
 trap 'rm -f "$profile"' EXIT
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test ./... -coverprofile="$profile" -count=1
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 scripts/check-coverage.sh "$profile"
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go tool cover -func="$profile"
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 go test ./... -coverprofile="$profile" -count=1
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 scripts/check-coverage.sh "$profile"
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 go tool cover -func="$profile"
 ```
 
 The development-time profile regenerated on 2026-07-11 contained 2,822 covered
@@ -176,7 +176,7 @@ iterations. Override it only with a positive integer followed by `s`, `m`, or
 Run the release-only compatibility test once with:
 
 ```bash
-GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1 -v
+GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1 -v
 ```
 
 It builds a v0.9-style application and a newly generated application in
@@ -224,9 +224,10 @@ were byte-identical, the release-owned coverage profile was removed, and no
 worktree `coverage.out` remained. Remote heads were only `main` and
 `codex/production-baseline`; the active local development branch remained
 allowed. These historical results must not be reused as fresh gate evidence.
-Formal release gate evidence is created only by a complete `make verify-rc`
-run after the fixes are committed, the starting HEAD is clean, and the
-annotated release tag targets that exact commit.
+The historical v0.9.2 audit required a complete `make verify-rc` run after
+the fixes were committed. For v0.9.4, use the gates in
+[release-process.md](release-process.md); the repeated stress stages are
+optional.
 
 ## Rollback
 
@@ -239,7 +240,7 @@ annotated release tag targets that exact commit.
 
 ## Migration Recovery
 
-Run migrations as a separate deploy step before starting the new app version. If a migration job is interrupted while holding the migration lock, verify no migration process is still running, then call `MigrationRunner.ForceUnlock(ctx)` from an admin command before retrying.
+Run migrations as a separate deploy step before starting the new app version. Generated projects do this with `go run ./cmd/migrate`; `cmd/server` never migrates. If a migration job is interrupted while holding the migration lock, verify no migration process is still running, then call `MigrationRunner.ForceUnlock(ctx)` from an admin command before retrying.
 
 Use `MigrationRunner.Down(ctx, migrations, steps)` only for reviewed rollback SQL. Prefer forward fixes when data loss is possible.
 

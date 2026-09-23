@@ -1,0 +1,26 @@
+# {{.Name}} — operator tasks. Every target is explicit; nothing here
+# migrates the database as a side effect of starting the server.
+MODULE := {{.Module}}
+IMAGE ?= my-registry/{{.Name}}:latest
+
+.PHONY: tidy test build migrate docker-build clean
+
+tidy:
+	go mod tidy
+
+test:
+	go test ./... -count=1
+
+build:
+	go build -o bin/server ./cmd/server
+	go build -o bin/migrate ./cmd/migrate
+
+# Reviewed SQL only. Never runs at server startup.
+migrate:
+	go run ./cmd/migrate
+
+docker-build:
+	docker build -t $(IMAGE) .
+
+clean:
+	rm -rf bin

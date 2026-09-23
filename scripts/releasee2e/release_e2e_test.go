@@ -406,7 +406,7 @@ func runGo(t *testing.T, directory string, args ...string) {
 func commandEnvironment(overrides map[string]string) []string {
 	values := map[string]string{
 		"GOSUMDB":     "sum.golang.org",
-		"GOTOOLCHAIN": "go1.25.12",
+		"GOTOOLCHAIN": "go1.26.6",
 	}
 	for name, value := range overrides {
 		values[name] = value

@@ -2,12 +2,13 @@
 
 ## Supported Versions
 
-`v0.9.3` is the current supported release. Users upgrading from `v0.9.1`
-should follow the
+`v0.9.4` is the current supported release. Users upgrading from `v0.9.3`
+should follow the [v0.9.4 upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md).
+Users upgrading from `v0.9.1` should also follow the
 [v0.9.1 to v0.9.2 migration guide](docs/migration-v0.9.1-to-v0.9.2.md).
 
 Generated applications should update from the scaffold regularly and run
-`GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make verify` before release.
+`GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.26.6 make verify` before release.
 Published tags are immutable Go module versions. GitHub provides source
 archives and release metadata so a deployment can be traced to its source
 commit.

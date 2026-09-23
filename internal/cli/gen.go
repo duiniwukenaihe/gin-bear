@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 	"unicode"
 
 	"github.com/duiniwukenaihe/gin-bear/internal/atomicdir"
@@ -23,6 +24,9 @@ const (
 	decimalModuleVersion = "v1.4.0"
 	ginModuleVersion     = "v1.12.0"
 	gormModuleVersion    = "v1.26.0"
+	// scaffoldConfigFile is the configuration file `bear new` writes and the
+	// generated server loads by default.
+	scaffoldConfigFile = "application.yaml"
 )
 
 type resourceOptions struct {
@@ -30,6 +34,20 @@ type resourceOptions struct {
 	Name      string
 	Fields    string
 	Directory string
+	// ConfigPaths replaces the default generation file chain, in order.
+	// Relative paths resolve against Directory (the go.mod project root).
+	ConfigPaths []string
+	// database carries a pre-resolved snapshot so warnings, dialect selection
+	// and SQL writing share a single parse per generation.
+	database *generatedAPIDatabase
+}
+
+// generateResult is the published outcome of one generation: the resource
+// path for stdout plus the adapter hint for stderr, both derived from the
+// same database snapshot.
+type generateResult struct {
+	Path        string
+	AdapterHint string
 }
 
 type field struct {
@@ -51,20 +69,51 @@ type resourceData struct {
 
 func genCommand() *cobra.Command {
 	var fields string
+	var configPaths []string
+	var dryRun bool
+	var previewFormat string
+	var planFile string
 	command := &cobra.Command{
-		Use:   "gen <type> <name>",
-		Short: "Generate code (api|model|dto)",
-		Args:  cobra.ExactArgs(2),
+		Use:   "gen <type> <name> | gen apply --plan <file>",
+		Short: "Generate code (api|model|dto) or apply a previewed plan",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 && args[0] == "apply" {
+				plan, err := cmd.Flags().GetString("plan")
+				if err != nil || strings.TrimSpace(plan) == "" {
+					return errors.New("gen apply requires --plan <file>")
+				}
+				return nil
+			}
+			if len(args) == 2 {
+				return nil
+			}
+			return errors.New("gen requires <type> <name> or \"apply --plan <file>\"")
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 && args[0] == "apply" {
+				if fields != "" || len(configPaths) > 0 || dryRun || previewFormat != "text" {
+					return errors.New("gen apply accepts only --plan <file>")
+				}
+				directory, err := genProjectDirectory()
+				if err != nil {
+					return err
+				}
+				return applyPlanFile(cmd, directory, planFile)
+			}
 			kind := strings.ToLower(args[0])
 			if kind != "api" && kind != "model" && kind != "dto" {
 				return fmt.Errorf("unsupported generation type %q (supported: api, model, dto)", args[0])
 			}
-			currentDirectory, err := os.Getwd()
-			if err != nil {
-				return fmt.Errorf("resolve project directory: %w", err)
+			if kind != "api" && len(configPaths) > 0 {
+				return fmt.Errorf("--config is only supported for \"gen api\" (kind %q reads no database configuration)", kind)
 			}
-			directory, err := nearestGoModRoot(currentDirectory)
+			if previewFormat != "text" && previewFormat != "json" {
+				return fmt.Errorf("invalid --format %q (supported: text, json)", previewFormat)
+			}
+			if previewFormat != "text" && !dryRun {
+				return fmt.Errorf("--format is only supported with --dry-run")
+			}
+			directory, err := genProjectDirectory()
 			if err != nil {
 				return err
 			}
@@ -75,16 +124,43 @@ func genCommand() *cobra.Command {
 					return err
 				}
 			}
-			generated, err := generateResource(cmd.Context(), resourceOptions{
-				Kind:      kind,
-				Name:      args[1],
-				Fields:    fields,
-				Directory: directory,
+			// Resolve the database contract once before generating so an
+			// unreadable configuration fails before any file is written, and
+			// warnings, dialect selection and SQL writing share one snapshot.
+			var database *generatedAPIDatabase
+			if kind == "api" {
+				resolved, err := resolveGeneratedAPIDatabase(directory, configPaths)
+				if err != nil {
+					return err
+				}
+				database = &resolved
+			}
+			if dryRun {
+				return previewResource(cmd, resourceOptions{
+					Kind:        kind,
+					Name:        args[1],
+					Fields:      fields,
+					Directory:   directory,
+					ConfigPaths: configPaths,
+					database:    database,
+				}, previewFormat)
+			}
+			result, err := generateResource(cmd.Context(), resourceOptions{
+				Kind:        kind,
+				Name:        args[1],
+				Fields:      fields,
+				Directory:   directory,
+				ConfigPaths: configPaths,
+				database:    database,
 			})
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Generated %s\n", generated)
+			// Warnings go to stderr so the machine-readable stdout stays stable.
+			if result.AdapterHint != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", result.AdapterHint)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Generated %s\n", result.Path)
 			if kind == "api" && !managedProject {
 				fmt.Fprintf(cmd.OutOrStdout(), "No %s found; register %s.NewModule() manually with application.AddModule or application.AddModuleE.\n", scaffold.ManifestPath, packageName(args[1]))
 			}
@@ -92,7 +168,20 @@ func genCommand() *cobra.Command {
 		},
 	}
 	command.Flags().StringVarP(&fields, "fields", "f", "", "fields as name:type pairs")
+	command.Flags().StringArrayVar(&configPaths, "config", nil, "generation config file (repeatable, relative to project root; only for gen api)")
+	command.Flags().BoolVar(&dryRun, "dry-run", false, "preview the generation without writing anything")
+	command.Flags().StringVar(&previewFormat, "format", "text", "preview output format with --dry-run: text or json")
+	command.Flags().StringVar(&planFile, "plan", "", "preview file for \"gen apply --plan <file>\"")
 	return command
+}
+
+// genProjectDirectory resolves the go.mod project root from the working directory.
+func genProjectDirectory() (string, error) {
+	currentDirectory, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve project directory: %w", err)
+	}
+	return nearestGoModRoot(currentDirectory)
 }
 
 func nearestGoModRoot(start string) (string, error) {
@@ -120,72 +209,77 @@ func nearestGoModRoot(start string) (string, error) {
 	}
 }
 
-func generateResource(ctx context.Context, opts resourceOptions) (string, error) {
+func generateResource(ctx context.Context, opts resourceOptions) (generateResult, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return generateResult{}, err
 	}
 	if opts.Directory == "" {
-		return "", errors.New("project directory is required")
+		return generateResult{}, errors.New("project directory is required")
 	}
-	packageName := packageName(opts.Name)
-	if packageName == "resource" && len(nameParts(opts.Name)) == 0 {
-		return "", fmt.Errorf("resource name %q is invalid", opts.Name)
+	if opts.Kind != "api" && len(opts.ConfigPaths) > 0 {
+		return generateResult{}, fmt.Errorf("--config is only supported for \"gen api\" (kind %q reads no database configuration)", opts.Kind)
 	}
-	fields, err := parseResourceFields(opts.Fields)
+	// Single database selection per generation: warnings, dialect choice and
+	// SQL writing share this snapshot. A pre-resolved snapshot from the command
+	// entry avoids a second parse; direct callers resolve once here, before any
+	// resource is published.
+	var database generatedAPIDatabase
+	if opts.Kind == "api" {
+		if opts.database != nil {
+			database = *opts.database
+		} else {
+			resolved, err := resolveGeneratedAPIDatabase(opts.Directory, opts.ConfigPaths)
+			if err != nil {
+				return generateResult{}, err
+			}
+			database = resolved
+		}
+	}
+	activePackage := packageName(opts.Name)
+	if activePackage == "resource" && len(nameParts(opts.Name)) == 0 {
+		return generateResult{}, fmt.Errorf("resource name %q is invalid", opts.Name)
+	}
+	// Every api generation writes migrations, so every api generation takes
+	// the lock — managed or legacy. The lock is acquired before the manifest
+	// is read so the whole read-decide-write sequence is exclusive.
+	if opts.Kind == "api" {
+		release, err := lockGeneration(opts.Directory)
+		if err != nil {
+			return generateResult{}, err
+		}
+		defer release()
+	}
+	managed, err := prepareManagedGeneration(opts.Directory, opts.Kind, activePackage)
 	if err != nil {
-		return "", err
-	}
-	data := resourceData{
-		PackageName: packageName,
-		Title:       titleName(opts.Name),
-		RouteName:   routeName(opts.Name),
-		Fields:      fields,
-		Imports:     resourceImports(fields),
-	}
-	managed, err := prepareManagedGeneration(opts.Directory, opts.Kind, packageName)
-	if err != nil {
-		return "", err
-	}
-	if managed != nil {
-		defer managed.release()
+		return generateResult{}, err
 	}
 
-	templates, err := templatesForKind(opts.Kind)
+	// The plan renders exactly what preview shows; generation only executes it.
+	plan, err := planResource(ctx, opts, database, managed)
 	if err != nil {
-		return "", err
+		return generateResult{}, err
 	}
-	rendered := make(map[string][]byte, len(templates))
-	names := make([]string, 0, len(templates))
-	for filename, source := range templates {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		contents, err := executeResourceTemplate(filename, source, data)
-		if err != nil {
-			return "", err
-		}
-		formatted, err := format.Source(contents)
-		if err != nil {
-			return "", fmt.Errorf("format generated file %q: %w", filename, err)
-		}
-		rendered[filename] = formatted
-		names = append(names, filename)
+	for _, conflict := range plan.Conflicts {
+		return generateResult{}, errors.New(conflict)
 	}
-	sort.Strings(names)
+	return executePlan(ctx, opts.Directory, plan, managed)
+}
 
-	internalDir := filepath.Join(opts.Directory, "internal")
-	target := filepath.Join(internalDir, packageName)
-	if _, err := os.Lstat(target); err == nil {
-		return "", fmt.Errorf("resource package %q already exists", target)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("inspect resource package %q: %w", target, err)
+// executePlan publishes a conflict-free plan: resource files, migration pair,
+// go.mod pins, and manifest registration with rollback on failure.
+func executePlan(ctx context.Context, directory string, plan *resourcePlan, managed *managedGeneration) (generateResult, error) {
+	activePackage := plan.data.PackageName
+	internalDir := filepath.Join(directory, "internal")
+	target := filepath.Join(internalDir, activePackage)
+	if err := checkParentSymlinks(directory, target); err != nil {
+		return generateResult{}, err
 	}
 	if err := os.MkdirAll(internalDir, 0755); err != nil {
-		return "", fmt.Errorf("create internal directory: %w", err)
+		return generateResult{}, fmt.Errorf("create internal directory: %w", err)
 	}
-	temporary, err := os.MkdirTemp(internalDir, "."+packageName+".tmp-")
+	temporary, err := os.MkdirTemp(internalDir, "."+activePackage+".tmp-")
 	if err != nil {
-		return "", fmt.Errorf("create temporary resource package: %w", err)
+		return generateResult{}, fmt.Errorf("create temporary resource package: %w", err)
 	}
 	published := false
 	defer func() {
@@ -193,36 +287,70 @@ func generateResource(ctx context.Context, opts resourceOptions) (string, error)
 			_ = os.RemoveAll(temporary)
 		}
 	}()
-	for _, filename := range names {
+	for _, file := range plan.Files {
 		if err := ctx.Err(); err != nil {
-			return "", err
+			return generateResult{}, err
 		}
-		if err := os.WriteFile(filepath.Join(temporary, filename), rendered[filename], 0644); err != nil {
-			return "", fmt.Errorf("write generated file %q: %w", filename, err)
+		if err := os.WriteFile(filepath.Join(temporary, file.Name), file.Contents, 0644); err != nil {
+			return generateResult{}, fmt.Errorf("write generated file %q: %w", file.Rel, err)
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return generateResult{}, err
 	}
 	if err := atomicdir.Publish(temporary, target); err != nil {
-		return "", fmt.Errorf("publish resource package: %w", err)
+		return generateResult{}, fmt.Errorf("publish resource package: %w", err)
 	}
 	published = true
-	if err := pinResourceDependencies(opts.Directory, opts.Kind, fields); err != nil {
-		if removeErr := os.RemoveAll(target); removeErr != nil {
-			return "", fmt.Errorf("pin generated dependencies: %w (rollback resource: %v)", err, removeErr)
+	var migrationFiles []string
+	// Snapshot go.mod so a later rollback can undo dependency pins: applyPins
+	// rewrites the file in place, and leaving pins behind after a failed
+	// registration would strand requirements the resource no longer needs.
+	goModPath := filepath.Join(directory, "go.mod")
+	goModOriginal, goModReadErr := os.ReadFile(goModPath)
+	goModExisted := goModReadErr == nil
+	goModMode := os.FileMode(0644)
+	if goModExisted {
+		if info, statErr := os.Stat(goModPath); statErr == nil {
+			goModMode = info.Mode().Perm()
 		}
-		return "", fmt.Errorf("pin generated dependencies: %w", err)
+	}
+	rollback := func() error {
+		removeGeneratedFiles(directory, migrationFiles)
+		var restoreErr error
+		if goModExisted {
+			restoreErr = os.WriteFile(goModPath, goModOriginal, goModMode)
+		}
+		return errors.Join(os.RemoveAll(target), restoreErr)
+	}
+	if plan.Kind == "api" && plan.Migration != nil {
+		written, err := writeResourceMigration(directory, plan.migration)
+		// Record partial writes before checking the error so rollback removes a
+		// migration pair whose second file failed after the first was written.
+		migrationFiles = written
+		if err != nil {
+			if removeErr := rollback(); removeErr != nil {
+				return generateResult{}, fmt.Errorf("%w (rollback resource: %v)", err, removeErr)
+			}
+			return generateResult{}, err
+		}
+	}
+	if err := applyPins(directory, plan.GoMod); err != nil {
+		if removeErr := rollback(); removeErr != nil {
+			return generateResult{}, fmt.Errorf("pin generated dependencies: %w (rollback resource: %v)", err, removeErr)
+		}
+		return generateResult{}, fmt.Errorf("pin generated dependencies: %w", err)
 	}
 	if managed != nil {
-		if err := managed.register(data); err != nil {
-			if removeErr := os.RemoveAll(target); removeErr != nil {
-				return "", fmt.Errorf("register generated API: %w (rollback resource: %v)", err, removeErr)
+		if err := managed.register(plan.data, planFileSHAs(plan)); err != nil {
+			if removeErr := rollback(); removeErr != nil {
+				return generateResult{}, fmt.Errorf("register generated API: %w (rollback resource: %v)", err, removeErr)
 			}
-			return "", fmt.Errorf("register generated API: %w", err)
+			return generateResult{}, fmt.Errorf("register generated API: %w", err)
 		}
 	}
-	return filepath.Join("internal", packageName), nil
+	hint := strings.Join(plan.Warnings, "\n")
+	return generateResult{Path: filepath.FromSlash(plan.Target), AdapterHint: hint}, nil
 }
 
 type managedGeneration struct {
@@ -230,8 +358,6 @@ type managedGeneration struct {
 	manifest         scaffold.Manifest
 	originalManifest []byte
 	manifestMode     os.FileMode
-	lock             *os.File
-	lockPath         string
 }
 
 func scaffoldManifestExists(root string) (bool, error) {
@@ -246,6 +372,89 @@ func scaffoldManifestExists(root string) (bool, error) {
 	return false, fmt.Errorf("inspect scaffold manifest %q: %w", path, err)
 }
 
+// generateLockPath is the project-relative path of the exclusive generation
+// lock.
+const generateLockPath = ".bear/generate.lock"
+
+// acquireGenerationLock takes the per-project generation lock and returns the
+// held file together with its absolute path.
+//
+// Two concurrent `bear gen api` runs would otherwise interleave their writes to
+// .bear/scaffold.json and internal/app/modules_gen.go, silently dropping one of
+// the registrations.
+//
+// The lock records the owning pid and start time so that a lock left behind by a
+// crashed run can be described instead of reported as a bare "file exists". A
+// stale lock is deliberately not reclaimed automatically: deciding that no other
+// process is generating in this project is the operator's call, which is also
+// how git treats a leftover index.lock. Reclaiming it here would need pid
+// liveness checks, and those differ per platform and misjudge a recycled pid.
+func acquireGenerationLock(root string) (*os.File, string, error) {
+	path := filepath.Join(root, filepath.FromSlash(generateLockPath))
+	// A legacy project has no .bear directory yet; the lock is the first thing
+	// to need it. Creating it is safe because release removes the lock and then
+	// removes the directory again when nothing else occupies it.
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, path, fmt.Errorf("create generation lock directory %q: %w", filepath.Dir(path), err)
+	}
+	lock, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err == nil {
+		if _, writeErr := fmt.Fprintf(lock, "pid=%d started=%s\n", os.Getpid(), time.Now().Format(time.RFC3339)); writeErr != nil {
+			// A lock with no owner record still excludes other runs, so the
+			// failure to describe the holder must not be reported as a lock.
+			_ = lock.Close()
+			_ = os.Remove(path)
+			return nil, path, fmt.Errorf("record generation lock owner %q: %w", path, writeErr)
+		}
+		return lock, path, nil
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return nil, path, fmt.Errorf("acquire generation lock %q: %w", path, err)
+	}
+	return nil, path, fmt.Errorf(`generation lock %q is already held (%s).
+Another "bear gen" may be running in this project. Wait for it to finish, or delete the lock and retry:
+    rm %q`,
+		path, describeGenerationLockHolder(path), path)
+}
+
+// lockGeneration takes the per-project generation lock for a command that
+// writes generated API files and returns its release. Both managed and legacy
+// (manifest-less) projects need it: both write migrations, and two concurrent
+// runs would otherwise allocate the same migration version. Callers invoke it
+// only for api generations; model/dto write neither a migration nor the
+// registry.
+func lockGeneration(root string) (func(), error) {
+	lock, lockPath, err := acquireGenerationLock(root)
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		if lock != nil {
+			_ = lock.Close()
+		}
+		_ = os.Remove(lockPath)
+		// Drop .bear again if this run created it for the lock and left it
+		// empty; a managed project keeps its manifest, so Remove fails and is
+		// ignored.
+		_ = os.Remove(filepath.Dir(lockPath))
+	}, nil
+}
+
+// describeGenerationLockHolder summarises the owner record of an existing lock.
+// It never fails: an unreadable or empty lock still has to produce a usable
+// recovery message.
+func describeGenerationLockHolder(path string) string {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "owner record unreadable"
+	}
+	fields := strings.Fields(string(contents))
+	if len(fields) == 0 {
+		return "owner record empty"
+	}
+	return strings.Join(fields, " ")
+}
+
 func prepareManagedGeneration(root, kind, packageName string) (*managedGeneration, error) {
 	if kind != "api" {
 		return nil, nil
@@ -255,19 +464,7 @@ func prepareManagedGeneration(root, kind, packageName string) (*managedGeneratio
 		return nil, err
 	}
 
-	lockPath := filepath.Join(root, ".bear", "generate.lock")
-	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("acquire generation lock %q: %w", lockPath, err)
-	}
-	managed := &managedGeneration{root: root, lock: lock, lockPath: lockPath}
-	prepared := false
-	defer func() {
-		if !prepared {
-			managed.release()
-		}
-	}()
-
+	managed := &managedGeneration{root: root}
 	managed.manifest, err = scaffold.ReadManifest(root)
 	if err != nil {
 		return nil, err
@@ -287,39 +484,11 @@ func prepareManagedGeneration(root, kind, packageName string) (*managedGeneratio
 		return nil, fmt.Errorf("inspect scaffold manifest %q: %w", manifestPath, err)
 	}
 	managed.manifestMode = info.Mode().Perm()
-	prepared = true
 	return managed, nil
 }
 
-func (managed *managedGeneration) release() {
-	if managed == nil {
-		return
-	}
-	if managed.lock != nil {
-		_ = managed.lock.Close()
-	}
-	_ = os.Remove(managed.lockPath)
-}
-
-func (managed *managedGeneration) register(data resourceData) error {
-	managed.manifest.APIs = append(managed.manifest.APIs, scaffold.GeneratedAPI{
-		Name:       data.Title,
-		Package:    data.PackageName,
-		Path:       filepath.ToSlash(filepath.Join("internal", data.PackageName)),
-		ModuleType: data.PackageName + ".Module",
-	})
-	sort.SliceStable(managed.manifest.APIs, func(i, j int) bool {
-		if managed.manifest.APIs[i].Package == managed.manifest.APIs[j].Package {
-			return managed.manifest.APIs[i].Name < managed.manifest.APIs[j].Name
-		}
-		return managed.manifest.APIs[i].Package < managed.manifest.APIs[j].Package
-	})
-
-	manifestContents, err := scaffold.MarshalManifest(managed.manifest)
-	if err != nil {
-		return fmt.Errorf("render scaffold manifest: %w", err)
-	}
-	registryContents, err := renderModuleRegistry(managed.manifest)
+func (managed *managedGeneration) register(data resourceData, files map[string]string) error {
+	_, manifestContents, registryContents, err := renderManifestUpdate(managed.manifest, data, files)
 	if err != nil {
 		return err
 	}
@@ -390,77 +559,6 @@ func writeGeneratedFileAtomic(path string, contents []byte, mode os.FileMode) er
 	closed = true
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace %q: %w", path, err)
-	}
-	return nil
-}
-
-func pinResourceDependencies(directory, kind string, fields []field) error {
-	needsDecimal := false
-	for _, item := range fields {
-		if item.GoType == "decimal.Decimal" {
-			needsDecimal = true
-			break
-		}
-	}
-	type requirement struct {
-		path             string
-		version          string
-		preserveExisting bool
-	}
-	requirements := make([]requirement, 0, 3)
-	if kind == "api" {
-		requirements = append(requirements,
-			requirement{path: "github.com/gin-gonic/gin", version: ginModuleVersion},
-			requirement{path: "gorm.io/gorm", version: gormModuleVersion},
-		)
-	}
-	if needsDecimal {
-		requirements = append(requirements, requirement{
-			path:             "github.com/shopspring/decimal",
-			version:          decimalModuleVersion,
-			preserveExisting: true,
-		})
-	}
-	if len(requirements) == 0 {
-		return nil
-	}
-
-	path := filepath.Join(directory, "go.mod")
-	contents, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read go.mod: %w", err)
-	}
-	file, err := modfile.Parse(path, contents, nil)
-	if err != nil {
-		return fmt.Errorf("parse go.mod: %w", err)
-	}
-	changed := false
-	for _, requirement := range requirements {
-		if requirement.preserveExisting && hasRequirement(file, requirement.path) {
-			continue
-		}
-		requirementChanged, err := ensureDirectRequirement(file, requirement.path, requirement.version)
-		if err != nil {
-			return err
-		}
-		changed = changed || requirementChanged
-	}
-	if !changed {
-		return nil
-	}
-	formatted, err := file.Format()
-	if err != nil {
-		return fmt.Errorf("format go.mod: %w", err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("inspect go.mod: %w", err)
-	}
-	if err := os.WriteFile(path, formatted, info.Mode().Perm()); err != nil {
-		return fmt.Errorf("write go.mod: %w", err)
 	}
 	return nil
 }
@@ -1032,13 +1130,102 @@ const routerTemplate = `package {{.PackageName}}
 
 const serviceTestTemplate = `package {{.PackageName}}
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/duiniwukenaihe/gin-bear/pkg/bear"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+)
 
 func Test{{.Title}}ServiceToResponse(t *testing.T) {
 	model := &{{.Title}}Model{}
 	service := &{{.Title}}Service{}
 	if response := service.toResponse(model); response == nil {
 		t.Fatal("expected response")
+	}
+}
+
+func Test{{.Title}}QueryDTONormalizeBounds(t *testing.T) {
+	query := &{{.Title}}QueryDTO{}
+	query.Normalize()
+	if query.Page != 1 || query.PageSize != 20 {
+		t.Fatalf("zero query normalized to page=%d size=%d, want 1/20", query.Page, query.PageSize)
+	}
+	query = &{{.Title}}QueryDTO{Page: -3, PageSize: 10000}
+	query.Normalize()
+	if query.Page != 1 || query.PageSize != 100 {
+		t.Fatalf("overflowing query normalized to page=%d size=%d, want 1/100", query.Page, query.PageSize)
+	}
+}
+
+func open{{.Title}}TestService(t *testing.T) *{{.Title}}Service {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite failed: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql.DB failed: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := db.AutoMigrate(&{{.Title}}Model{}); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+	repository := &{{.Title}}Repository{}
+	repository.Adapter = &bear.GormAdapter{DB: db}
+	if err := repository.Init(context.Background()); err != nil {
+		t.Fatalf("repository Init failed: %v", err)
+	}
+	return &{{.Title}}Service{Repo: repository}
+}
+
+func Test{{.Title}}ServiceCRUDRoundTrip(t *testing.T) {
+	service := open{{.Title}}TestService(t)
+	ctx := context.Background()
+	created, err := service.Create(ctx, &{{.Title}}CreateDTO{Name: "first"})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	fetched, err := service.GetByID(ctx, int64(created.ID))
+	if err != nil {
+		t.Fatalf("GetByID failed: %v", err)
+	}
+	if fetched.Name != "first" {
+		t.Fatalf("GetByID name = %q, want first", fetched.Name)
+	}
+	listed, err := service.Query(ctx, &{{.Title}}QueryDTO{Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+	if listed.Total != 1 || len(listed.List) != 1 {
+		t.Fatalf("Query total/list = %d/%d, want 1/1", listed.Total, len(listed.List))
+	}
+	renamed := "second"
+	if err := service.Update(ctx, int64(created.ID), &{{.Title}}UpdateDTO{Name: &renamed}); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if err := service.Delete(ctx, int64(created.ID)); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+	if _, err := service.GetByID(ctx, int64(created.ID)); !errors.Is(err, bear.ErrNotFound) {
+		t.Fatalf("GetByID after delete = %v, want not found", err)
+	}
+	if err := service.Delete(ctx, int64(created.ID)); !errors.Is(err, bear.ErrNotFound) {
+		t.Fatalf("second Delete = %v, want not found", err)
+	}
+}
+
+func Test{{.Title}}ServicePropagatesCancellation(t *testing.T) {
+	service := open{{.Title}}TestService(t)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := service.Query(cancelled, &{{.Title}}QueryDTO{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Query with canceled context = %v, want context.Canceled", err)
 	}
 }
 `

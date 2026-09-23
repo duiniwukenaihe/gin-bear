@@ -48,12 +48,14 @@ type openAPIRouteMetadataStore struct {
 	routes map[RouteMetadata]openAPIRouteMetadata
 }
 
-// setOpenAPIRouteMetadata is the package-private integration point for route
-// registration. It snapshots instance identity and effective fairings.
-func (b *Bear) setOpenAPIRouteMetadata(route RouteMetadata, fullPath string, controller IOpenAPI, fairings ...Fairing) {
+// openAPIRouteMetadataStore returns the shared route metadata store, creating it
+// under the expression-map lock on first use.
+func (b *Bear) openAPIRouteMetadataStore() *openAPIRouteMetadataStore {
 	if b == nil {
-		return
+		return nil
 	}
+	b.exprDataMu.Lock()
+	defer b.exprDataMu.Unlock()
 	if b.exprData == nil {
 		b.exprData = make(map[string]interface{})
 	}
@@ -61,6 +63,16 @@ func (b *Bear) setOpenAPIRouteMetadata(route RouteMetadata, fullPath string, con
 	if store == nil {
 		store = &openAPIRouteMetadataStore{routes: make(map[RouteMetadata]openAPIRouteMetadata)}
 		b.exprData[openAPIRouteMetadataStoreKey] = store
+	}
+	return store
+}
+
+// setOpenAPIRouteMetadata is the package-private integration point for route
+// registration. It snapshots instance identity and effective fairings.
+func (b *Bear) setOpenAPIRouteMetadata(route RouteMetadata, fullPath string, controller IOpenAPI, fairings ...Fairing) {
+	store := b.openAPIRouteMetadataStore()
+	if store == nil {
+		return
 	}
 	store.mu.Lock()
 	store.routes[route] = openAPIRouteMetadata{
@@ -72,10 +84,8 @@ func (b *Bear) setOpenAPIRouteMetadata(route RouteMetadata, fullPath string, con
 }
 
 func (b *Bear) openAPIRouteMetadata(route RouteMetadata) (openAPIRouteMetadata, bool) {
-	if b == nil || b.exprData == nil {
-		return openAPIRouteMetadata{}, false
-	}
-	store, _ := b.exprData[openAPIRouteMetadataStoreKey].(*openAPIRouteMetadataStore)
+	stored, _ := b.exprDataValue(openAPIRouteMetadataStoreKey)
+	store, _ := stored.(*openAPIRouteMetadataStore)
 	if store == nil {
 		return openAPIRouteMetadata{}, false
 	}
@@ -105,7 +115,7 @@ func (b *Bear) GenerateOpenAPI() ([]byte, error) {
 		config = b.runtime.Config
 	}
 	if b != nil {
-		routes = b.routeRegistry
+		routes = b.routeMetadataSnapshot()
 	}
 	title := "gin-bear"
 	if config != nil && config.Server != nil && config.Server.Name != "" {
@@ -301,10 +311,8 @@ func (b *Bear) authFairings() []*AuthFairing {
 		seen[auth] = struct{}{}
 		fairings = append(fairings, auth)
 	}
-	if b.exprData == nil {
-		return fairings
-	}
-	store, _ := b.exprData[openAPIRouteMetadataStoreKey].(*openAPIRouteMetadataStore)
+	stored, _ := b.exprDataValue(openAPIRouteMetadataStoreKey)
+	store, _ := stored.(*openAPIRouteMetadataStore)
 	if store == nil {
 		return fairings
 	}

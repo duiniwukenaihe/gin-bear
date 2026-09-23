@@ -1,0 +1,19 @@
+# Local SQLite state. The default database.type is sqlite, so running
+# `go run ./cmd/migrate` or `go run ./cmd/server` creates these files here.
+# Migrations under migrations/ are reviewed SQL and must stay committed.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local build output from `go build ./cmd/server` and `go build ./cmd/migrate`.
+/server
+/migrate
+
+# Local coverage profile.
+coverage.out
+
+# `bear gen` removes this lock when it finishes, so it only survives an
+# interrupted run. .bear/scaffold.json next to it is the generator registry and
+# stays committed.
+.bear/generate.lock

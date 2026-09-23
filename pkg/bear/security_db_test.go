@@ -96,6 +96,13 @@ func TestValidateProductionDBTLSPostgresStructuredAndRawDSN(t *testing.T) {
 			},
 		},
 		{
+			name: "structured plaintext",
+			config: &DBConfig{
+				Enabled: true, Type: "postgres", Host: "db.example", DBName: "app",
+				PostgresSSLMode: "disable",
+			},
+		},
+		{
 			name: "structured verify ca",
 			config: &DBConfig{
 				Enabled: true, Type: "postgres", Host: "db.example", DBName: "app",
@@ -124,7 +131,13 @@ func TestValidateProductionDBTLSPostgresStructuredAndRawDSN(t *testing.T) {
 				Enabled: true, Type: "postgres",
 				DSN: "postgres://user:raw-secret@db.example/app?sslmode=disable",
 			},
-			wantErr: true,
+		},
+		{
+			name: "raw keyword disable",
+			config: &DBConfig{
+				Enabled: true, Type: "postgres",
+				DSN: "host=db.example user=user password='raw secret' dbname=app sslmode=disable",
+			},
 		},
 		{
 			name: "raw keyword verify full",
@@ -164,6 +177,9 @@ func TestValidateProductionDBTLSPostgresStructuredAndRawDSN(t *testing.T) {
 }
 
 func TestValidateProductionDBTLSMySQLStructuredAndRawDSN(t *testing.T) {
+	if !mysqlDriverAvailable {
+		t.Skip("requires the MySQL driver")
+	}
 	const secureTLSName = "gin-bear-security-test-verify"
 	const insecureTLSName = "gin-bear-security-test-insecure"
 	if err := mysqldriver.RegisterTLSConfig(secureTLSName, &tls.Config{MinVersion: tls.VersionTLS12}); err != nil {
@@ -227,7 +243,7 @@ func TestValidateProductionDBTLSSkipsNonProductionAndDisabledDB(t *testing.T) {
 	}
 }
 
-func TestSysConfigValidateEnforcesProductionDBTLS(t *testing.T) {
+func TestSysConfigValidateAllowsPlaintextPostgresButRejectsDowngrade(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")
 	cfg := NewSysConfig()
@@ -237,9 +253,13 @@ func TestSysConfigValidateEnforcesProductionDBTLS(t *testing.T) {
 	cfg.DB.Type = "postgres"
 	cfg.DB.DSN = "postgres://user:validate-secret@db.example/app?sslmode=disable"
 
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("SysConfig.Validate rejected explicit plaintext PostgreSQL: %v", err)
+	}
+	cfg.DB.DSN = "postgres://user:validate-secret@db.example/app?sslmode=prefer"
 	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "verify-full") {
-		t.Fatalf("SysConfig.Validate error = %v, want production TLS rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "disable or verify-full") {
+		t.Fatalf("SysConfig.Validate error = %v, want downgrade rejection", err)
 	}
 	if strings.Contains(err.Error(), "validate-secret") {
 		t.Fatalf("SysConfig.Validate leaked DSN credential: %v", err)
@@ -251,7 +271,7 @@ func TestSysConfigValidateEnforcesProductionDBTLS(t *testing.T) {
 	}
 }
 
-func TestLoadConfigEnforcesProductionDBTLSFromYAML(t *testing.T) {
+func TestLoadConfigAllowsProductionPlaintextPostgresFromYAML(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")
 	t.Setenv("JWT_SECRET", randomProductionJWTKey(t))
@@ -264,26 +284,26 @@ config:
   framework.strict: true
 `)
 
-	_, err := LoadConfig(path)
-	if err == nil || !strings.Contains(err.Error(), "verify-full") {
-		t.Fatalf("LoadConfig error = %v, want production TLS rejection", err)
+	config, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig rejected explicit plaintext PostgreSQL: %v", err)
 	}
-	if strings.Contains(err.Error(), "yaml-secret") {
-		t.Fatalf("LoadConfig leaked DSN credential: %v", err)
+	if config.DB.DSN != "postgres://user:yaml-secret@db.example/app?sslmode=disable" {
+		t.Fatalf("LoadConfig changed PostgreSQL DSN: %q", config.DB.DSN)
 	}
 }
 
-func TestNewGormAdapterDefensivelyEnforcesProductionDBTLS(t *testing.T) {
+func TestNewGormAdapterRejectsDowngradablePostgresTLS(t *testing.T) {
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")
 	cfg := &DBConfig{
 		Type: "postgres",
-		DSN:  "postgres://user:adapter-secret@db.example/app?sslmode=disable",
+		DSN:  "postgres://user:adapter-secret@127.0.0.1:1/app?sslmode=prefer&connect_timeout=1",
 	}
 
 	adapter, err := NewGormAdapter(cfg)
-	if adapter != nil || err == nil || !strings.Contains(err.Error(), "verify-full") {
-		t.Fatalf("NewGormAdapter = %#v, error = %v, want production TLS rejection", adapter, err)
+	if adapter != nil || err == nil || !strings.Contains(err.Error(), "disable or verify-full") {
+		t.Fatalf("NewGormAdapter = %#v, error = %v, want downgrade rejection", adapter, err)
 	}
 	if strings.Contains(err.Error(), "adapter-secret") {
 		t.Fatalf("NewGormAdapter leaked DSN credential: %v", err)
@@ -291,18 +311,21 @@ func TestNewGormAdapterDefensivelyEnforcesProductionDBTLS(t *testing.T) {
 
 	t.Setenv("BEAR_ENV", "dev")
 	t.Setenv("GIN_MODE", "release")
-	if _, err := NewGormAdapter(cfg); err == nil || !strings.Contains(err.Error(), "verify-full") {
-		t.Fatalf("release-mode NewGormAdapter error = %v, want production TLS rejection", err)
+	if _, err := NewGormAdapter(cfg); err == nil || !strings.Contains(err.Error(), "disable or verify-full") {
+		t.Fatalf("release-mode NewGormAdapter error = %v, want downgrade rejection", err)
 	}
 
 	t.Setenv("GIN_MODE", "debug")
 	_, err = NewGormAdapter(cfg)
-	if err != nil && strings.Contains(err.Error(), "verify-full") {
+	if err != nil && strings.Contains(err.Error(), "disable or verify-full") {
 		t.Fatalf("development NewGormAdapter applied production TLS policy: %v", err)
 	}
 }
 
 func TestNewGormAdapterConnectsSQLiteInDevelopment(t *testing.T) {
+	if !sqliteDriverAvailable {
+		t.Skip("requires the SQLite driver")
+	}
 	t.Setenv("BEAR_ENV", "dev")
 	t.Setenv("GIN_MODE", "debug")
 
@@ -321,6 +344,9 @@ func TestNewGormAdapterConnectsSQLiteInDevelopment(t *testing.T) {
 }
 
 func TestProductionMySQLTLSFailsAtAllStartupBoundaries(t *testing.T) {
+	if !mysqlDriverAvailable {
+		t.Skip("requires the MySQL driver")
+	}
 	const dsn = "app:mysql-path-secret@tcp(db.example:3306)/app?tls=false"
 	t.Setenv("BEAR_ENV", "production")
 	t.Setenv("GIN_MODE", "")

@@ -1,0 +1,89 @@
+name: Integration
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bear_int_admin
+          POSTGRES_PASSWORD: bear_int_admin_pw
+          POSTGRES_DB: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U bear_int_admin -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: bear_int_root_pw
+          MYSQL_DATABASE: mysql
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pbear_int_root_pw"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare disposable databases
+        run: |
+          PGPASSWORD=bear_int_admin_pw psql -h 127.0.0.1 -p 5433 -U bear_int_admin -d postgres \
+            -c "CREATE DATABASE bear_integration_ci;" \
+            -c "CREATE ROLE bear_int LOGIN PASSWORD 'bear_int_ci_pw';" \
+            -c "GRANT ALL PRIVILEGES ON DATABASE bear_integration_ci TO bear_int;" \
+            -c "GRANT pg_signal_backend TO bear_int;"
+          PGPASSWORD=bear_int_admin_pw psql -h 127.0.0.1 -p 5433 -U bear_int_admin -d bear_integration_ci \
+            -c "GRANT ALL ON SCHEMA public TO bear_int;"
+          mysql -h 127.0.0.1 -P 3307 -uroot -pbear_int_root_pw \
+            -e "CREATE DATABASE IF NOT EXISTS bear_integration_ci; CREATE USER IF NOT EXISTS 'bear_int'@'%' IDENTIFIED BY 'bear_int_ci_pw'; GRANT ALL PRIVILEGES ON bear_integration_ci.* TO 'bear_int'@'%'; FLUSH PRIVILEGES;"
+
+      - name: Run integration suite
+        env:
+          BEAR_INTEGRATION_REQUIRE: pg,mysql,redis
+          BEAR_INTEGRATION_PG_DSN: postgres://bear_int:bear_int_ci_pw@127.0.0.1:5433/bear_integration_ci?sslmode=disable
+          BEAR_INTEGRATION_MYSQL_DSN: mysql://bear_int:bear_int_ci_pw@127.0.0.1:3307/bear_integration_ci
+          BEAR_INTEGRATION_REDIS_ADDR: 127.0.0.1:6380
+        run: scripts/test-integration.sh
+
+      - name: Verify nested modules (agent PostgreSQL variant)
+        env:
+          RC_ALLOW_NETWORK: "1"
+          BEAR_AGENT_PG_DSN: postgres://bear_int:bear_int_ci_pw@127.0.0.1:5433/bear_integration_ci?sslmode=disable
+        run: scripts/verify-modules.sh

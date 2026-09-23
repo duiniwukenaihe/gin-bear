@@ -9,10 +9,17 @@
 /bear
 /bear.exe
 *.exe
+# Locally built nested-module binaries (never commit build output)
+/tools/bear-mcp/bear-mcp
 
 # Claude Code
 .claude/
 .agents/
+
+# AI 助手工作区（仅本地，不入库）
+.workbuddy-ai/
+AGENTS.md
+agent.md
 
 # Local
 server.log

@@ -452,6 +452,9 @@ func TestCoreRemainingEnableEAPIsRejectAfterSealWithoutPublication(t *testing.T)
 }
 
 func TestCoreRemainingEnableEAPIsRegisterWorkingResources(t *testing.T) {
+	if !sqliteDriverAvailable {
+		t.Skip("requires the SQLite driver")
+	}
 	resetGinModeForTest(t)
 	config := NewSysConfig()
 	config.SetFrameworkStrict(true)

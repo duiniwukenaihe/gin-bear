@@ -15,8 +15,20 @@ import (
 )
 
 var (
+	// TotalRequests counts every HTTP request handled by every Bear runtime in
+	// this process.
+	//
+	// Deprecated: it aggregates across runtimes, so it is misleading when one
+	// process hosts more than one Bear, and reading it without
+	// atomic.LoadInt64(&bear.TotalRequests) is a data race. Use
+	// Runtime.Requests for a per-runtime count.
 	TotalRequests int64
-	TotalErrors   int64
+
+	// TotalErrors counts every HTTP response with status >= 400 produced by
+	// every Bear runtime in this process.
+	//
+	// Deprecated: see TotalRequests. Use Runtime.Errors for a per-runtime count.
+	TotalErrors int64
 )
 
 // ContextKey 自定义 context key 类型，避免字符串冲突

@@ -2,8 +2,19 @@
 
 package main
 
-import "os"
+import (
+	"os"
+	"syscall"
+)
 
+// shutdownSignals lists the signals a generated server drains before exiting.
+//
+// On Windows os.Interrupt covers both Control-C and Control-Break, and
+// syscall.SIGTERM is the signal the runtime reports for CTRL_CLOSE_EVENT,
+// CTRL_LOGOFF_EVENT and CTRL_SHUTDOWN_EVENT, so closing the console window or
+// shutting the machine down still reaches the graceful path. Both constants
+// exist in syscall on Windows; syscall.SIGBREAK does not and must not be
+// referenced.
 func shutdownSignals() []os.Signal {
-	return []os.Signal{os.Interrupt}
+	return []os.Signal{os.Interrupt, syscall.SIGTERM}
 }

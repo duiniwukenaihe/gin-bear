@@ -55,7 +55,10 @@ var runtimeStaticInjectorsE = make(map[string]RuntimeStaticInjectorE)
 var staticMu sync.RWMutex
 
 func init() {
-	RegisterRuntimeStaticInjector("AuthTokenManager", func(factory *BeanFactory, obj interface{}) {
+	// The legacy registry also holds the package-qualified key so a generated
+	// injector for a same-named type in another package cannot shadow a
+	// framework type. The bare name stays registered for compatibility.
+	injectAuthTokenManager := func(factory *BeanFactory, obj interface{}) {
 		target, ok := obj.(*AuthTokenManager)
 		if !ok {
 			return
@@ -66,8 +69,11 @@ func init() {
 		if target.Redis == nil {
 			target.Redis = Resolve[*RedisAdapter](factory)
 		}
-	})
-	RegisterRuntimeStaticInjector("AuthFairing", func(factory *BeanFactory, obj interface{}) {
+	}
+	RegisterRuntimeStaticInjector(runtimeStaticInjectorKey(reflect.TypeFor[AuthTokenManager]()), injectAuthTokenManager)
+	RegisterRuntimeStaticInjector("AuthTokenManager", injectAuthTokenManager)
+
+	injectAuthFairing := func(factory *BeanFactory, obj interface{}) {
 		target, ok := obj.(*AuthFairing)
 		if !ok {
 			return
@@ -79,7 +85,9 @@ func init() {
 		if target.TokenManager == nil && !hasExplicitJWTUtil {
 			target.TokenManager = Resolve[*AuthTokenManager](factory)
 		}
-	})
+	}
+	RegisterRuntimeStaticInjector(runtimeStaticInjectorKey(reflect.TypeFor[AuthFairing]()), injectAuthFairing)
+	RegisterRuntimeStaticInjector("AuthFairing", injectAuthFairing)
 	RegisterRuntimeStaticInjectorE(runtimeStaticInjectorKey(reflect.TypeFor[JWTUtil]()), func(factory *BeanFactory, obj any) error {
 		target, ok := obj.(*JWTUtil)
 		if !ok {
@@ -535,6 +543,41 @@ func (f *BeanFactory) GetByType(t reflect.Type) any {
 	return f.Get(t)
 }
 
+// staticInjectorLookupKeys returns the registry keys for one concrete type,
+// most specific first. Generated injectors may register either the
+// package-qualified key or the historical bare struct name, and a bare name
+// alone cannot tell two same-named types from different packages apart.
+func staticInjectorLookupKeys(t reflect.Type) []string {
+	keys := make([]string, 0, 2)
+	if qualified := runtimeStaticInjectorKey(t); qualified != "" {
+		keys = append(keys, qualified)
+	}
+	if name := t.Name(); name != "" {
+		keys = append(keys, name)
+	}
+	return keys
+}
+
+// lookupRuntimeStaticInjector requires staticMu to be held.
+func lookupRuntimeStaticInjector(keys []string) RuntimeStaticInjector {
+	for _, key := range keys {
+		if injector, ok := runtimeStaticInjectors[key]; ok {
+			return injector
+		}
+	}
+	return nil
+}
+
+// lookupStaticInjector requires staticMu to be held.
+func lookupStaticInjector(keys []string) StaticInjector {
+	for _, key := range keys {
+		if injector, ok := staticInjectors[key]; ok {
+			return injector
+		}
+	}
+	return nil
+}
+
 // Apply 执行依赖注入 (优先使用静态注入，回退到反射)
 func (f *BeanFactory) Apply(obj any) {
 	v := reflect.ValueOf(obj)
@@ -545,13 +588,13 @@ func (f *BeanFactory) Apply(obj any) {
 		return
 	}
 
-	// 1. 尝试使用静态注入 (阶段 62)
-	structName := v.Type().Name()
+	// 1. 尝试使用静态注入 (阶段 62)。包限定键优先，裸结构体名仅作兼容回退。
+	keys := staticInjectorLookupKeys(v.Type())
 	staticMu.RLock()
-	runtimeInjector, runtimeOK := runtimeStaticInjectors[structName]
-	staticInjector, staticOK := staticInjectors[structName]
+	runtimeInjector := lookupRuntimeStaticInjector(keys)
+	staticInjector := lookupStaticInjector(keys)
 	staticMu.RUnlock()
-	if runtimeOK {
+	if runtimeInjector != nil {
 		runtimeInjector(f, obj)
 		return
 	}
@@ -559,7 +602,7 @@ func (f *BeanFactory) Apply(obj any) {
 	// are safe only when this factory is the facade's current owner; isolated
 	// runtimes fall back to reflection against their own container.
 	facade := loadDefaultFacade()
-	if staticOK && facade != nil && facade.injector == f {
+	if staticInjector != nil && facade != nil && facade.injector == f {
 		staticInjector(obj)
 		return
 	}
@@ -578,22 +621,27 @@ func (f *BeanFactory) Apply(obj any) {
 		}
 
 		// 处理 inject 标签
-		if tag, ok := field.Tag.Lookup("inject"); ok {
-			fieldType := field.Type
-			// 如果标签是 "-"，则按类型自动注入
-			if tag == "-" || tag == "" {
-				bean := f.Get(fieldType)
-				if bean != nil {
-					f := v.Field(i)
-					if f.CanSet() {
-						f.Set(reflect.ValueOf(bean))
-					} else {
-						// 严苛模式：注入失败直接 Panic，防止运行时 nil 错误
-						panic("IOC_INJECTION_FAILED: field must be exported (start with upper case) to be injected: " + v.Type().String() + "." + field.Name)
-					}
-				}
-			}
+		tag, hasInject := field.Tag.Lookup("inject")
+		if !hasInject || (tag != "-" && tag != "") {
+			continue
 		}
+		bean := f.Get(field.Type)
+		if bean == nil {
+			// Compatibility mode stays lenient, but an unresolved dependency must
+			// not fail silently: the field keeps its zero value and the process
+			// panics later on first use instead of at startup.
+			legacyLogger().Warn("Dependency injection could not resolve an inject field; the field keeps its zero value",
+				"bean", v.Type().String(),
+				"field", field.Name,
+				"dependency", field.Type.String(),
+			)
+			continue
+		}
+		target := v.Field(i)
+		if !target.CanSet() {
+			panic(fmt.Errorf("IOC_INJECTION_FAILED: field %s.%s must be exported (start with an upper case letter) to be injected", v.Type(), field.Name))
+		}
+		target.Set(reflect.ValueOf(bean))
 	}
 }
 

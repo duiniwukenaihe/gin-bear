@@ -60,8 +60,8 @@ func TestMakeVerifyPreservesQualityGateAndFailureDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(makefile), `scripts/ci-diagnostic.sh "Quality baseline failed" scripts/release-check.sh`) {
-		t.Fatalf("make verify must run release-check.sh through CI diagnostics:\n%s", makefile)
+	if !strings.Contains(string(makefile), `scripts/ci-diagnostic.sh "Quality baseline failed" scripts/verify-all.sh`) {
+		t.Fatalf("make verify must run every module through CI diagnostics:\n%s", makefile)
 	}
 
 	diagnostics, err := os.ReadFile("ci-diagnostic.sh")
@@ -93,16 +93,8 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 	}
 	text := string(content)
 	for _, want := range []string{
-		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= honnef.co/go/tools/cmd/staticcheck@v0.7.0`,
-		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/vuln/cmd/govulncheck@v1.6.0`,
-		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597`,
-		"STATICCHECK_BIN: ${{ runner.temp }}/bin/staticcheck",
-		"STATICCHECK_EXPECTED_SHA256: 968c4cdeff3a18eef976ecdbcd83dbea35ca3c12c58b87c9f4684e1ea6adfc75",
-		"GOVULNCHECK_BIN: ${{ runner.temp }}/bin/govulncheck",
-		"GOVULNCHECK_EXPECTED_SHA256: 15ad0c7081d061d06f83a39b1783318d90659f3404d83a75bcdda51eda3ef75f",
-		"APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff",
-		"APIDIFF_EXPECTED_SHA256: 84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f",
 		"RC_ALLOW_NETWORK: \"1\"",
+		"API_COMPAT_ALLOW_NETWORK: \"1\"",
 		"RELEASE_CHECK_METADATA: ${{ runner.temp }}/release-check-metadata.txt",
 		"run: make verify",
 		`run: scripts/ci-diagnostic.sh "Race tests failed" go test -race ./... -count=1`,
@@ -116,6 +108,9 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 		"GENERATE_SBOM",
 		"sbom.spdx.json",
 		"actions/upload-artifact",
+		"STATICCHECK_EXPECTED_SHA256:",
+		"GOVULNCHECK_EXPECTED_SHA256:",
+		"APIDIFF_EXPECTED_SHA256:",
 	} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("CI should not contain container delivery step %q:\n%s", unwanted, text)
@@ -393,11 +388,10 @@ func TestReleaseVersionComesFromPushedTag(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"needs: verify",
+		"needs: [verify, integration]",
 		"run: make verify",
-		"staticcheck@v0.7.0",
-		"govulncheck@v1.6.0",
-		"apidiff@v0.0.0-20260709172345-9ea1abe57597",
+		"RC_ALLOW_NETWORK: \"1\"",
+		"API_COMPAT_ALLOW_NETWORK: \"1\"",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("release workflow missing quality gate %q:\n%s", required, workflow)
@@ -1002,7 +996,7 @@ func TestAPICompatibilityGateRejectsInvalidRebuildFlag(t *testing.T) {
 	for _, value := range []string{"", "banana"} {
 		t.Run(value, func(t *testing.T) {
 			command := exec.Command("./check-api-compat.sh")
-			command.Env = releaseTestEnvironment("API_BASELINE_REBUILD="+value, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+			command.Env = releaseTestEnvironment("API_BASELINE_REBUILD="+value, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 			output, err := command.CombinedOutput()
 			if err == nil {
 				t.Fatalf("API compatibility gate accepted invalid rebuild flag %q:\n%s", value, output)
@@ -1433,11 +1427,11 @@ if [[ "$1 $2" == "version -m" ]]; then
 	case "${3##*/}" in
 	staticcheck)
 		if [[ "${FAKE_STATICCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
-		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.14\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
 		;;
 	govulncheck)
 		if [[ "${FAKE_GOVULNCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
-		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.14\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
 		;;
 	esac
 	exit 0
@@ -1504,19 +1498,22 @@ func fakeRCRepository(t *testing.T) (string, string, string) {
 	if err := os.WriteFile(filepath.Join(repository, "scripts", "release-check.sh"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(repository, "scripts", "verify-modules.sh"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	fakeGo := `#!/usr/bin/env bash
 set -euo pipefail
 printf 'GOPROXY=%s %s\n' "${GOPROXY:-}" "$*" >> "${RC_TEST_STATE}/go-calls"
-if [[ "${1:-}" == "version" ]]; then printf '%s\n' 'go version go1.25.12 fixture'; fi
+if [[ "${1:-}" == "version" ]]; then printf '%s\n' 'go version go1.25.14 fixture'; fi
 if [[ "${1:-} ${2:-}" == "version -m" ]]; then
 	case "${3##*/}" in
 	staticcheck)
 		if [[ "${FAKE_STATICCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
-		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		if [[ -n "${FAKE_STATICCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_STATICCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.14\n\tpath\thonnef.co/go/tools/cmd/staticcheck\n\tmod\thonnef.co/go/tools\tv0.7.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
 		;;
 	govulncheck)
 		if [[ "${FAKE_GOVULNCHECK_BUILD_INFO:-}" == "unavailable" ]]; then exit 99; fi
-		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.12\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
+		if [[ -n "${FAKE_GOVULNCHECK_BUILD_INFO:-}" ]]; then printf '%s\n' "${FAKE_GOVULNCHECK_BUILD_INFO}"; else printf 'fixture: go1.25.14\n\tpath\tgolang.org/x/vuln/cmd/govulncheck\n\tmod\tgolang.org/x/vuln\tv1.6.0\th1:fixture\n\tbuild\t-trimpath=true\n'; fi
 		;;
 	esac
 	exit 0
@@ -1531,7 +1528,7 @@ if [[ "${1:-}" == "-version" ]]; then printf '%s\n' 'staticcheck 2026.1 (0.7.0)'
 `
 	fakeGovulncheck := `#!/usr/bin/env bash
 printf '%s\n' "$*" >> "${RC_TEST_STATE}/govulncheck-calls"
-if [[ "${1:-}" == "-version" ]]; then printf '%s\n' 'Go: go1.25.12 Scanner: govulncheck@v1.6.0'; fi
+if [[ "${1:-}" == "-version" ]]; then printf '%s\n' 'Go: go1.25.14 Scanner: govulncheck@v1.6.0'; fi
 `
 	fakeGit := `#!/usr/bin/env bash
 set -euo pipefail

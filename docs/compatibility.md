@@ -12,8 +12,15 @@ compile and load its configuration while it plans a migration.
 
 See [supported features](supported-features.md) for the supported,
 experimental, and compatibility-only categories. Compatibility-only APIs are
-annotated with Go `Deprecated:` comments. They are retained for source and
-configuration compatibility, not for new feature work.
+retained for source and configuration compatibility, not for new feature work,
+and are annotated with Go `Deprecated:` comments.
+
+`pkg/bear/gen` is the single exception. The v0.9.1 baseline consumer in
+`scripts/apicompat/v091consumer` calls `gen.NewGenerator`, and the release gate
+runs `staticcheck ./...` over the whole module, so the `SA1019` report that
+reference would produce fails the build. Its compatibility-only status is
+recorded in the package documentation and in
+[supported features](supported-features.md) instead.
 
 ## Compatibility-only Configuration
 
@@ -22,6 +29,12 @@ configuration that is currently a no-op. The warning keys are `waf`, `geoip`,
 `bigquery`, `mq`, `kafka`, `rocketmq`, `pulsar`, `schema`,
 `circuit_breaker`, and `config_center`. Warnings are deduplicated within each
 startup.
+
+Those ten are not the whole warning set. The same startup path also warns for the
+deprecated `auth.storage_type: file` alias, for an explicitly enabled production
+compatibility runtime, and for a `database.sslmode` that MySQL ignores.
+`TestCompatibilityWarningsAreLoggedOnceDuringIgnite` pins the ten above, including
+their deduplication, and each of the other three has its own test.
 
 The ID generator is retained as a deprecated method without an enabled config
 flag. The legacy `GRPCService` interface remains for source compatibility; new
@@ -37,6 +50,13 @@ retry behavior, build/init ordering, and bare handler responses. Applications
 opt into strict runtime checks with `framework.strict: true` and opt into
 automatic response envelopes independently with
 `framework.response_mode: envelope`.
+
+The `inject` tag is not part of that divergence in meaning: both modes resolve a
+tagged field by its type, and `inject:"-"` means "inject this field" rather than
+"skip". Only the set of fields considered and the failure timing differ.
+Compatibility injects `inject:"-"` and `inject:""` and warns when a dependency is
+missing; strict injects every field carrying the tag and fails startup. See
+[the dependency injection contract](production.md#dependency-injection-contract).
 
 `framework.strict` is not the same setting as `config.strict`. The latter
 controls unknown configuration fields and is forced on in production; the
@@ -90,7 +110,12 @@ metadata and reject requests for another framework version.
 ## v0.9.2 Additive Behavior
 
 - `Authorizer` and `PermissionFairing` add resource/action/scope decisions
-  without changing or replacing the existing Casbin APIs.
+  without changing or replacing the existing Casbin APIs. `CasbinAuthorizer`
+  (`NewCasbinAuthorizer`) is an additive controlled implementation for online
+  policy changes; the existing `CasbinFairing` is untouched.
+- `LoadDatabaseConfigForGeneration` is an additive generation-only helper, and
+  `bear gen api --config <path>` (repeatable) is an additive flag. `gen
+  model`/`gen dto` reject `--config` with a usage error.
 - Current scaffolds use strict runtime and envelope defaults. Existing projects
   keep their current configuration until they opt in.
 - Current scaffolds maintain generated module registration through
@@ -148,6 +173,15 @@ in both compatibility and strict modes without removing the v0 public API:
 - Casbin authorization uses only the `CasbinEnforcer` injected from the current
   Bear container. There is no process-global fallback, and internal enforcement
   errors return a generic client 500.
+- The factory-built `CasbinEnforcer` now disables the decision cache by default
+  so sequential revocation is immediate. The exported type, constructor
+  signature, and promoted methods are unchanged; explicitly re-enabling the
+  cache opts out of the revocation guarantee, and concurrent authorization with
+  policy writes remains unsafe on the legacy interface.
+- `Repository.DB` normalizes a `*gin.Context` to its request context while
+  keeping the `bear_db_tx` transaction. Operations that previously ignored
+  request cancellation now return `context.Canceled`/`DeadlineExceeded`; this
+  is an intended behavior tightening, not an API removal.
 - Production WebSocket configuration rejects wildcard origins and all
   out-of-range timeout, message, and connection limits. Strict WebSocket routes
   require an explicit origin allowlist, and strict or production runtimes
@@ -165,6 +199,7 @@ in both compatibility and strict modes without removing the v0 public API:
   contract; prefer Bear route helpers for policy-protected routes.
 - `/metrics` was removed from the default `auth.public_paths`. Add it back
   explicitly only when another access-control boundary protects it.
-- The production example now requires PostgreSQL `sslmode: verify-full`, leaves
+- The production example recommends PostgreSQL `sslmode: verify-full` while
+  the framework also accepts explicit plaintext `sslmode: disable`; it leaves
   the password empty for `POSTGRES_PASSWORD`, uses a deliberately rejected JWT
   placeholder, and shows strict loading plus explicit HTTP/JWT limits.

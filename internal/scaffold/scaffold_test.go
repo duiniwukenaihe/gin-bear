@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,54 @@ func TestGeneratedProjectProvidesConfigureExtensionPoint(t *testing.T) {
 			t.Fatalf("generated routes.go missing %q:\n%s", want, routesSource)
 		}
 	}
+}
+
+func TestGeneratedProjectIgnoresLocalDatabaseState(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hygiene-api")
+	if err := Generate(context.Background(), Options{
+		Name:             "hygiene-api",
+		Module:           "example.com/hygiene-api",
+		Directory:        dir,
+		FrameworkVersion: "v0.9.2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ignore := readFile(t, filepath.Join(dir, ".gitignore"))
+	patterns := gitignorePatterns(ignore)
+	// The scaffold defaults to SQLite, so the first `go run ./cmd/migrate` writes
+	// hygiene-api.db into the project root. Committing it would commit local state.
+	// Compare whole patterns: a substring check would let "*.db-journal" stand in
+	// for "*.db", and dropping the "*.db" line would go unnoticed.
+	for _, want := range []string{"*.db", "/server", "/migrate"} {
+		if !slices.Contains(patterns, want) {
+			t.Fatalf("generated .gitignore does not ignore %q:\n%s", want, ignore)
+		}
+	}
+	// Migrations are reviewed SQL and are the project's schema history, so no
+	// pattern may ignore them. Comments mention the directory by name, so only
+	// the effective patterns are inspected.
+	for _, pattern := range patterns {
+		for _, forbidden := range []string{"migrations", "*.sql"} {
+			if strings.Contains(pattern, forbidden) {
+				t.Fatalf("generated .gitignore ignores %q through pattern %q:\n%s", forbidden, pattern, ignore)
+			}
+		}
+	}
+}
+
+// gitignorePatterns returns the effective patterns of a .gitignore, skipping
+// blank lines and comments.
+func gitignorePatterns(contents string) []string {
+	patterns := make([]string, 0)
+	for _, line := range strings.Split(contents, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	return patterns
 }
 
 func TestGeneratedServerHealthCheckTimesOutAndReapsUnresponsiveChild(t *testing.T) {
@@ -494,7 +543,7 @@ func TestGeneratedProductionStartupRejectsMissingJWTSecret(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, serverBinary)
 	cmd.Dir = project
-	cmd.Env = append(os.Environ(), "BEAR_ENV=production", fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "BEAR_AUTH_JWT_SECRET=", "JWT_SECRET=", "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+	cmd.Env = append(os.Environ(), "BEAR_ENV=production", fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "BEAR_AUTH_JWT_SECRET=", "JWT_SECRET=", "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("generated production server started without BEAR_AUTH_JWT_SECRET:\n%s", output)
@@ -562,9 +611,30 @@ func runGo(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+	cmd.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+// runGoForTarget runs a go command with GOOS and GOARCH pinned to the target.
+// The inherited values are dropped rather than appended to, because a duplicate
+// key in the child environment resolves to the first entry.
+func runGoForTarget(t *testing.T, dir, goos, goarch string, args ...string) {
+	t.Helper()
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GOOS=") || strings.HasPrefix(entry, "GOARCH=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6", "GOOS="+goos, "GOARCH="+goarch)
+	cmd := exec.Command("go", args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("GOOS=%s GOARCH=%s go %s failed: %v\n%s", goos, goarch, strings.Join(args, " "), err, output)
 	}
 }
 
@@ -582,7 +652,7 @@ func runCommand(t *testing.T, dir, binary string, args ...string) (string, strin
 	t.Helper()
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+	cmd.Env = append(os.Environ(), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -626,7 +696,7 @@ func runGeneratedServerHealthCheck(t *testing.T, dir, path string) {
 
 	cmd := exec.Command(serverBinary)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.25.12")
+	cmd.Env = append(os.Environ(), fmt.Sprintf("BEAR_SERVER_PORT=%d", port), "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=go1.26.6")
 	prepareGeneratedProcess(cmd)
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
 	output, err := checkGeneratedServer(cmd, url, defaultGeneratedServerCheckConfig())

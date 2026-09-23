@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -118,7 +119,7 @@ func TestGeneratedAPIRegistersManagedManifestAndStableRegistry(t *testing.T) {
 		{Name: "Alpha", Package: "alpha", Path: "internal/alpha", ModuleType: "alpha.Module"},
 		{Name: "Zeta", Package: "zeta", Path: "internal/zeta", ModuleType: "zeta.Module"},
 	} {
-		if manifest.APIs[index] != want {
+		if !reflect.DeepEqual(manifest.APIs[index], want) {
 			t.Fatalf("manifest API %d = %#v, want %#v", index, manifest.APIs[index], want)
 		}
 	}
@@ -188,6 +189,10 @@ func TestGeneratedAPIRegistrationFailureRollsBackResourceAndMetadata(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	goModBefore, err := os.ReadFile(filepath.Join(project, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	appDirectory := filepath.Dir(registryPath)
 	if err := os.Chmod(appDirectory, 0555); err != nil {
 		t.Fatal(err)
@@ -214,6 +219,13 @@ func TestGeneratedAPIRegistrationFailureRollsBackResourceAndMetadata(t *testing.
 	}
 	if !bytes.Equal(manifestAfter, manifestBefore) || !bytes.Equal(registryAfter, registryBefore) {
 		t.Fatalf("failed registration changed metadata\nmanifest before=%safter=%s\nregistry before=%safter=%s", manifestBefore, manifestAfter, registryBefore, registryAfter)
+	}
+	goModAfter, err := os.ReadFile(filepath.Join(project, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(goModAfter, goModBefore) {
+		t.Fatalf("failed registration left dependency pins in go.mod\nbefore=%safter=%s", goModBefore, goModAfter)
 	}
 	assertGenerationLockAbsent(t, project)
 }
@@ -392,7 +404,7 @@ func writeGeneratedTestGoMod(t *testing.T, project, module string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	goMod := "module " + module + "\n\ngo 1.25.12\n\n" +
+	goMod := "module " + module + "\n\ngo 1.25.14\n\n" +
 		"require github.com/duiniwukenaihe/gin-bear v0.0.0\n\n" +
 		"replace github.com/duiniwukenaihe/gin-bear => " + repositoryRoot + "\n"
 	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte(goMod), 0644); err != nil {

@@ -24,6 +24,16 @@ const (
 	grpcServeStreamFullMethod = "/" + grpcServeServiceName + "/Stream"
 )
 
+// grpcServeForcedAbortWait bounds how long a test waits for the server's forced
+// shutdown to abort an in-flight RPC. The abort lands on the drain deadline,
+// three quarters of the shutdown budget, so waiting for exactly one budget
+// leaves only that last quarter (~100ms measured) of slack and fails as soon as
+// the scheduler stalls. This bound is deliberately well above the budget: it
+// only guards against an RPC that is never aborted, and must not be used to
+// assert when the abort happens. The budget itself is asserted through
+// grpcServeWaitServe and the elapsed checks that follow each call.
+const grpcServeForcedAbortWait = 2 * time.Second
+
 type grpcServeBlockingService interface {
 	Unary(context.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error)
 	Stream(*wrapperspb.StringValue, grpc.ServerStream) error
@@ -275,7 +285,7 @@ func TestServeGRPCGracefulCompletesBlockingUnaryWithinDrainBudget(t *testing.T) 
 
 	grpcServeAssertOpen(t, probe.stopping, "Lifecycle stopped while unary RPC was draining")
 	close(release)
-	result := grpcServeWaitRPC(t, rpcDone, shutdownBudget)
+	result := grpcServeWaitRPC(t, rpcDone, grpcServeForcedAbortWait)
 	if result.err != nil {
 		t.Fatalf("blocking unary error = %v", result.err)
 	}
@@ -306,7 +316,7 @@ func TestServeGRPCGracefulForcesNeverEndingUnaryAtDrainDeadline(t *testing.T) {
 	grpcServeExpectHealth(t, running.healthWatch, healthpb.HealthCheckResponse_NOT_SERVING)
 	running.cancelHealthWatch()
 
-	result := grpcServeWaitRPC(t, rpcDone, shutdownBudget)
+	result := grpcServeWaitRPC(t, rpcDone, grpcServeForcedAbortWait)
 	forcedAfter := time.Since(shutdownStarted)
 	if result.err == nil {
 		t.Fatal("forced unary unexpectedly completed without an error")
@@ -341,7 +351,7 @@ func TestServeUsesSingleShutdownBudget(t *testing.T) {
 	grpcServeExpectHealth(t, running.healthWatch, healthpb.HealthCheckResponse_NOT_SERVING)
 	running.cancelHealthWatch()
 
-	result := grpcServeWaitRPC(t, rpcDone, shutdownBudget)
+	result := grpcServeWaitRPC(t, rpcDone, grpcServeForcedAbortWait)
 	if result.err == nil {
 		t.Fatal("single-budget unary unexpectedly completed without an error")
 	}
@@ -370,7 +380,7 @@ func TestServeDoesNotCloseLifecycleResourcesWhileGRPCHandlerIgnoresCancellation(
 	grpcServeExpectHealth(t, running.healthWatch, healthpb.HealthCheckResponse_NOT_SERVING)
 	running.cancelHealthWatch()
 
-	result := grpcServeWaitRPC(t, rpcDone, shutdownBudget)
+	result := grpcServeWaitRPC(t, rpcDone, grpcServeForcedAbortWait)
 	if result.err == nil {
 		t.Fatal("non-cooperative unary unexpectedly completed without an error")
 	}
@@ -383,12 +393,19 @@ func TestServeDoesNotCloseLifecycleResourcesWhileGRPCHandlerIgnoresCancellation(
 	if elapsed := time.Since(shutdownStarted); elapsed > shutdownBudget+250*time.Millisecond {
 		t.Fatalf("shutdown took %s, want at most %s", elapsed, shutdownBudget+250*time.Millisecond)
 	}
+	// See the HTTP counterpart: the refusal to re-wait is pinned by its
+	// forced-shutdown wrapper rather than by a stopwatch, and the clock bound
+	// only guards against a hang. The refusal costs one 25ms forced-sync window,
+	// so the previous 100ms bound left only ~74ms of slack.
 	deferredShutdownStarted := time.Now()
 	shutdownErr := running.app.Shutdown(context.Background())
 	if shutdownErr == nil || !strings.Contains(shutdownErr.Error(), "active gRPC handlers") {
 		t.Fatalf("deferred Shutdown() error = %v, want active gRPC handler error", shutdownErr)
 	}
-	if elapsed := time.Since(deferredShutdownStarted); elapsed > 100*time.Millisecond {
+	if !strings.Contains(shutdownErr.Error(), "active handlers remain after forced shutdown") {
+		t.Fatalf("deferred Shutdown() error = %v, want the forced-shutdown refusal", shutdownErr)
+	}
+	if elapsed := time.Since(deferredShutdownStarted); elapsed > shutdownBudget {
 		t.Fatalf("deferred Shutdown() took %s, want a fast failure after handler timeout", elapsed)
 	}
 	grpcServeAssertOpen(t, probe.stopping, "Deferred Shutdown closed resources while a gRPC handler was still active")
@@ -416,7 +433,7 @@ func TestServeDoesNotCloseLifecycleResourcesWhileGRPCStreamIgnoresCancellation(t
 	grpcServeExpectHealth(t, running.healthWatch, healthpb.HealthCheckResponse_NOT_SERVING)
 	running.cancelHealthWatch()
 
-	if err := grpcServeWaitStream(t, streamDone, shutdownBudget); err == nil {
+	if err := grpcServeWaitStream(t, streamDone, grpcServeForcedAbortWait); err == nil {
 		t.Fatal("non-cooperative stream unexpectedly completed without an error")
 	}
 	serveErr := grpcServeWaitServe(t, running.done, shutdownBudget+250*time.Millisecond)
@@ -428,12 +445,19 @@ func TestServeDoesNotCloseLifecycleResourcesWhileGRPCStreamIgnoresCancellation(t
 	if elapsed := time.Since(shutdownStarted); elapsed > shutdownBudget+250*time.Millisecond {
 		t.Fatalf("shutdown took %s, want at most %s", elapsed, shutdownBudget+250*time.Millisecond)
 	}
+	// See the HTTP counterpart: the refusal to re-wait is pinned by its
+	// forced-shutdown wrapper rather than by a stopwatch, and the clock bound
+	// only guards against a hang. The refusal costs one 25ms forced-sync window,
+	// so the previous 100ms bound left only ~74ms of slack.
 	deferredShutdownStarted := time.Now()
 	shutdownErr := running.app.Shutdown(context.Background())
 	if shutdownErr == nil || !strings.Contains(shutdownErr.Error(), "active gRPC handlers") {
 		t.Fatalf("deferred Shutdown() error = %v, want active gRPC handler error", shutdownErr)
 	}
-	if elapsed := time.Since(deferredShutdownStarted); elapsed > 100*time.Millisecond {
+	if !strings.Contains(shutdownErr.Error(), "active handlers remain after forced shutdown") {
+		t.Fatalf("deferred Shutdown() error = %v, want the forced-shutdown refusal", shutdownErr)
+	}
+	if elapsed := time.Since(deferredShutdownStarted); elapsed > shutdownBudget {
 		t.Fatalf("deferred Shutdown() took %s, want a fast failure after handler timeout", elapsed)
 	}
 	grpcServeAssertOpen(t, probe.stopping, "Deferred Shutdown closed resources while a gRPC stream handler was still active")

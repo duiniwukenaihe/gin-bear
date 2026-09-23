@@ -13,7 +13,7 @@ case "${network_flag}" in
 	network_mode="online-opt-in"
 	export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
 	export GOSUMDB="${GOSUMDB:-sum.golang.org}"
-	export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.25.12}"
+	export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.6}"
 	;;
 *)
 	printf 'RC_ALLOW_NETWORK must be 0 or 1\n' >&2
@@ -487,5 +487,6 @@ else
 	run_step govulncheck "${govulncheck_command[@]}" ./... || exit $?
 fi
 run_step release-check env COVERAGE_MINIMUM="${coverage_minimum}" CRITICAL_COVERAGE_MINIMUM="${critical_coverage_minimum}" API_COMPAT_METADATA="${metadata}" RELEASE_CHECK_METADATA="${metadata}" scripts/release-check.sh || exit $?
+run_step modules scripts/verify-modules.sh || exit $?
 run_step diff-check check_candidate_diff || exit $?
 run_step hygiene check_repository_hygiene || exit $?
