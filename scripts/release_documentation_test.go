@@ -272,22 +272,27 @@ func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 	for _, phrase := range []string{
 		"tags:",
 		"- \"v*\"",
+		"workflow_dispatch:",
+		"RELEASE_TAG: ${{ inputs.tag || github.ref_name }}",
 		"contents: read",
 		"contents: write",
-		`gh release create "$GITHUB_REF_NAME"`,
+		`gh release create "$RELEASE_TAG"`,
 		`--repo "$GITHUB_REPOSITORY"`,
 		"--verify-tag",
 		"--generate-notes",
 		"--prerelease --latest=false",
-		"git fetch origin +refs/heads/main:refs/remotes/origin/main",
+		`git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG" "+refs/heads/main:refs/remotes/origin/main"`,
 		"git merge-base --is-ancestor HEAD origin/main",
-		`--title "$GITHUB_REF_NAME"`,
-		`gh release view "$GITHUB_REF_NAME"`,
-		`https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${GITHUB_REF_NAME}.info`,
+		`--title "$RELEASE_TAG"`,
+		`gh release view "$RELEASE_TAG"`,
+		`https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${RELEASE_TAG}.info`,
 	} {
 		if !strings.Contains(workflow, phrase) {
 			t.Fatalf("release workflow missing %q", phrase)
 		}
+	}
+	if strings.Count(workflow, "ref: ${{ env.RELEASE_TAG }}") != 2 {
+		t.Fatal("both release validation jobs must check out the selected tag")
 	}
 	for _, unwanted := range []string{
 		"docker", "container", "registry", "attestations: write", "id-token: write",

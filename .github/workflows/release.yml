@@ -4,9 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to revalidate
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   verify:
@@ -16,12 +25,14 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Verify tag belongs to main
         run: |
-          test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
-          git fetch origin +refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor HEAD origin/main
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG" "+refs/heads/main:refs/remotes/origin/main"
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag || { echo "Release tag must be annotated"; exit 1; }
+          test "$(git rev-parse "$RELEASE_TAG^{}")" = "$(git rev-parse HEAD)" || { echo "Checkout does not match release tag"; exit 1; }
+          git merge-base --is-ancestor HEAD origin/main || { echo "Release tag is not on main"; exit 1; }
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -76,6 +87,8 @@ jobs:
     steps:
       - name: Checkout release tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -118,19 +131,19 @@ jobs:
       - name: Publish GitHub release
         run: |
           curl --fail --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors \
-            "https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${GITHUB_REF_NAME}.info"
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $GITHUB_REF_NAME already exists"
+            "https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${RELEASE_TAG}.info"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists"
           else
             release_args=()
-            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            if [[ "$RELEASE_TAG" == *-* ]]; then
               release_args+=(--prerelease --latest=false)
             fi
-            gh release create "$GITHUB_REF_NAME" \
+            gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --generate-notes \
-              --title "$GITHUB_REF_NAME" \
+              --title "$RELEASE_TAG" \
               "${release_args[@]}"
           fi
         env:

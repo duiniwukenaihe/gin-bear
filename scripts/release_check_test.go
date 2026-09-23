@@ -380,7 +380,7 @@ func TestReleaseWorkflowActionsUseImmutablePins(t *testing.T) {
 	}
 }
 
-func TestReleaseVersionComesFromPushedTag(t *testing.T) {
+func TestReleaseVersionComesFromPushedOrSelectedTag(t *testing.T) {
 	workflow := readTestFile(t, "../.github/workflows/release.yml")
 	for _, forbidden := range []string{"RC_EXPECTED_VERSION", "RC_RELEASE_TAG", "make verify-rc"} {
 		if strings.Contains(workflow, forbidden) {
@@ -397,8 +397,9 @@ func TestReleaseVersionComesFromPushedTag(t *testing.T) {
 			t.Fatalf("release workflow missing quality gate %q:\n%s", required, workflow)
 		}
 	}
-	if !strings.Contains(workflow, `gh release create "$GITHUB_REF_NAME"`) {
-		t.Fatalf("release workflow does not publish the pushed tag:\n%s", workflow)
+	if !strings.Contains(workflow, "RELEASE_TAG: ${{ inputs.tag || github.ref_name }}") ||
+		!strings.Contains(workflow, `gh release create "$RELEASE_TAG"`) {
+		t.Fatalf("release workflow does not publish the pushed or selected tag:\n%s", workflow)
 	}
 	cli := readTestFile(t, "../internal/cli/new.go")
 	if !strings.Contains(cli, "debug.ReadBuildInfo") || !strings.Contains(cli, "info.Main.Version") {

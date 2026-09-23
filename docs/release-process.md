@@ -32,6 +32,12 @@ GitHub Release. Candidate tags are marked as prereleases and not Latest.
 Pushing a tag is therefore a public release action, not a way to start private
 verification. Do not move or reuse a published tag.
 
+If the tag-triggered workflow fails, fix the workflow on `main` through a PR,
+then manually run `Release` from `main` with the existing tag as input. The
+retry checks out and verifies that exact tag, reruns quality and integration,
+and leaves an already-created GitHub Release unchanged. Keep the failed run
+for audit; never delete or move the published tag to trigger another run.
+
 This is a source-only release: GitHub supplies source archives and the Go
 module proxy serves the tagged module. No compiled binary is checked into Git
 or attached by this workflow. Users install the matching generator with
