@@ -4,6 +4,12 @@ All notable changes to gin-bear are documented in this file.
 
 ## [Unreleased]
 
+The proposed next framework release is `v0.9.4`; `v0.9.3` remains the latest
+published release until a tag passes the release gates. See the
+[v0.9.3 → v0.9.4 upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md) and
+[release process](docs/release-process.md). Freeze these entries under a dated
+`v0.9.4` heading before creating the final tag.
+
 ### Added
 
 - Controlled `CasbinAuthorizer` (`NewCasbinAuthorizer`) for online policy

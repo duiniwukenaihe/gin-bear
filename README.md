@@ -21,6 +21,10 @@ are unreleased HEAD content; `v0.9.3` does not include or support those HEAD
 template fields. They remain under [Unreleased](CHANGELOG.md#unreleased) until
 they are reviewed, verified, and included in a future tag.
 
+The proposed next release, upgrade steps, and `main`-based publishing flow are
+documented in the [upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md) and
+[release process](docs/release-process.md).
+
 ## Generate A Project (Optional)
 
 `cmd/bear` is an optional project generator, not the framework runtime. Use it

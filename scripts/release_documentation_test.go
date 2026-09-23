@@ -278,6 +278,8 @@ func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 		`--repo "$GITHUB_REPOSITORY"`,
 		"--verify-tag",
 		"--generate-notes",
+		"--prerelease --latest=false",
+		"git merge-base --is-ancestor HEAD origin/main",
 		`--title "$GITHUB_REF_NAME"`,
 		`gh release view "$GITHUB_REF_NAME"`,
 		`https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${GITHUB_REF_NAME}.info`,

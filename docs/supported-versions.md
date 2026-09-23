@@ -9,7 +9,7 @@ asserted here.
 | --- | --- | --- | --- |
 | Go toolchain | 1.26.6 | `GOTOOLCHAIN=go1.26.6`, `go 1.26.6` directives | Pinned verification tools via `*_EXPECTED_SHA256` |
 | PostgreSQL | 16 | `postgres:16` (compose/services) | Local acceptance observed 18.4 |
-| MySQL | 8.0 | `mysql:8.0` (compose/services) | No local server; NOT_RUN without a DSN |
+| MySQL | 8.0 | `mysql:8.0` (compose/services) | Local acceptance observed 8.4.11; NOT_RUN without a DSN |
 | Redis | 7 | `redis:7` (compose/services) | Local acceptance observed 8.8.0 |
 | eino (agent extension) | v0.9.19 | `go.mod` pin | Apache-2.0; see `extensions/agent/adr-001-model-integration.md` |
 | MCP Go SDK (dev bridge) | v1.8.0 | `go.mod` pin | Apache-2.0/MIT history; see plan §11 |
@@ -29,10 +29,12 @@ asserted here.
 
 ## Release acceptance checklist (per candidate tag)
 
-1. `make verify` green on the tag (quality, compat, E2E, race, vet,
-   staticcheck, govulncheck).
-2. `scripts/test-integration.sh` green with all available engines; unavailable
-   engines stay NOT_RUN, never forced green.
+1. `make verify` and the clean-worktree `make verify-rc` gate green on the
+   exact `main` commit selected for tagging (quality, compatibility, E2E,
+   repeated/shuffled tests, race, vet, staticcheck, govulncheck). The tag
+   workflow reruns `make verify` before publication.
+2. `BEAR_INTEGRATION_REQUIRE=pg,mysql,redis scripts/test-integration.sh`
+   green with all three real engines. `NOT_RUN` is not final-release evidence.
 3. Nested modules green (`tools/bear-mcp`, `extensions/agent`, incl. the
    tasks PostgreSQL variant).
 4. A new app generated with the *released* CLI/framework versions (not a local
