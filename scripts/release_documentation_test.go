@@ -279,6 +279,7 @@ func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 		"--verify-tag",
 		"--generate-notes",
 		"--prerelease --latest=false",
+		"git fetch origin +refs/heads/main:refs/remotes/origin/main",
 		"git merge-base --is-ancestor HEAD origin/main",
 		`--title "$GITHUB_REF_NAME"`,
 		`gh release view "$GITHUB_REF_NAME"`,
