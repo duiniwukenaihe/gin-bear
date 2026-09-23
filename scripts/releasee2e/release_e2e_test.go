@@ -124,7 +124,7 @@ func TestReleaseCandidateApplications(t *testing.T) {
 	})
 }
 
-func TestDevelopmentGeneratorRejectsPublishedVersionWithoutReplacingHead(t *testing.T) {
+func TestGeneratorRejectsMismatchedPublishedVersionWithoutCreatingProject(t *testing.T) {
 	repository := repositoryRoot(t)
 	bearCLI := buildFixture(t, repository, "./cmd/bear")
 	directory := filepath.Join(t.TempDir(), "must-not-exist")
@@ -139,12 +139,32 @@ func TestDevelopmentGeneratorRejectsPublishedVersionWithoutReplacingHead(t *test
 	command.Env = commandEnvironment(nil)
 	output, err := command.CombinedOutput()
 	if err == nil {
-		t.Fatalf("development generator accepted v0.9.3 and could be replaced with HEAD:\n%s", output)
+		t.Fatalf("generator accepted mismatched v0.9.3:\n%s", output)
 	}
-	for _, want := range []string{"development generator", "v0.9.3", "unreleased HEAD"} {
+	for _, want := range []string{"templates target", "v0.9.3"} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("version rejection missing %q:\n%s", want, output)
 		}
+	}
+	if !strings.Contains(string(output), "unreleased HEAD") && !strings.Contains(string(output), "must match") {
+		t.Fatalf("version rejection did not identify the generator's template version:\n%s", output)
+	}
+	if _, statErr := os.Stat(directory); !os.IsNotExist(statErr) {
+		t.Fatalf("rejected version published destination: %v", statErr)
+	}
+}
+
+func TestReleasedGeneratorRejectsMismatchedVersion(t *testing.T) {
+	repository := repositoryRoot(t)
+	binary := filepath.Join(t.TempDir(), "released-bear")
+	runGo(t, repository, "build", "-ldflags=-X github.com/duiniwukenaihe/gin-bear/pkg/bear.Version=v0.9.4", "-o", binary, "./cmd/bear")
+	directory := filepath.Join(t.TempDir(), "must-not-exist")
+	command := exec.Command(binary, "new", "published-version-check", "--directory", directory, "--framework-version", "v0.9.3")
+	command.Dir = filepath.Dir(directory)
+	command.Env = commandEnvironment(nil)
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "generator templates target v0.9.4") || !strings.Contains(string(output), "must match") {
+		t.Fatalf("released generator did not reject mismatched framework version: %v\n%s", err, output)
 	}
 	if _, statErr := os.Stat(directory); !os.IsNotExist(statErr) {
 		t.Fatalf("rejected version published destination: %v", statErr)

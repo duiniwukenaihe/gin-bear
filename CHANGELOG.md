@@ -4,6 +4,12 @@ All notable changes to gin-bear are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Release E2E accepts the distinct version-mismatch errors from development
+  and versioned generator builds, while still rejecting mismatched versions
+  before creating a project.
+
 ## [v0.9.4] - 2026-09-23
 
 See the [v0.9.3 → v0.9.4 upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md)

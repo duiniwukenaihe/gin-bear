@@ -32,6 +32,13 @@ GitHub Release. Candidate tags are marked as prereleases and not Latest.
 Pushing a tag is therefore a public release action, not a way to start private
 verification. Do not move or reuse a published tag.
 
+`v0.9.4` is a recorded exception: its initial tag workflow failed before
+quality checks, and a later run passed tag and integration checks but exposed
+a development-only generator test assertion in the tagged build. Its GitHub
+Release was published manually from the unchanged annotated tag. The test is
+fixed after `v0.9.4`; the historical tag run remains failed. Future releases
+must pass the complete tag workflow before being announced.
+
 If the tag-triggered workflow fails, fix the workflow on `main` through a PR,
 then manually run `Release` from `main` with the existing tag as input. The
 retry checks out and verifies that exact tag, reruns quality and integration,
