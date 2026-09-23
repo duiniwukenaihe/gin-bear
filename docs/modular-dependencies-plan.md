@@ -20,6 +20,25 @@
   清单仍会包含 SQLite 测试依赖。
 - Agent 和 MCP 已经是独立 Go module，可继续维持按需引入。
 
+## 依赖盘点与拆分边界
+
+| 当前入口 | 主要依赖 | 拆分方向 |
+| --- | --- | --- |
+| HTTP、配置、生命周期 | Gin、validator、YAML | 留在精简核心；不要让核心引用可选功能的具体类型 |
+| 数据库与迁移 | GORM、PostgreSQL、MySQL、SQLite 驱动 | 每种驱动显式导入；迁移只依赖已选数据库 |
+| 鉴权 | JWT、Casbin、Casbin GORM adapter | JWT 与 Casbin 独立；Casbin 持久化按数据库选适配器 |
+| 缓存与作业 | go-redis、Redis OTel、cron | Redis、追踪集成和 cron 分别可选 |
+| 服务接口 | gRPC、WebSocket、OpenAPI | 从核心的启动和路由实现中移出具体依赖 |
+| 观测 | Prometheus、OpenTelemetry SDK/导出器 | 指标、追踪和导出器按需组合 |
+| 开发工具 | Cobra、fsnotify、x/mod | 只由 CLI/生成器使用，不进入业务服务编译图 |
+| AI | Eino Agent、MCP SDK | 保持独立模块，只有显式引入才进入业务模块图 |
+
+目前 `pkg/bear` 这个单一包同时引用上述多种运行时依赖；Go 按**包**编译，
+所以只在配置中关闭功能并不能移走其依赖。生成应用的 `app.Run` 还无条件调用
+数据库、Redis、追踪和指标启用方法。精简方案必须改变源码导入和生成结果，
+而不是增加一组 `enabled: false`。`go.mod` 中的 sqlmock、miniredis 属于测试依赖，
+Cobra、fsnotify 属于开发工具；它们与业务二进制的编译依赖应分别统计。
+
 ## 第一阶段：兼容的二进制瘦身（当前候选）
 
 保留默认构建行为。未使用 Casbin、SQLite 的服务可以使用
@@ -47,10 +66,15 @@
 
 ## 第三阶段：新项目默认按需生成
 
-把无数据库驱动的 HTTP/配置/生命周期运行时形成独立 Go module。生成器明确
-选择 `postgres`、`mysql` 或 `sqlite` 数据库模块及可选 Casbin 模块；不选择时
-生成项目不导入相应模块，也不在 `go.mod` 中声明它。默认模板保持无数据库
-可启动；生产 profile 仅给出可选配置示例。继续维护旧 `pkg/bear` 兼容入口，
+把无数据库驱动的 HTTP/配置/生命周期运行时形成独立 Go module。先按依赖族
+拆包，不为每个小工具创建一个 module：数据库驱动、Casbin、Redis、gRPC、
+观测和 Agent 这些重依赖需要可独立选择。功能通过显式构造/注册接入，不能
+依赖空白导入或全局副作用注册。生成器明确选择 `postgres`、`mysql` 或
+`sqlite` 数据库模块及可选功能；不选择时生成项目不导入相应模块，也不在
+`go.mod` 中声明它。模板只调用选中功能的启动方法。兼容期保留现有 `bear new`
+行为，新增显式精简 profile；例如选择 PostgreSQL 与 Redis 时只生成这两项
+接线。精简 profile 在不选数据库时也能启动；生产 profile 只给出已选功能的
+配置示例。继续维护旧 `pkg/bear` 兼容入口，
 通过新构造器或模块注册逐步迁移，避免一次性破坏 v0.9.x 消费者。
 
 生成器需把选择写入 scaffold manifest；预览与实际生成使用同一份渲染结果。
@@ -59,3 +83,16 @@
 “PostgreSQL + Casbin、无 SQLite”和“仅 HTTP、无数据库/Casbin”。最终门禁同时
 检查二进制依赖图与生成项目的 `go.mod`，防止只是配置关闭了功能却仍下载或
 链接不需要的包。
+
+## 发布与验收边界
+
+`extensions/agent/go.mod` 当前依赖主模块 `v0.0.0`，并用 `replace => ../..`
+在仓库内构建。依赖方不会继承这个本地替换；发布前必须让 Agent 要求一个已发布
+且兼容的主模块版本，随后从仓库外创建干净消费项目，**不使用 replace** 验证
+`go mod tidy`、构建和启动。MCP 独立模块也做同样的外部消费检查。开发时可以
+用 `go.work` 指向本地源码，但不能把本地路径当成发布依赖。
+
+每阶段记录三种不同结果：`go.mod` 模块图、`go list -deps` 编译图、服务二进制
+大小。验收至少覆盖 HTTP-only、PostgreSQL-only、MySQL-only、SQLite-only、
+PostgreSQL+Casbin，以及加入 Redis/追踪/Agent 的组合；无关驱动和功能必须从
+对应编译图中消失。不要追求所有组合的全排列，优先覆盖共享接口和高风险交叉点。
