@@ -1,3 +1,5 @@
+//go:build !bear_no_casbin
+
 package bear
 
 import (
@@ -10,12 +12,6 @@ import (
 	gormadapter "github.com/casbin/gorm-adapter/v3"
 	"github.com/gin-gonic/gin"
 )
-
-// CasbinConfig 提供 Casbin 的配置
-type CasbinConfig struct {
-	ModelPath string `yaml:"model_path"`
-	ModelText string `yaml:"model_text"`
-}
 
 // CasbinEnforcer 是 Casbin CachedEnforcer 的包装，实现 Bean 接口。
 // 工厂默认关闭决策缓存以保证撤权立即生效；公开嵌入字段为兼容保留，

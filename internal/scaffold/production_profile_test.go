@@ -217,12 +217,8 @@ func productionPGDSN(t *testing.T) (dsn string, cleanup func()) {
 // project builds from zero, migrates, serves CRUD against a real database,
 // and exits cleanly on TERM.
 func TestProductionProfileBuildsBootsAndExits(t *testing.T) {
-	productionMode := os.Getenv("BEAR_PRODUCTION_PG_DSN") != ""
 	dsn, cleanup := productionPGDSN(t)
 	defer cleanup()
-	if !productionMode {
-		t.Log("NOT_RUN: production TLS boot requires BEAR_PRODUCTION_PG_DSN; exercising native profile against disposable PostgreSQL")
-	}
 
 	project := filepath.Join(t.TempDir(), "production-boot")
 	if err := Generate(context.Background(), Options{
@@ -245,10 +241,8 @@ func TestProductionProfileBuildsBootsAndExits(t *testing.T) {
 	runGo(t, project, "mod", "tidy")
 	runGo(t, project, "test", "./...")
 	runGo(t, project, "build", "-o", filepath.Join(project, "bin", "migrate"), "./cmd/migrate")
-	if productionMode {
-		t.Setenv("BEAR_ENV", "prod")
-		t.Setenv("GIN_MODE", "release")
-	}
+	t.Setenv("BEAR_ENV", "prod")
+	t.Setenv("GIN_MODE", "release")
 	if stdout, stderr, code := runCommand(t, project, filepath.Join(project, "bin", "migrate")); code != 0 {
 		t.Fatalf("native migrate failed (%d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}

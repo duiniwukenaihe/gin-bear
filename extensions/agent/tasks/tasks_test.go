@@ -299,6 +299,60 @@ func TestCancelStopsNewEffects(t *testing.T) {
 	}
 }
 
+func TestCancelAfterWriteIntentRequiresReconciliation(t *testing.T) {
+	store := openSQLite(t)
+	ctx := context.Background()
+	task := submitWrite(t, store, "t1", "cancel-after-intent")
+	approveTask(t, store, task, "reviewer")
+	claimed, err := store.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := store.Reserve(ctx, claimed.ID, claimed.Version, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, err := store.Cancel(ctx, reserved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canceled.Status != StatusUnknown || canceled.ExecNonce != reserved.ExecNonce || canceled.ReservedTokens != 100 {
+		t.Fatalf("cancel lost uncertain write: %+v", canceled)
+	}
+	late, err := store.Complete(ctx, reserved.ID, reserved.Version, Outcome{Result: "wrote", Usage: 20})
+	if err != nil || late.Status != StatusUnknown {
+		t.Fatalf("late completion overwrote reconciliation state: %+v, %v", late, err)
+	}
+}
+
+func TestSweepTimeoutAfterWriteIntentRequiresReconciliation(t *testing.T) {
+	store := openSQLite(t)
+	ctx := context.Background()
+	task := submitWrite(t, store, "t1", "timeout-after-intent")
+	approveTask(t, store, task, "reviewer")
+	claimed, err := store.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := store.Reserve(ctx, claimed.ID, claimed.Version, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE agent_tasks SET expires_at = ? WHERE id = ?`, now()-1, reserved.ID); err != nil {
+		t.Fatal(err)
+	}
+	if swept, err := store.SweepTimeouts(ctx); err != nil || swept != 1 {
+		t.Fatalf("sweep = %d, %v; want 1, nil", swept, err)
+	}
+	got, err := store.Get(ctx, reserved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusUnknown || got.ExecNonce != reserved.ExecNonce || got.ReservedTokens != 100 {
+		t.Fatalf("timeout lost uncertain write: %+v", got)
+	}
+}
+
 func TestTimeoutsUnknownRetryAndAttempts(t *testing.T) {
 	store := openSQLite(t)
 	ctx := context.Background()
@@ -500,6 +554,40 @@ func TestPostgresVariant(t *testing.T) {
 	var auditCount int
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_task_audit WHERE task_id = $1 AND action IN ('submit', 'approve', 'complete')`, task.ID).Scan(&auditCount); err != nil || auditCount != 3 {
 		t.Fatalf("PostgreSQL durable audit count = %d, %v; want 3", auditCount, err)
+	}
+	uncertain := submitWrite(t, store, "t1", "pg-cancel-after-intent")
+	approveTask(t, store, uncertain, "reviewer")
+	claimed, err := store.Claim(ctx, "w2", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := store.Reserve(ctx, claimed.ID, claimed.Version, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, err := store.Cancel(ctx, reserved.ID)
+	if err != nil || canceled.Status != StatusUnknown || canceled.ExecNonce != reserved.ExecNonce {
+		t.Fatalf("PostgreSQL cancel lost write intent: %+v, %v", canceled, err)
+	}
+	uncertain = submitWrite(t, store, "t1", "pg-timeout-after-intent")
+	approveTask(t, store, uncertain, "reviewer")
+	claimed, err = store.Claim(ctx, "w3", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err = store.Reserve(ctx, claimed.ID, claimed.Version, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE agent_tasks SET expires_at = $1 WHERE id = $2`, now()-1, reserved.ID); err != nil {
+		t.Fatal(err)
+	}
+	if swept, err := store.SweepTimeouts(ctx); err != nil || swept != 1 {
+		t.Fatalf("PostgreSQL sweep = %d, %v; want 1, nil", swept, err)
+	}
+	timedOut, err := store.Get(ctx, reserved.ID)
+	if err != nil || timedOut.Status != StatusUnknown || timedOut.ExecNonce != reserved.ExecNonce {
+		t.Fatalf("PostgreSQL timeout lost write intent: %+v, %v", timedOut, err)
 	}
 	_ = approved
 }

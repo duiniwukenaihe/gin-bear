@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/driver/mysql"
@@ -142,8 +141,9 @@ func effectivePostgresSSLMode(cfg *DBConfig) (string, error) {
 	}
 }
 
-// validateProductionDBTLS validates the effective driver configuration so a
-// raw DSN cannot bypass the production TLS policy.
+// validateProductionDBTLS validates the effective driver configuration. For
+// PostgreSQL, production permits either explicit plaintext or hostname-
+// verified TLS, but rejects modes that silently downgrade or skip verification.
 func validateProductionDBTLS(cfg *DBConfig, production bool) error {
 	if !production || cfg == nil || !cfg.Enabled {
 		return nil
@@ -164,8 +164,8 @@ func validateProductionDBTLS(cfg *DBConfig, production bool) error {
 		if parseErr != nil {
 			return errors.New("production PostgreSQL DSN is invalid")
 		}
-		if !postgresTLSVerifiesHostname(parsed) {
-			return errors.New("production PostgreSQL requires sslmode=verify-full")
+		if !postgresTLSVerifiesHostname(parsed) && !postgresTLSIsPlaintext(parsed) {
+			return errors.New("production PostgreSQL requires sslmode=disable or verify-full")
 		}
 	case "mysql":
 		parsed, parseErr := mysqldriver.ParseDSN(dsn)
@@ -187,6 +187,18 @@ func postgresTLSVerifiesHostname(cfg *pgconn.Config) bool {
 	}
 	for _, fallback := range cfg.Fallbacks {
 		if fallback == nil || fallback.TLSConfig == nil || fallback.TLSConfig.InsecureSkipVerify {
+			return false
+		}
+	}
+	return true
+}
+
+func postgresTLSIsPlaintext(cfg *pgconn.Config) bool {
+	if cfg == nil || cfg.TLSConfig != nil {
+		return false
+	}
+	for _, fallback := range cfg.Fallbacks {
+		if fallback == nil || fallback.TLSConfig != nil {
 			return false
 		}
 	}
@@ -236,7 +248,10 @@ func OpenGormAdapter(ctx context.Context, cfg *DBConfig) (*GormAdapter, error) {
 	case "mysql", "":
 		dialector = mysql.Open(dsn)
 	case "sqlite", "sqlite3":
-		dialector = sqlite.Open(dsn)
+		dialector, err = sqliteDialector(dsn)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", dbType)
 	}

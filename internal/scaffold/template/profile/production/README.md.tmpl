@@ -45,6 +45,12 @@ make build
 BEAR_ENV=prod GIN_MODE=release ./bin/migrate
 ```
 
+If this application uses neither Casbin nor SQLite, build smaller binaries
+with `GOFLAGS="-tags=bear_no_casbin,bear_no_sqlite" make build`. These tags
+remove those features from the compiled service and migration tool; leave
+them unset if the application uses either feature. Tests that import SQLite
+should continue to run without the opt-out tags.
+
 `migrations/` files are append-only: never edit or rewrite a version that has
 already been applied anywhere; add a new version instead. Rolling the
 application binary back does not roll the database back; database rollback is

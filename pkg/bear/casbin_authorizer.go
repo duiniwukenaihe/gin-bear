@@ -1,3 +1,5 @@
+//go:build !bear_no_casbin
+
 package bear
 
 import (

@@ -74,6 +74,8 @@ database:
   user: "gin_bear"
   password: "" # Set with POSTGRES_PASSWORD.
   dbname: "gin_bear"
+  # Choose verify-full with a trusted CA, or disable on a network boundary
+  # that you operate. The framework does not force PostgreSQL TLS.
   sslmode: "verify-full"
 
 redis:

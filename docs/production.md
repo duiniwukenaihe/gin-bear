@@ -18,6 +18,15 @@ export BEAR_AUTH_JWT_SECRET="$(openssl rand -base64 48)"
 
 `server.mode: release` in YAML has the same effect as `GIN_MODE=release`.
 
+For a service that does not use Casbin or SQLite, build with
+`go build -tags bear_no_casbin,bear_no_sqlite` (or set the same tags in
+`GOFLAGS` for a generated project's `make build`). The default build keeps
+both features. `bear_no_casbin` removes the Casbin APIs at compile time;
+`bear_no_sqlite` makes selecting SQLite return an error. Use both flags to
+remove SQLite from the compiled dependency graph because Casbin's GORM adapter
+also imports it. Module manifests may still list optional dependencies for
+default builds and tests; the flags reduce the service binary, not `go.mod`.
+
 ## Configuration
 
 Start from `application-prod.yaml.example` and keep real secrets outside git. Supported environment overrides include:
@@ -39,6 +48,14 @@ Start from `application-prod.yaml.example` and keep real secrets outside git. Su
 - `TRACING_EXPORTER`
 - `TRACING_OTLP_ENDPOINT`
 - `REDIS_REQUIRED`
+
+PostgreSQL connection security is a deployment choice. Set
+`database.postgres_sslmode: "verify-full"` (or `sslmode` in a DSN) to verify the
+server certificate and hostname, or set `"disable"` for a plaintext link on
+a trusted network. The production loader accepts both. It rejects PostgreSQL
+`allow`/`prefer` fallback and TLS modes that skip hostname verification, so
+the selected transport cannot silently change. The production example shows
+`verify-full`; change it explicitly when your topology uses plaintext.
 
 Production configuration is always strict. `LoadConfig(paths ...string)` loads
 files in order, returns syntax, unknown-field, and validation errors, then
@@ -316,6 +333,8 @@ in `unknown` with its budget reservation held, even if the error is marked
 retryable. Requeue only after an operator verifies the external effect did not
 occur; confirm the observed effect and usage otherwise. A write integration
 without that idempotency and reconciliation contract is not production ready.
+Canceling or timing out a write after intent was recorded also leaves it in
+`unknown`; neither action can prove the external effect was absent.
 
 ## Request Context and Transactions
 

@@ -585,45 +585,79 @@ func (s *Store) Complete(ctx context.Context, id string, version int64, outcome 
 	return s.get(ctx, id)
 }
 
-// Cancel stops queued, waiting, or running work. It is an operator override:
-// the conditional write wins over a late Complete, which then drops its
-// result. Completed external effects are never undone; cancellation only
-// prevents new side effects.
+// Cancel stops queued, waiting, or running work. A write that has recorded
+// execution intent moves to unknown instead: the external effect may already
+// exist and must be reconciled. The version condition prevents cancellation
+// from overwriting an intent committed by another worker instance.
 func (s *Store) Cancel(ctx context.Context, id string) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, err := s.get(ctx, id)
-	if err != nil {
-		return nil, err
+	for {
+		task, err := s.get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if isTerminal(task.Status) {
+			return task, nil
+		}
+		version := task.Version
+		if task.Status == StatusRunning && task.Kind == "write" && task.ExecNonce != "" {
+			task.Status = StatusUnknown
+			task.ErrorText = "external result unknown; reconcile, do not blind-retry"
+		} else {
+			task.Status = StatusCanceled
+		}
+		task.Version++
+		task.LeaseOwner, task.LeaseExpires = "", 0
+		task.UpdatedAt = now()
+		committed, err := s.updateWhere(ctx, task, `id = ? AND version = ? AND status IN (?, ?, ?)`, id, version, StatusQueued, StatusWaiting, StatusRunning)
+		if err != nil {
+			return nil, err
+		}
+		if committed {
+			return s.get(ctx, id)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
-	if isTerminal(task.Status) {
-		return task, nil
-	}
-	task.Status = StatusCanceled
-	task.Version++
-	task.LeaseOwner, task.LeaseExpires = "", 0
-	task.UpdatedAt = now()
-	committed, err := s.updateWhere(ctx, task, `id = ? AND status IN (?, ?, ?)`, id, StatusQueued, StatusWaiting, StatusRunning)
-	if err != nil {
-		return nil, err
-	}
-	if !committed {
-		return s.get(ctx, id)
-	}
-	return s.get(ctx, id)
 }
 
-// SweepTimeouts marks expired non-terminal tasks timed out.
+// SweepTimeouts times out expired work. Running writes with recorded intent
+// become unknown, retaining their nonce and reservation for reconciliation.
 func (s *Store) SweepTimeouts(ctx context.Context) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result, err := s.exec(ctx, `UPDATE agent_tasks SET status = ?, version = version + 1, updated_at = ?
-WHERE status IN (?, ?, ?) AND expires_at > 0 AND expires_at <= ?`,
-		StatusTimedOut, now(), StatusQueued, StatusRunning, StatusWaiting, now())
+	cutoff := now()
+	var swept int64
+	err := s.transact(ctx, func(tx *sql.Tx) error {
+		unknown, err := s.execOn(tx, ctx, `UPDATE agent_tasks SET status = ?, error_text = ?, lease_owner = '', lease_expires = 0, version = version + 1, updated_at = ?
+WHERE status = ? AND kind = ? AND exec_nonce <> '' AND expires_at > 0 AND expires_at <= ?`,
+			StatusUnknown, "external result unknown; reconcile, do not blind-retry", cutoff, StatusRunning, "write", cutoff)
+		if err != nil {
+			return err
+		}
+		unknownCount, err := unknown.RowsAffected()
+		if err != nil {
+			return err
+		}
+		timedOut, err := s.execOn(tx, ctx, `UPDATE agent_tasks SET status = ?, lease_owner = '', lease_expires = 0, version = version + 1, updated_at = ?
+WHERE status IN (?, ?, ?) AND NOT (status = ? AND kind = ? AND exec_nonce <> '') AND expires_at > 0 AND expires_at <= ?`,
+			StatusTimedOut, cutoff, StatusQueued, StatusRunning, StatusWaiting, StatusRunning, "write", cutoff)
+		if err != nil {
+			return err
+		}
+		timeoutCount, err := timedOut.RowsAffected()
+		if err != nil {
+			return err
+		}
+		swept = unknownCount + timeoutCount
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return swept, nil
 }
 
 // Recover requeues running tasks whose lease expired (crashed workers).

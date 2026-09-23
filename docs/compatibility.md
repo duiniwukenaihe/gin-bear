@@ -199,6 +199,7 @@ in both compatibility and strict modes without removing the v0 public API:
   contract; prefer Bear route helpers for policy-protected routes.
 - `/metrics` was removed from the default `auth.public_paths`. Add it back
   explicitly only when another access-control boundary protects it.
-- The production example now requires PostgreSQL `sslmode: verify-full`, leaves
+- The production example recommends PostgreSQL `sslmode: verify-full` while
+  the framework also accepts explicit plaintext `sslmode: disable`; it leaves
   the password empty for `POSTGRES_PASSWORD`, uses a deliberately rejected JWT
   placeholder, and shows strict loading plus explicit HTTP/JWT limits.

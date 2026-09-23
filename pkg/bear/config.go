@@ -201,6 +201,12 @@ func (c *AuthConfig) GetPublicPaths() []string {
 	return cloneStringSlice(*c.PublicPaths)
 }
 
+// CasbinConfig provides the optional Casbin model configuration.
+type CasbinConfig struct {
+	ModelPath string `yaml:"model_path"`
+	ModelText string `yaml:"model_text"`
+}
+
 type DBConfig struct {
 	Enabled         bool   `yaml:"enabled" json:"enabled"`
 	Type            string `yaml:"type" json:"type"`         // mysql, postgres, sqlite (default: mysql)

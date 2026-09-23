@@ -68,6 +68,17 @@ All notable changes to gin-bear are documented in this file.
 
 ### Changed
 
+- PostgreSQL production connections now accept either explicit plaintext
+  (`sslmode=disable`) or hostname-verified TLS (`verify-full`); downgrade and
+  unverified TLS modes remain rejected. Generated production configuration
+  shows the operator's choice.
+- Optional `bear_no_casbin` and `bear_no_sqlite` build tags let applications
+  that use neither feature omit both from the compiled binary while the
+  default build remains compatible. Casbin's GORM adapter itself imports
+  SQLite, so both tags are needed to remove SQLite completely.
+- Durable write tasks retain their unknown-result reconciliation state when
+  canceled or timed out after execution intent; a version check prevents a
+  cancellation on another instance from erasing a newly recorded intent.
 - The factory-built `CasbinEnforcer` disables the decision cache by default so
   role/policy removal takes effect on the next enforcement. The exported type,
   constructor signature, and promoted methods are unchanged.
