@@ -300,7 +300,7 @@ func TestReleaseWorkflowIsTagScopedAndPublishesImmutableRelease(t *testing.T) {
 	if strings.Contains(workflow, "API_BASELINE_REBUILD") {
 		t.Fatal("release workflow must not require API baseline reconstruction")
 	}
-	for _, required := range []string{"needs: [verify, integration]", "run: make verify", "staticcheck@v0.7.0", "govulncheck@v1.6.0", "apidiff@v0.0.0-20260709172345-9ea1abe57597"} {
+	for _, required := range []string{"needs: [verify, integration]", "run: make verify", "RC_ALLOW_NETWORK: \"1\""} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("release workflow missing source quality gate %q", required)
 		}

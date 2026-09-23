@@ -71,9 +71,9 @@ both `VALIDSIG` and `TRUST_FULLY` or `TRUST_ULTIMATE`. `false` is recorded as an
 explicit exemption. Supplying the signature variable without a release tag is
 invalid.
 
-The ordinary CI quality job installs pinned versions under
-`${RUNNER_TEMP}/bin` and passes all three absolute binary paths to `make verify`,
-so the gate does not depend on tools preinstalled by the runner image.
+The ordinary CI quality job runs the pinned Go tool module versions through
+`make verify` with `RC_ALLOW_NETWORK=1`. The Go checksum database verifies
+downloads, and the gate does not depend on tools preinstalled by the runner.
 Offline verification rejects remote vulnerability database URLs. It accepts
 only an absolute local directory or `file://` URI, requires an independently
 trusted SHA-256 manifest, verifies every relative manifest entry inside the

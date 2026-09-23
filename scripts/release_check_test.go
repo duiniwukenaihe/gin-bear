@@ -93,15 +93,6 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 	}
 	text := string(content)
 	for _, want := range []string{
-		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= honnef.co/go/tools/cmd/staticcheck@v0.7.0`,
-		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/vuln/cmd/govulncheck@v1.6.0`,
-		`CGO_ENABLED=0 GOBIN="${RUNNER_TEMP}/bin" go install -trimpath -ldflags=-buildid= golang.org/x/exp/cmd/apidiff@v0.0.0-20260709172345-9ea1abe57597`,
-		"STATICCHECK_BIN: ${{ runner.temp }}/bin/staticcheck",
-		"STATICCHECK_EXPECTED_SHA256: 968c4cdeff3a18eef976ecdbcd83dbea35ca3c12c58b87c9f4684e1ea6adfc75",
-		"GOVULNCHECK_BIN: ${{ runner.temp }}/bin/govulncheck",
-		"GOVULNCHECK_EXPECTED_SHA256: 15ad0c7081d061d06f83a39b1783318d90659f3404d83a75bcdda51eda3ef75f",
-		"APIDIFF_BIN: ${{ runner.temp }}/bin/apidiff",
-		"APIDIFF_EXPECTED_SHA256: 84b7e058a4df23bc0e21d3eae07dedc0b93cee85b40ee8c65701944eed5f742f",
 		"RC_ALLOW_NETWORK: \"1\"",
 		"RELEASE_CHECK_METADATA: ${{ runner.temp }}/release-check-metadata.txt",
 		"run: make verify",
@@ -116,6 +107,9 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 		"GENERATE_SBOM",
 		"sbom.spdx.json",
 		"actions/upload-artifact",
+		"STATICCHECK_EXPECTED_SHA256:",
+		"GOVULNCHECK_EXPECTED_SHA256:",
+		"APIDIFF_EXPECTED_SHA256:",
 	} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("CI should not contain container delivery step %q:\n%s", unwanted, text)
@@ -395,9 +389,7 @@ func TestReleaseVersionComesFromPushedTag(t *testing.T) {
 	for _, required := range []string{
 		"needs: [verify, integration]",
 		"run: make verify",
-		"staticcheck@v0.7.0",
-		"govulncheck@v1.6.0",
-		"apidiff@v0.0.0-20260709172345-9ea1abe57597",
+		"RC_ALLOW_NETWORK: \"1\"",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("release workflow missing quality gate %q:\n%s", required, workflow)
