@@ -30,6 +30,7 @@ jobs:
       - name: Verify quality baseline
         env:
           RC_ALLOW_NETWORK: "1"
+          API_COMPAT_ALLOW_NETWORK: "1"
           RELEASE_CHECK_METADATA: ${{ runner.temp }}/release-check-metadata.txt
         run: make verify
 

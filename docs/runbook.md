@@ -72,7 +72,8 @@ explicit exemption. Supplying the signature variable without a release tag is
 invalid.
 
 The ordinary CI quality job runs the pinned Go tool module versions through
-`make verify` with `RC_ALLOW_NETWORK=1`. The Go checksum database verifies
+`make verify` with `RC_ALLOW_NETWORK=1` and `API_COMPAT_ALLOW_NETWORK=1`.
+The Go checksum database verifies
 downloads, and the gate does not depend on tools preinstalled by the runner.
 Offline verification rejects remote vulnerability database URLs. It accepts
 only an absolute local directory or `file://` URI, requires an independently

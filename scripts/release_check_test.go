@@ -94,6 +94,7 @@ func TestCIInvokesQualityEntryPointAndSeparateRaceCheck(t *testing.T) {
 	text := string(content)
 	for _, want := range []string{
 		"RC_ALLOW_NETWORK: \"1\"",
+		"API_COMPAT_ALLOW_NETWORK: \"1\"",
 		"RELEASE_CHECK_METADATA: ${{ runner.temp }}/release-check-metadata.txt",
 		"run: make verify",
 		`run: scripts/ci-diagnostic.sh "Race tests failed" go test -race ./... -count=1`,
@@ -390,6 +391,7 @@ func TestReleaseVersionComesFromPushedTag(t *testing.T) {
 		"needs: [verify, integration]",
 		"run: make verify",
 		"RC_ALLOW_NETWORK: \"1\"",
+		"API_COMPAT_ALLOW_NETWORK: \"1\"",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("release workflow missing quality gate %q:\n%s", required, workflow)
