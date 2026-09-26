@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -521,6 +522,21 @@ func (r *Repository[T]) Update(ctx context.Context, entity *T) error {
 
 	// 乐观锁检查
 	if v, ok := any(entity).(VersionedModel); ok {
+		if entity == nil {
+			return gorm.ErrPrimaryKeyRequired
+		}
+		statement := &gorm.Statement{DB: db}
+		if err := statement.Parse(entity); err != nil {
+			return err
+		}
+		if len(statement.Schema.PrimaryFields) == 0 {
+			return gorm.ErrPrimaryKeyRequired
+		}
+		for _, field := range statement.Schema.PrimaryFields {
+			if _, zero := field.ValueOf(db.Statement.Context, reflect.ValueOf(entity)); zero {
+				return gorm.ErrPrimaryKeyRequired
+			}
+		}
 		currentVersion := v.GetVersion()
 		v.SetVersion(currentVersion + 1)
 

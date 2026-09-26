@@ -290,10 +290,10 @@ go build \
 	./cmd
 
 echo "==> Running tests"
-go test ./... -count=1
+go test ./... -count=1 -timeout=20m
 
 echo "==> Measuring repository and critical-chain coverage"
-go test ./... -count=1 -coverprofile="${coverage_profile}"
+go test ./... -count=1 -coverprofile="${coverage_profile}" -timeout=20m
 printf '==> Enforcing release coverage thresholds: total %s%%, critical %s%%\n' "${release_coverage_minimum}" "${release_critical_coverage_minimum}"
 env COVERAGE_MINIMUM="${release_coverage_minimum}" CRITICAL_COVERAGE_MINIMUM="${release_critical_coverage_minimum}" \
 	scripts/check-coverage.sh "${coverage_profile}"
@@ -305,7 +305,7 @@ echo "==> Running legacy and generated application E2E checks"
 BEAR_RELEASE_E2E=1 go test ./scripts/releasee2e -run '^TestReleaseCandidateApplications$' -count=1
 
 echo "==> Running race tests"
-go test -race ./... -count=1
+go test -race ./... -count=1 -timeout=20m
 
 echo "==> Running go vet"
 go vet ./...

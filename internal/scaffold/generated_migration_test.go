@@ -15,6 +15,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 )
 
 // TestGeneratedAPIResourceBootsAfterApplyingGeneratedMigration covers the
@@ -203,6 +206,91 @@ func generatedJSONRequest(t *testing.T, client *http.Client, method, url, body s
 		t.Fatalf("decode %s %s (%d): %v\n%s", method, url, response.StatusCode, err, payload)
 	}
 	return decoded
+}
+
+func TestGeneratedMigrateCommandRecoversDirtyState(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "migrate-recovery")
+	if err := Generate(context.Background(), Options{
+		Name:             "migrate-recovery",
+		Module:           "example.com/migrate-recovery",
+		Directory:        project,
+		FrameworkVersion: "v0.0.0",
+		FrameworkReplace: repoRoot(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	enableGeneratedDatabase(t, project)
+	migrations := filepath.Join(project, "migrations")
+	if err := os.MkdirAll(migrations, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, sql := range map[string]string{
+		"001_create_probe.up.sql":   "CREATE TABLE recovery_probe (id INTEGER PRIMARY KEY);\n",
+		"001_create_probe.down.sql": "DROP TABLE recovery_probe;\n",
+	} {
+		if err := os.WriteFile(filepath.Join(migrations, name), []byte(sql), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGo(t, project, "mod", "tidy")
+	binary := filepath.Join(t.TempDir(), "migrate")
+	runGo(t, project, "build", "-o", binary, "./cmd/migrate")
+	if _, stderr, code := runCommand(t, project, binary); code != 0 {
+		t.Fatalf("initial migration failed (%d): %s", code, stderr)
+	}
+	db, err := gorm.Open(sqlite.Open(filepath.Join(project, "golden-path.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := db.Exec("UPDATE schema_migrations SET dirty = TRUE WHERE version = ?", "001").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if _, stderr, code := runCommand(t, project, binary); code == 0 || !strings.Contains(stderr, "-force-version") {
+		t.Fatalf("dirty migration did not block Up with recovery guidance = (%d) %q", code, stderr)
+	}
+	if _, stderr, code := runCommand(t, project, binary, "-force-version", "001"); code == 0 || !strings.Contains(stderr, "-force-applied") {
+		t.Fatalf("force without explicit decision = (%d) %q", code, stderr)
+	}
+	if _, stderr, code := runCommand(t, project, binary, "-force-applied=true"); code == 0 || !strings.Contains(stderr, "-force-version") {
+		t.Fatalf("force decision without version = (%d) %q", code, stderr)
+	}
+	if _, stderr, code := runCommand(t, project, binary, "-force-version", "001", "-force-applied=true"); code != 0 {
+		t.Fatalf("confirm applied failed (%d): %s", code, stderr)
+	}
+	var dirty bool
+	if err := db.Raw("SELECT dirty FROM schema_migrations WHERE version = ?", "001").Scan(&dirty).Error; err != nil || dirty {
+		t.Fatalf("history after confirmation: dirty=%v err=%v", dirty, err)
+	}
+	if _, stderr, code := runCommand(t, project, binary); code != 0 {
+		t.Fatalf("up after recovery failed (%d): %s", code, stderr)
+	}
+	// Simulate a version whose schema was manually rolled back. The explicit
+	// false decision drops only its dirty history row, allowing Up to retry.
+	if err := db.Exec("DROP TABLE recovery_probe").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("UPDATE schema_migrations SET dirty = TRUE WHERE version = ?", "001").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, code := runCommand(t, project, binary, "-force-version", "001", "-force-applied=false"); code != 0 {
+		t.Fatalf("confirm unapplied failed (%d): %s", code, stderr)
+	}
+	var remaining int64
+	if err := db.Raw("SELECT COUNT(*) FROM schema_migrations WHERE version = ?", "001").Scan(&remaining).Error; err != nil || remaining != 0 {
+		t.Fatalf("history after removal: rows=%d err=%v", remaining, err)
+	}
+	if _, stderr, code := runCommand(t, project, binary); code != 0 {
+		t.Fatalf("up after removing dirty history failed (%d): %s", code, stderr)
+	}
+	if err := db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'recovery_probe'").Scan(&remaining).Error; err != nil || remaining != 1 {
+		t.Fatalf("schema after retry: tables=%d err=%v", remaining, err)
+	}
 }
 
 // TestGeneratedAPIWithDisabledDatabaseWarnsWithoutBlocking pins the

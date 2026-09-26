@@ -155,7 +155,7 @@ computePins 本身支持所有 kind 的 decimal 字段，但新 plan 流程仅�
 
 位置：`scripts/test-integration.sh:31`。
 
-未设置 GOCACHE/GOMODCACHE 的 Linux runner 会被强制指向 /Users/zhangpeng/...；普通 runner 通常无权创建 /Users，不能作为跨平台门禁。脚本也未在构建前执行磁盘检查。
+未设置 GOCACHE/GOMODCACHE 的 Linux runner 会被强制指向 /Users/<maintainer>/...；普通 runner 通常无权创建 /Users，不能作为跨平台门禁。脚本也未在构建前执行磁盘检查。
 
 修复：非本机使用 go env 的用户默认缓存；Mac 特例不能传播到 CI。补无预设缓存环境变量的 Linux 验收、磁盘门槛与本任务临时目录退出清理。
 

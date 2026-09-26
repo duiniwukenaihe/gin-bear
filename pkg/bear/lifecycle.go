@@ -414,7 +414,7 @@ func (l *Lifecycle) rollbackStrictStart(startErr error) error {
 	l.startErr = startErr
 	hasPrestarted := false
 	for _, entry := range l.components {
-		if entry.active && entry.prestarted {
+		if entry.started && entry.prestarted {
 			hasPrestarted = true
 			break
 		}
@@ -621,7 +621,9 @@ func (l *Lifecycle) stopStrictEntries(ctx context.Context) (error, bool) {
 	var shutdownErrors []error
 	for index := len(l.components) - 1; index >= 0; index-- {
 		entry := l.components[index]
-		if !entry.active || !entry.started {
+		// Deregistration stops future initialization, not ownership of a
+		// resource that has already started.
+		if !entry.started {
 			continue
 		}
 		if entry.stopState == lifecycleEntryStopped || entry.stopState == lifecycleEntryStoppedWithError {

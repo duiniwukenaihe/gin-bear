@@ -36,7 +36,8 @@ validate_profile() {
 			next
 		}
 		{
-			if ($0 !~ /^.+:[1-9][0-9]*\.[1-9][0-9]*,[1-9][0-9]*\.[1-9][0-9]* [1-9][0-9]* [0-9]+$/) {
+			# Empty select cases can produce valid blocks with zero statements.
+			if ($0 !~ /^.+:[1-9][0-9]*\.[1-9][0-9]*,[1-9][0-9]*\.[1-9][0-9]* [0-9]+ [0-9]+$/) {
 				printf "malformed coverage profile data at line %d: %s\n", NR, $0 > "/dev/stderr"
 				failed = 1
 				next

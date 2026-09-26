@@ -3,6 +3,7 @@ package bear
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -90,6 +91,11 @@ func (j *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
 	if len(tokenStr) > maxJWTTokenBytes {
 		return nil, fmt.Errorf("jwt token exceeds maximum size of %d bytes", maxJWTTokenBytes)
 	}
+	// Blacklist keys use the signed token text. Accept only canonical encoding:
+	// even strict Base64URL decoding ignores CR/LF unless rejected explicitly.
+	if strings.ContainsAny(tokenStr, "\r\n") {
+		return nil, errors.New("invalid token encoding")
+	}
 	if err := validateJWTExpiration(j.Config); err != nil {
 		return nil, err
 	}
@@ -100,6 +106,7 @@ func (j *JWTUtil) ParseToken(tokenStr string) (*CustomClaims, error) {
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
 		jwt.WithLeeway(j.Config.ClockSkew),
 		jwt.WithExpirationRequired(),
+		jwt.WithStrictDecoding(),
 	}
 	if j.Config.Issuer != "" {
 		options = append(options, jwt.WithIssuer(j.Config.Issuer))

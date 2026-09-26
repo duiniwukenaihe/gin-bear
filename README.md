@@ -1,5 +1,7 @@
 # Gin-Bear
 
+English | [简体中文](README.zh-CN.md)
+
 Gin-Bear is a Gin-based application scaffold and framework, evolved from the
 controller, IoC, Fairing, and responder model of
 [goft-gin](https://github.com/shenyisyn/goft-gin). It adds production-oriented
@@ -11,16 +13,16 @@ OpenAPI support.
 Add the current release to a Go application:
 
 ```bash
-go get github.com/duiniwukenaihe/gin-bear@v0.9.4
+go get github.com/duiniwukenaihe/gin-bear@v0.9.5
 ```
 
 Application code imports the runtime from
-`github.com/duiniwukenaihe/gin-bear/pkg/bear`. `v0.9.4` is the current
+`github.com/duiniwukenaihe/gin-bear/pkg/bear`. `v0.9.5` is the current
 release. Review the [changelog](CHANGELOG.md) and upgrade guide before updating
 an existing application.
 
 The upgrade steps and `main`-based publishing flow are
-documented in the [upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md) and
+documented in the [upgrade guide](docs/upgrade-v0.9.4-to-v0.9.5.md) and
 [release process](docs/release-process.md).
 
 ## Generate A Project (Optional)
@@ -29,12 +31,12 @@ documented in the [upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md) and
 when starting a new service from the maintained application structure:
 
 ```bash
-go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.4
+go install github.com/duiniwukenaihe/gin-bear/cmd/bear@v0.9.5
 bear new my-service
 ```
 
-The published `v0.9.4` generator contains the `v0.9.4` templates and pins the
-generated project's `go.mod` to `v0.9.4`. A released generator is bound to its
+The published `v0.9.5` generator contains the `v0.9.5` templates and pins the
+generated project's `go.mod` to `v0.9.5`. A released generator is bound to its
 own module version and rejects attempts to select another framework version.
 Existing applications do not need to install the generator.
 
@@ -48,8 +50,8 @@ go run ./cmd/bear new my-service \
 ```
 
 This development flow writes a local `replace` directive. It does not claim
-compatibility with `v0.9.4` or any other published tag. An unversioned HEAD
-generator rejects `--framework-version v0.9.4` before creating a project.
+compatibility with `v0.9.5` or any other published tag. An unversioned HEAD
+generator rejects `--framework-version v0.9.5` before creating a project.
 
 ## Recommended Startup
 
@@ -129,7 +131,7 @@ Run the basic service with `go run ./examples/basic` and open
 
 ## Optional gRPC Runtime
 
-`v0.9.4` defines `GRPCServiceRegistrar` for injectable
+The framework defines `GRPCServiceRegistrar` for injectable
 services and the error-returning registration methods `AddGRPCServiceE`,
 `AddGRPCUnaryInterceptorE`, and `AddGRPCStreamInterceptorE`. Register at least
 one business service before enabling gRPC. Authentication belongs in unary and
@@ -140,6 +142,17 @@ while reflection is disabled by default. Production deployments must choose one
 explicit transport: process-owned TLS, process-owned mTLS, or plaintext bound to
 loopback behind a same-host Nginx/Envoy TLS terminator. See the
 [production guide](docs/production.md#grpc) for configuration and limits.
+
+## v0.9.5 Production Fixes
+
+This maintenance release fixes token-revocation bypasses, unsafe optimistic
+updates without complete primary keys, overlapping readiness checks, gRPC
+health-watch shutdown, resource cleanup, and migration packaging/recovery.
+See the [upgrade guide](docs/upgrade-v0.9.4-to-v0.9.5.md) for behavior changes.
+
+The core scaffold is intended for production services after application-specific
+acceptance against the deployment database and configuration. Agent and MCP
+modules remain experimental and are versioned separately.
 
 ## Production And Upgrade Guidance
 

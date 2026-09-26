@@ -7,10 +7,16 @@
 //
 //	go run ./cmd/migrate
 //	go run ./cmd/migrate -direction down -steps 1
+//
+// If a migration leaves dirty history, inspect the schema before resolving
+// exactly that version without running SQL:
+//
+//	go run ./cmd/migrate -force-version 003 -force-applied=false
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -31,7 +37,22 @@ func run() error {
 	steps := flag.Int("steps", 1, "how many migrations down rolls back")
 	configPath := flag.String("config", "", "configuration file; when empty the standard application.yaml and application-<BEAR_ENV>.yaml chain is loaded")
 	migrationDir := flag.String("dir", "migrations", "directory holding the reviewed .up.sql and .down.sql files")
+	forceVersion := flag.String("force-version", "", "resolve one dirty migration version without executing SQL")
+	forceApplied := flag.Bool("force-applied", false, "with -force-version: true keeps the applied history row; false removes it")
 	flag.Parse()
+	version := strings.TrimSpace(*forceVersion)
+	forceAppliedSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "force-applied" {
+			forceAppliedSet = true
+		}
+	})
+	if version != "" && !forceAppliedSet {
+		return fmt.Errorf("-force-version requires an explicit -force-applied=true|false after inspecting the schema")
+	}
+	if version == "" && forceAppliedSet {
+		return fmt.Errorf("-force-applied requires -force-version")
+	}
 
 	var paths []string
 	if *configPath != "" {
@@ -58,6 +79,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("resolve database handle: %w", err)
 	}
+	runner := bear.NewMigrationRunnerWithDialect(sqlDB, dialect)
+	ctx := context.Background()
+	if version != "" {
+		if err := runner.ForceMigrationState(ctx, version, *forceApplied); err != nil {
+			return fmt.Errorf("force migration state: %w", err)
+		}
+		return nil
+	}
 	// An absent directory would otherwise report a successful no-op run, so the
 	// operator learns about a wrong working directory from LoadSQLMigrations.
 	if _, err := os.Stat(*migrationDir); err != nil {
@@ -67,17 +96,21 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load migrations: %w", err)
 	}
-
-	runner := bear.NewMigrationRunnerWithDialect(sqlDB, dialect)
-	ctx := context.Background()
 	switch strings.ToLower(strings.TrimSpace(*direction)) {
 	case "up":
-		return runner.Up(ctx, migrations)
+		return hintDirtyMigration(runner.Up(ctx, migrations))
 	case "down":
-		return runner.Down(ctx, migrations, *steps)
+		return hintDirtyMigration(runner.Down(ctx, migrations, *steps))
 	default:
 		return fmt.Errorf("unsupported direction %q: use up or down", *direction)
 	}
+}
+
+func hintDirtyMigration(err error) error {
+	if errors.Is(err, bear.ErrDirtyMigration) {
+		return fmt.Errorf("%w (inspect the schema, then use -force-version <version> -force-applied=true|false)", err)
+	}
+	return err
 }
 
 func migrationDialect(dbType string) (bear.MigrationDialect, error) {

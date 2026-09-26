@@ -128,6 +128,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
       - name: Publish GitHub release
         run: |
           curl --fail --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors \
@@ -139,10 +144,17 @@ jobs:
             if [[ "$RELEASE_TAG" == *-* ]]; then
               release_args+=(--prerelease --latest=false)
             fi
+            awk -v version="$RELEASE_TAG" '
+              index($0, "## [" version "]") == 1 { found=1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+            test -s "$RUNNER_TEMP/release-notes.md"
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --generate-notes \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
               --title "$RELEASE_TAG" \
               "${release_args[@]}"
           fi

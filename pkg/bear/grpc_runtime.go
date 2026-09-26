@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,9 +22,69 @@ import (
 
 type grpcRuntimeServer struct {
 	*grpc.Server
-	health       *health.Server
+	health       *grpcRuntimeHealthServer
 	serviceNames []string
 	handlers     *activeHandlerTracker
+}
+
+// grpcRuntimeHealthServer ends framework-owned watches during drain. Business
+// streams continue to use the normal handler tracker and graceful-stop budget.
+type grpcRuntimeHealthServer struct {
+	*health.Server
+	mu      sync.Mutex
+	changed chan struct{}
+	stopped bool
+}
+
+func (s *grpcRuntimeHealthServer) Resume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Server.Resume()
+	s.stopped = false
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
+func (s *grpcRuntimeHealthServer) Shutdown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Server.Shutdown()
+	s.stopped = true
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
+func (s *grpcRuntimeHealthServer) Watch(request *healthpb.HealthCheckRequest, stream healthpb.Health_WatchServer) error {
+	last := healthpb.HealthCheckResponse_ServingStatus(-1)
+	for {
+		s.mu.Lock()
+		changed, stopped := s.changed, s.stopped
+		response, err := s.Server.Check(stream.Context(), request)
+		s.mu.Unlock()
+		if err != nil {
+			if status.Code(err) != codes.NotFound {
+				return err
+			}
+			response = &healthpb.HealthCheckResponse{Status: healthpb.HealthCheckResponse_SERVICE_UNKNOWN}
+		}
+		if stopped {
+			response.Status = healthpb.HealthCheckResponse_NOT_SERVING
+		}
+		if response.Status != last {
+			if err := stream.Send(response); err != nil {
+				return err
+			}
+			last = response.Status
+		}
+		if stopped {
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-stream.Context().Done():
+			return status.FromContextError(stream.Context().Err()).Err()
+		}
+	}
 }
 
 func (t *activeHandlerTracker) unaryInterceptor() grpc.UnaryServerInterceptor {
@@ -114,7 +175,7 @@ func (b *Bear) buildGRPCRuntime() (*grpcRuntimeServer, error) {
 
 	runtimeServer := &grpcRuntimeServer{Server: server, serviceNames: serviceNames, handlers: handlerTracker}
 	if grpcConfig.HealthEnabled {
-		healthServer := health.NewServer()
+		healthServer := &grpcRuntimeHealthServer{Server: health.NewServer(), changed: make(chan struct{})}
 		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 		for _, serviceName := range serviceNames {
 			healthServer.SetServingStatus(serviceName, healthpb.HealthCheckResponse_NOT_SERVING)

@@ -1,5 +1,8 @@
 # Supported versions
 
+Current root framework and generator: `v0.9.5`. See the
+[English / 中文 upgrade guide](upgrade-v0.9.4-to-v0.9.5.md).
+
 Verified matrix for this checkout. Lowest supported majors are tested; newer
 patch releases within a major are accepted, newer majors are not claimed
 until verified. Observed local versions are logged by the test suites, not

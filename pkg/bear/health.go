@@ -103,8 +103,6 @@ func readinessFailureCategory(err error) string {
 	switch {
 	case errors.Is(err, errReadinessCheckPanic):
 		return "panic"
-	case errors.Is(err, errReadinessCheckBusy):
-		return "busy"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	case errors.Is(err, context.Canceled):
@@ -119,7 +117,6 @@ type readinessResult struct {
 	Err  error
 }
 
-var errReadinessCheckBusy = errors.New("readiness check already in progress")
 var errReadinessCheckPanic = errors.New("readiness check failed unexpectedly")
 
 type readinessCheckerKey struct {
@@ -137,11 +134,16 @@ type preparedReadinessCheck struct {
 
 type readinessCheckCoordinator struct {
 	mu       sync.Mutex
-	inFlight map[readinessCheckerKey]struct{}
+	inFlight map[readinessCheckerKey]*readinessCheckAttempt
+}
+
+type readinessCheckAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 func newReadinessCheckCoordinator() *readinessCheckCoordinator {
-	return &readinessCheckCoordinator{inFlight: make(map[readinessCheckerKey]struct{})}
+	return &readinessCheckCoordinator{inFlight: make(map[readinessCheckerKey]*readinessCheckAttempt)}
 }
 
 func runtimeReadinessChecks(runtime *Runtime) *readinessCheckCoordinator {
@@ -197,25 +199,29 @@ func runReadinessChecksWithCoordinator(parent context.Context, timeout time.Dura
 			}
 			continue
 		}
-		if coordinator.start(check.key) {
-			i, check := i, check
+		attempt, started := coordinator.start(check.key)
+		if started {
+			// The shared execution keeps request values, but one caller leaving
+			// must not cancel work still needed by another probe.
+			checkCtx, cancelCheck := context.WithTimeout(context.WithoutCancel(parent), timeout)
 			go func() {
-				result := indexedResult{index: i, readinessResult: readinessResult{Name: check.name}}
+				defer cancelCheck()
 				defer func() {
 					if recover() != nil {
-						result.Err = errReadinessCheckPanic
+						attempt.err = errReadinessCheckPanic
 					}
-					coordinator.finish(check.key)
-					completed <- result
+					coordinator.finish(check.key, attempt)
 				}()
-				result.Err = check.checker.CheckReady(deadlineCtx)
+				attempt.err = check.checker.CheckReady(checkCtx)
 			}()
-			continue
 		}
-		completed <- indexedResult{
-			index:           i,
-			readinessResult: readinessResult{Name: check.name, Err: errReadinessCheckBusy},
-		}
+		go func() {
+			select {
+			case <-attempt.done:
+				completed <- indexedResult{index: i, readinessResult: readinessResult{Name: check.name, Err: attempt.err}}
+			case <-deadlineCtx.Done():
+			}
+		}()
 	}
 
 	results := make([]readinessResult, len(ordered))
@@ -240,19 +246,21 @@ func runReadinessChecksWithCoordinator(parent context.Context, timeout time.Dura
 	return results
 }
 
-func (c *readinessCheckCoordinator) start(key readinessCheckerKey) bool {
+func (c *readinessCheckCoordinator) start(key readinessCheckerKey) (*readinessCheckAttempt, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, running := c.inFlight[key]; running {
-		return false
+	if attempt, running := c.inFlight[key]; running {
+		return attempt, false
 	}
-	c.inFlight[key] = struct{}{}
-	return true
+	attempt := &readinessCheckAttempt{done: make(chan struct{})}
+	c.inFlight[key] = attempt
+	return attempt, true
 }
 
-func (c *readinessCheckCoordinator) finish(key readinessCheckerKey) {
+func (c *readinessCheckCoordinator) finish(key readinessCheckerKey, attempt *readinessCheckAttempt) {
 	c.mu.Lock()
 	delete(c.inFlight, key)
+	close(attempt.done)
 	c.mu.Unlock()
 }
 

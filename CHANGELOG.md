@@ -4,6 +4,59 @@ All notable changes to gin-bear are documented in this file.
 
 ## [Unreleased]
 
+## [v0.9.5] - 2026-09-26
+
+See the [English / 中文 upgrade guide](https://github.com/duiniwukenaihe/gin-bear/blob/v0.9.5/docs/upgrade-v0.9.4-to-v0.9.5.md).
+Go 1.26.6 remains required; no framework schema migration is introduced.
+
+### Fixed
+
+- JWT parsing rejects non-canonical Base64URL signatures and embedded CR/LF,
+  preventing alternate encodings from bypassing token revocation.
+- Optimistic repository updates require every primary-key field before
+  changing the version or issuing SQL, including composite primary keys.
+- Concurrent readiness probes share an in-flight dependency check while
+  retaining their own deadlines, avoiding false failures from overlapping probes.
+- gRPC health watches receive `NOT_SERVING` and end during shutdown without
+  consuming the business RPC drain timeout.
+- Strict lifecycle shutdown and startup rollback close prestarted resources
+  even when their bean registration was removed or replaced.
+- Production images include reviewed migration SQL alongside the migration
+  binary, and document deployment configuration and secret injection.
+- When `auth.storage_type=redis` is configured, `AuthFairing` rejects private
+  requests with HTTP 503 if the token manager or revocation store is missing,
+  instead of accepting a JWT without checking revocation.
+- Generated `cmd/migrate` exposes explicit `-force-version` and
+  `-force-applied=true|false` flags for operator-reviewed dirty migration
+  recovery; ordinary Up/Down errors point to that command.
+
+- Release E2E validates both development and versioned generator rejection
+  of mismatched framework versions before creating a project. Local-checkout E2E builds explicitly disable VCS
+  version stamping so clean release tags can run the same development fixtures.
+
+- Coverage validation accepts Go-generated zero-statement blocks without
+  changing coverage totals or release thresholds.
+
+### Release and documentation
+
+- Publish the matching bilingual changelog in GitHub release notes and keep
+  English/Chinese installation and upgrade guidance aligned.
+- Allow 20 minutes per full test package for generated-application builds,
+  retaining all quality, coverage, compatibility, and race checks.
+
+### 中文说明
+
+- 修复 JWT 非规范签名编码绕过令牌撤销的问题；配置 Redis 撤销存储却缺少
+  管理器或存储时，私有请求返回 HTTP 503。
+- 乐观锁更新必须提供完整主键，避免缺失主键或复合主键不完整导致批量误更新。
+- 重叠就绪探测共享依赖检查，各自保留超时和取消控制，避免误报不健康。
+- gRPC 健康订阅在关闭时结束，避免占满业务 RPC 的排空时间。
+- 严格生命周期会关闭已预启动但随后移除或替换注册的资源。
+- 生产镜像打包迁移 SQL；生成的迁移程序提供人工核验后的脏状态恢复参数。
+- 修复版本标签下的生成器验证；更新中英文 README、升级说明和发布说明。
+  完整测试包的时间预算调整为 20 分钟，所有验证项目继续执行。
+- 覆盖率检查正确处理 Go 生成的零语句区间，保留覆盖率统计和发布门槛。
+
 ## [v0.9.4] - 2026-09-23
 
 See the [v0.9.3 → v0.9.4 upgrade guide](docs/upgrade-v0.9.3-to-v0.9.4.md)

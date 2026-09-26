@@ -234,8 +234,8 @@ go test -race ./pkg/bear -run 'TestCasbinAuthorizer' -count=1
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-export GOCACHE=/Users/zhangpeng/Library/Caches/go-build
-export GOMODCACHE=/Users/zhangpeng/go/pkg/mod
+export GOCACHE="$(go env GOCACHE)"
+export GOMODCACHE="$(go env GOMODCACHE)"
 export GOPROXY=https://goproxy.cn,direct
 export GOSUMDB=sum.golang.org
 export GOTOOLCHAIN=go1.25.14

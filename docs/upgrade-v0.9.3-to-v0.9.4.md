@@ -1,6 +1,7 @@
 # Upgrade from v0.9.3 to v0.9.4
 
-`v0.9.4` is the current framework release. Test the upgrade in an
+This guide covers the historical `v0.9.4` framework release. For the current
+release, continue with the [v0.9.5 upgrade guide](upgrade-v0.9.4-to-v0.9.5.md). Test the upgrade in an
 application checkout and keep its current configuration, migrations, and
 database backup available for rollback.
 

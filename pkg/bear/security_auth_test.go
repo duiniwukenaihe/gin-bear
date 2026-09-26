@@ -45,6 +45,67 @@ func TestParseTokenRequiresExpirationClaim(t *testing.T) {
 	}
 }
 
+func TestJWTRejectsNonCanonicalSignatureEncoding(t *testing.T) {
+	util := NewJWTUtil("canonical-token-test-secret", 1)
+	token, err := util.GenerateToken(1, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := util.ParseToken(token); err != nil {
+		t.Fatalf("canonical token rejected: %v", err)
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := strings.IndexByte(alphabet, token[len(token)-1])
+	variants := []string{token + "\r", token + "\n", token + "=", token[:len(token)-2] + "\r\n" + token[len(token)-2:]}
+	for offset := 1; offset <= 3; offset++ {
+		variants = append(variants, token[:len(token)-1]+string(alphabet[last+offset]))
+	}
+	for i, variant := range variants {
+		if _, err := util.ParseToken(variant); err == nil {
+			t.Errorf("accepted non-canonical signature variant %d", i)
+		}
+	}
+}
+
+func TestAuthRevokedTokenRejectsAlternativeSignatureEncodings(t *testing.T) {
+	resetGinModeForTest(t)
+	manager, _ := newSecurityTokenManager(t, 0)
+	config := NewSysConfig()
+	config.SetFrameworkStrict(true)
+	config.Auth.StorageType = "redis"
+	config.Auth.PublicPaths = nil
+	app, err := IgniteE(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+	if err := app.AttachE(&AuthFairing{JWTUtil: manager.JWTUtil, TokenManager: manager}); err != nil {
+		t.Fatal(err)
+	}
+	app.GET("/private", func(ctx *gin.Context) { ctx.Status(http.StatusNoContent) })
+	if err := app.ApplyAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	token, err := manager.GenerateToken(1, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := authenticatedRequest(app, http.MethodGet, "/private", token); response.Code != http.StatusNoContent {
+		t.Fatalf("valid token status = %d", response.Code)
+	}
+	if err := manager.RevokeToken(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := strings.IndexByte(alphabet, token[len(token)-1])
+	for offset := 0; offset <= 3; offset++ {
+		variant := token[:len(token)-1] + string(alphabet[last+offset])
+		if response := authenticatedRequest(app, http.MethodGet, "/private", variant); response.Code != http.StatusUnauthorized {
+			t.Errorf("revoked signature variant %d status = %d, want 401", offset, response.Code)
+		}
+	}
+}
+
 func TestGenerateTokenRejectsNonPositiveExpiration(t *testing.T) {
 	for _, expires := range []int{0, -1} {
 		util := NewJWTUtil("security-test-secret", expires)
@@ -157,6 +218,55 @@ func TestAuthFairingUsesRequestContextForBlacklist(t *testing.T) {
 	if !errors.As(err, &bearErr) || bearErr.Code != http.StatusUnauthorized {
 		t.Fatalf("AuthFairing error = %v, want 401", err)
 	}
+}
+
+func TestAuthFairingFailsClosedWithoutDeclaredRevocationStore(t *testing.T) {
+	util := NewJWTUtil("revocation-required-test-secret", 1)
+	token, err := util.GenerateToken(1, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name    string
+		fairing *AuthFairing
+	}{
+		{name: "missing token manager", fairing: &AuthFairing{JWTUtil: util}},
+		{name: "missing Redis adapter", fairing: &AuthFairing{TokenManager: &AuthTokenManager{JWTUtil: util}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/private", nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = request
+			cfg := NewSysConfig()
+			cfg.Auth.PublicPaths = nil
+			cfg.Auth.StorageType = "redis"
+			ctx.Set(runtimeContextKey, &Runtime{Config: cfg})
+
+			err := tt.fairing.OnRequest(ctx)
+			if !errors.Is(err, ErrTokenRevocationUnavailable) {
+				t.Fatalf("OnRequest error = %v, want %v", err, ErrTokenRevocationUnavailable)
+			}
+			var bearErr *BearError
+			if !errors.As(err, &bearErr) || bearErr.Status != http.StatusServiceUnavailable {
+				t.Fatalf("OnRequest error = %v, want HTTP 503", err)
+			}
+		})
+	}
+	t.Run("stateless JWT remains allowed", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/private", nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = request
+		cfg := NewSysConfig()
+		cfg.Auth.PublicPaths = nil
+		cfg.Auth.StorageType = "jwt"
+		ctx.Set(runtimeContextKey, &Runtime{Config: cfg})
+		if err := (&AuthFairing{JWTUtil: util}).OnRequest(ctx); err != nil {
+			t.Fatalf("stateless OnRequest error = %v", err)
+		}
+	})
 }
 
 func TestParseTokenContextPropagatesCanceledRedisContext(t *testing.T) {
