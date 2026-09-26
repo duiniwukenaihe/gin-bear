@@ -45,6 +45,30 @@ make build
 BEAR_ENV=prod GIN_MODE=release ./bin/migrate
 ```
 
+For container deployments, the image includes `migrations/` from the same
+source revision as the binaries. Supply deployment configuration and secrets
+to both the migration job and the server; the image's base configuration has
+the database disabled. For example, with a reviewed PostgreSQL configuration:
+
+```sh
+docker run --rm --read-only --tmpfs /tmp \
+  --env-file /path/to/service.env \
+  -e BEAR_ENV=prod -e GIN_MODE=release \
+  --mount type=bind,src=/path/to/application-prod.yaml,dst=/app/application-prod.yaml,readonly \
+  --entrypoint /app/migrate my-service:version
+```
+
+The mounted configuration must be readable by the image's non-root UID 65532.
+Keep secrets such as `POSTGRES_PASSWORD` in deployment-managed environment
+injection, and use a database address reachable from the container. Run the
+server with the same image and configuration options, omitting `--entrypoint`.
+
+If a migration reports dirty history, inspect the actual schema before
+resolving that version with `./bin/migrate -force-version 002 -force-applied=true|false`.
+Choose `true` only when the schema is fully applied;
+choose `false` only when it is absent or has been manually rolled back. The
+force operation changes history only and never executes migration SQL.
+
 Runtime features are selected in `application.yaml`: a PostgreSQL database
 does not open SQLite, and disabled Redis, tracing, metrics, and dynamic
 plugins do not start. For a PostgreSQL-only binary without Casbin, use
@@ -102,3 +126,28 @@ The framework owns no backups. The database operator owns them:
 
 `Dockerfile` and `docker-build` are optional for operators who use images;
 native deployments do not depend on them.
+
+## 生产部署要点（简体中文）
+
+配置依次读取基础文件、`BEAR_ENV` 对应环境文件、本地 `config.json` 和环境
+变量。先用 `bear doctor` 检查；需要探测连接时使用 `bear doctor --probe`。
+生产密钥由部署环境注入，不能写入仓库；启用认证时提供足够随机的
+`BEAR_AUTH_JWT_SECRET`，数据库和 Redis 密码也通过环境注入。
+
+服务不会在启动时迁移数据库。先审阅 SQL，使用同一源码版本构建服务端和
+迁移程序，再单独执行迁移。镜像同时包含两个程序和 `migrations/`；基础配置
+默认禁用数据库，迁移任务和服务进程都必须传入正式配置及密钥。挂载配置应
+允许非 root 用户 UID 65532 读取，容器内使用能访问到的数据库地址。
+原生部署、容器挂载及构建标签的完整命令见上文。
+
+遇到脏迁移状态时先核对实际结构。`-force-version` 与
+`-force-applied=true|false` 只更改历史：完整执行才选 `true`，尚未执行或
+已人工回滚才选 `false`，不能以此掩盖失败。已执行的 SQL 保持不变，以新版本
+增加迁移；回滚程序不等于回滚数据库。
+
+`/live` 检查进程存活，`/ready` 检查依赖就绪。进程接收 `SIGTERM` 或
+`SIGINT` 后在配置的关闭时间内排空请求。日志写入标准输出，追踪按需启用。
+数据库备份、恢复演练和回滚决策由运维负责。
+
+升级时在临时副本中比较模板差异、审阅生成代码及 SQL，运行测试和构建，
+使用临时数据库验收迁移、CRUD 及正常退出，再部署同版本的两个程序。

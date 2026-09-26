@@ -1,6 +1,6 @@
 # Production Guide
 
-`v0.9.4` is the current release. This guide also describes the repository source
+`v0.9.5` is the current release. This guide also describes the repository source
 tree and its strict-runtime migration path. Entries under `Unreleased` are not
 a published release until the release gate and tagging process complete.
 
@@ -730,8 +730,17 @@ The runner does not infer this mode from SQL text. Marked PostgreSQL directions
 use the same dirty-state protocol as MySQL.
 
 After a MySQL or marked PostgreSQL `Up` failure, inspect the actual schema before
-resolving the state. Recovery is intentionally available only on the explicit
-dialect runner. If `Up` completed, keep the history row and mark it applied:
+resolving the state. The v0.9.5 generator exposes recovery through `cmd/migrate`;
+older generated projects can review that command update or use the explicit
+dialect runner API. The command requires both flags and never executes migration
+SQL while forcing history state:
+
+```bash
+go run ./cmd/migrate -force-version 002 -force-applied=true  # schema is applied
+go run ./cmd/migrate -force-version 002 -force-applied=false # schema is absent
+```
+
+If `Up` completed, keep the history row and mark it applied through the API:
 
 ```go
 return runner.ForceMigrationState(ctx, "002", true)

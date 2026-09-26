@@ -1,6 +1,7 @@
 package bear
 
 import (
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -39,6 +40,10 @@ func (f *AuthFairing) OnRequest(ctx *gin.Context) error {
 	}
 
 	tokenStr := parts[1]
+	if revocationRequiredForContext(ctx) && !f.TokenManager.revocationAvailable() {
+		return NewStatusError(http.StatusServiceUnavailable, http.StatusServiceUnavailable,
+			"token revocation is unavailable", ErrTokenRevocationUnavailable)
+	}
 
 	// Use TokenManager if available, otherwise fallback to JWTUtil
 	var claims *CustomClaims
@@ -93,6 +98,16 @@ func isPublicAuthPathForContext(ctx *gin.Context, path string) bool {
 
 func (f *AuthFairing) Name() string {
 	return "AuthFairing"
+}
+
+func revocationRequiredForContext(ctx *gin.Context) bool {
+	runtimeValue, exists := ctx.Get(runtimeContextKey)
+	if !exists {
+		return false
+	}
+	runtime, ok := runtimeValue.(*Runtime)
+	return ok && runtime != nil && runtime.Config != nil && runtime.Config.Auth != nil &&
+		strings.EqualFold(strings.TrimSpace(runtime.Config.Auth.StorageType), "redis")
 }
 
 func isPublicAuthPath(path string) bool {

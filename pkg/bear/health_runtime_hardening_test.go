@@ -24,6 +24,92 @@ type countingReadinessChecker struct {
 	panic any
 }
 
+type sharedReadinessChecker struct {
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (*sharedReadinessChecker) Name() string { return "shared" }
+func (c *sharedReadinessChecker) CheckReady(ctx context.Context) error {
+	if c.calls.Add(1) == 1 {
+		close(c.started)
+	}
+	select {
+	case <-c.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestReadinessOverlappingHealthyProbesShareResult(t *testing.T) {
+	checker := &sharedReadinessChecker{started: make(chan struct{}), release: make(chan struct{}, 1)}
+	defer close(checker.release)
+	coordinator := newReadinessCheckCoordinator()
+	first := make(chan []readinessResult, 1)
+	go func() {
+		first <- runReadinessChecksWithCoordinator(context.Background(), time.Second, []ReadinessChecker{checker}, coordinator)
+	}()
+	<-checker.started
+	second := make(chan []readinessResult, 1)
+	go func() {
+		second <- runReadinessChecksWithCoordinator(context.Background(), time.Second, []ReadinessChecker{checker}, coordinator)
+	}()
+	select {
+	case results := <-second:
+		t.Fatalf("overlapping probe returned before the healthy checker completed: %v", results)
+	case <-time.After(30 * time.Millisecond):
+	}
+	checker.release <- struct{}{}
+	for _, done := range []chan []readinessResult{first, second} {
+		select {
+		case results := <-done:
+			if len(results) != 1 || results[0].Err != nil {
+				t.Fatalf("results = %v, want shared healthy result", results)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("probe did not receive shared result")
+		}
+	}
+	if got := checker.calls.Load(); got != 1 {
+		t.Fatalf("checker calls = %d, want 1", got)
+	}
+}
+
+func TestReadinessSharedCheckRetainsCallerDeadlines(t *testing.T) {
+	checker := &sharedReadinessChecker{started: make(chan struct{}), release: make(chan struct{}, 1)}
+	defer close(checker.release)
+	coordinator := newReadinessCheckCoordinator()
+	short, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := make(chan []readinessResult, 1)
+	go func() {
+		first <- runReadinessChecksWithCoordinator(short, time.Second, []ReadinessChecker{checker}, coordinator)
+	}()
+	<-checker.started
+	second := make(chan []readinessResult, 1)
+	go func() {
+		second <- runReadinessChecksWithCoordinator(context.Background(), time.Second, []ReadinessChecker{checker}, coordinator)
+	}()
+	select {
+	case results := <-second:
+		t.Fatalf("second probe returned before completion: %v", results)
+	case <-time.After(30 * time.Millisecond):
+	}
+	cancel()
+	if results := <-first; len(results) != 1 || !errors.Is(results[0].Err, context.Canceled) {
+		t.Fatalf("first results = %v, want caller cancellation", results)
+	}
+	checker.release <- struct{}{}
+	if results := <-second; len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("second results = %v, want healthy result despite first cancellation", results)
+	}
+	if got := checker.calls.Load(); got != 1 {
+		t.Fatalf("checker calls = %d, want 1", got)
+	}
+}
+
 func (c *countingReadinessChecker) Name() string { return c.name }
 
 func (c *countingReadinessChecker) CheckReady(context.Context) error {

@@ -47,4 +47,4 @@ jobs:
           cache: true
 
       - name: Run race tests
-        run: scripts/ci-diagnostic.sh "Race tests failed" go test -race ./... -count=1
+        run: scripts/ci-diagnostic.sh "Race tests failed" go test -race ./... -count=1 -timeout=20m

@@ -269,6 +269,22 @@ func TestServeGRPCBindFailureClosesHTTPAndLifecycle(t *testing.T) {
 	grpcServeAssertClosed(t, probe.stopping, "Lifecycle was not cleaned up after gRPC bind failure")
 }
 
+func TestServeGRPCGracefulWithPersistentHealthWatch(t *testing.T) {
+	const shutdownBudget = 800 * time.Millisecond
+	running := grpcServeStart(t, &grpcServeService{}, grpcServeNewLifecycleProbe("persistent-watch", false), shutdownBudget)
+	unknown, err := healthpb.NewHealthClient(running.conn).Watch(context.Background(), &healthpb.HealthCheckRequest{Service: "unknown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServeExpectHealth(t, unknown, healthpb.HealthCheckResponse_SERVICE_UNKNOWN)
+	running.cancel()
+	grpcServeExpectHealth(t, running.healthWatch, healthpb.HealthCheckResponse_NOT_SERVING)
+	if err := grpcServeWaitServe(t, running.done, shutdownBudget); err != nil {
+		t.Fatalf("Serve with retained health watch = %v, want graceful shutdown", err)
+	}
+	grpcServeExpectHealth(t, unknown, healthpb.HealthCheckResponse_NOT_SERVING)
+}
+
 func TestServeGRPCGracefulCompletesBlockingUnaryWithinDrainBudget(t *testing.T) {
 	const shutdownBudget = 800 * time.Millisecond
 	release := make(chan struct{})
@@ -281,7 +297,6 @@ func TestServeGRPCGracefulCompletesBlockingUnaryWithinDrainBudget(t *testing.T) 
 	shutdownStarted := time.Now()
 	running.cancel()
 	grpcServeExpectHealth(t, running.healthWatch, healthpb.HealthCheckResponse_NOT_SERVING)
-	running.cancelHealthWatch()
 
 	grpcServeAssertOpen(t, probe.stopping, "Lifecycle stopped while unary RPC was draining")
 	close(release)
