@@ -38,6 +38,29 @@ func TestCheckCoverageScriptAcceptsProfileAtThreshold(t *testing.T) {
 	}
 }
 
+func TestCheckCoverageScriptAcceptsZeroStatementBlocksWithoutChangingCoverage(t *testing.T) {
+	profile := writeManifestCoverageProfile(t, "pkg/bear/binding.go", 1, 1, "")
+	before, err := runCoverageCheck(profile, "1", "50")
+	if err != nil {
+		t.Fatalf("baseline coverage: %v\n%s", err, before)
+	}
+	contents := readTestFile(t, profile)
+	// Go emits zero-statement blocks for empty select cases, whether the
+	// branch was visited or not. They must not affect either coverage total.
+	contents += "github.com/duiniwukenaihe/gin-bear/pkg/bear/grpc_runtime.go:83.18,83.18 0 1\n"
+	contents += "github.com/duiniwukenaihe/gin-bear/pkg/bear/health.go:222.30,222.30 0 0\n"
+	if err := os.WriteFile(profile, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := runCoverageCheck(profile, "1", "50")
+	if err != nil {
+		t.Fatalf("valid zero-statement blocks rejected: %v\n%s", err, after)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("zero-statement blocks changed coverage:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
 func TestCheckCoverageScriptRejectsProfileBelowThreshold(t *testing.T) {
 	profile := writeManifestCoverageProfile(t, "pkg/bear/binding.go", 0, 100, "")
 
@@ -137,7 +160,7 @@ func TestCheckCoverageScriptRejectsMalformedProfiles(t *testing.T) {
 		{name: "no statements", profile: "mode: set\n"},
 		{name: "missing mode", profile: strings.TrimPrefix(valid, "mode: set\n")},
 		{name: "extra field", profile: strings.Replace(valid, validLine, validLine+" extra", 1)},
-		{name: "zero statements", profile: strings.Replace(valid, validLine, replaceCoverageCounts(t, validLine, "0", "1"), 1)},
+		{name: "zero total statements", profile: "mode: set\n" + replaceCoverageCounts(t, validLine, "0", "1") + "\n"},
 		{name: "negative statements", profile: strings.Replace(valid, validLine, replaceCoverageCounts(t, validLine, "-1", "1"), 1)},
 		{name: "negative count", profile: strings.Replace(valid, validLine, replaceCoverageCounts(t, validLine, "1", "-1"), 1)},
 		{name: "decimal count", profile: strings.Replace(valid, validLine, replaceCoverageCounts(t, validLine, "1", "1.5"), 1)},

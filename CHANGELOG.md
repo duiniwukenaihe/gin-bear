@@ -34,6 +34,9 @@ Go 1.26.6 remains required; no framework schema migration is introduced.
   of mismatched framework versions before creating a project. Local-checkout E2E builds explicitly disable VCS
   version stamping so clean release tags can run the same development fixtures.
 
+- Coverage validation accepts Go-generated zero-statement blocks without
+  changing coverage totals or release thresholds.
+
 ### Release and documentation
 
 - Publish the matching bilingual changelog in GitHub release notes and keep
@@ -52,6 +55,7 @@ Go 1.26.6 remains required; no framework schema migration is introduced.
 - 生产镜像打包迁移 SQL；生成的迁移程序提供人工核验后的脏状态恢复参数。
 - 修复版本标签下的生成器验证；更新中英文 README、升级说明和发布说明。
   完整测试包的时间预算调整为 20 分钟，所有验证项目继续执行。
+- 覆盖率检查正确处理 Go 生成的零语句区间，保留覆盖率统计和发布门槛。
 
 ## [v0.9.4] - 2026-09-23
 
